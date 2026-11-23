@@ -162,8 +162,10 @@ it had not pressed ready («не нажал готово (закрыто по т
 `dah-waker`, counted for the phase each figure is for); per seat money and time «во время партии» and «после
 game_over» apart (what the session spent while it wrapped up after the match; both times on the journal clock,
 shown only for seats with after-game data, as on /watch); waker telemetry and the turn where
-the money ran out. `--json` prints the same as JSON (`submits_by_phase`, `no_orders_turns`, `not_ready_phases`,
-`spent_in_game_usd`, `spent_after_game_usd`, `in_game_s`, `after_game_s`, `post_game_watch_s`, ...).
+the money ran out; per seat the waker's phase wakes («пробуждения: отправлено / ответ / без ответа, медиана до хода»:
+wakes sent, answered and unanswered within `--ack-seconds`, the median seconds to the first game call after a wake). `--json` prints the same as JSON (`submits_by_phase`, `no_orders_turns`, `not_ready_phases`,
+`spent_in_game_usd`, `spent_after_game_usd`, `in_game_s`, `after_game_s`, `post_game_watch_s`, `wakes_sent`,
+`wakes_answered`, `wakes_unanswered`, `wake_answer_median_s`, ...).
 
 ### `dah replay ID`
 

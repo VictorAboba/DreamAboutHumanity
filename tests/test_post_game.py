@@ -71,6 +71,7 @@ class ScriptedDreamTeam:
         self.stop_reply = stop_reply
         self.cost = 0.0
         self.continues: list[tuple[float, str]] = []
+        self.messages: list[tuple[float, str]] = []  # wakes sent to all members (`--wake-mode all`, the default)
         self.stops: list[httpx.Request] = []
         self.reads_after = 0
 
@@ -99,6 +100,11 @@ class ScriptedDreamTeam:
             if self.over_continue and self.clock.now >= GAME_END:
                 return httpx.Response(self.over_continue[0], json=self.over_continue[1])
             return httpx.Response(200, json={"session": {"id": SESSION, "state": "running", "cost_usd": self.cost}})
+        if request.method == "POST" and path == f"/api/v1/sessions/{SESSION}/messages":
+            self.messages.append((self.clock.now, json.loads(request.content)["text"]))
+            if self.over_continue and self.clock.now >= GAME_END:
+                return httpx.Response(self.over_continue[0], json=self.over_continue[1])
+            return httpx.Response(201, json={"message": {"id": len(self.messages), "to": ["all"]}})
         if request.method == "POST" and path == f"/api/v1/sessions/{SESSION}/stop":
             self.stops.append(request)
             if self.stop_reply:
@@ -117,7 +123,7 @@ def run_waker(game: OverGame, dt: ScriptedDreamTeam, clock: Clock, **kwargs: Any
 
 
 def wrap_ups(dt: ScriptedDreamTeam) -> list[str]:
-    return [text for _, text in dt.continues if text.startswith("[DAH] Партия окончена")]
+    return [text for _, text in dt.continues + dt.messages if text.startswith("[DAH] Партия окончена")]
 
 
 # ---------------------------------------------------------------- waker: the wrap-up continue
@@ -131,13 +137,14 @@ def test_wrap_up_continue_is_sent_once_with_the_result():
     run_waker(game, dt, clock)
 
     texts = wrap_ups(dt)
-    assert len(texts) == 1 and len(dt.continues) == 7  # six phase wakes (open + reminder) and the wrap-up
+    # six phase wakes (open + reminder) and the wrap-up, all as messages to every member; no continue
+    assert len(texts) == 1 and len(dt.messages) == 7 and dt.continues == []
     assert texts[0] == ("[DAH] Партия окончена: ход 1, лимит ходов, победитель B; ты A, твоё место 2 из 3; счёт: "
                         "B 12, A 9, C 4. Заверши цель одним коротким итоговым сообщением, больше ничего не делай.")
-    assert dt.continues[-1][0] == GAME_END
+    assert dt.messages[-1][0] == GAME_END
     assert dt.stops == []
-    assert game.detail("continue_sent")[-1]["reason"] == "game_over"
-    assert [d["reason"] for d in game.detail("continue_sent")].count("game_over") == 1
+    assert game.detail("wake_sent")[-1]["reason"] == "game_over"
+    assert [d["reason"] for d in game.detail("wake_sent")].count("game_over") == 1
     finished = game.detail("post_game_finished")
     assert len(finished) == 1 and finished[0]["reason"] == "stopped"
 
@@ -170,7 +177,7 @@ def test_stop_flag_stops_the_session_instead_of_the_wrap_up():
     dt = ScriptedDreamTeam(clock, [{"state": "stopped", "final": True, "spend": 0.01}])
     run_waker(game, dt, clock, stop_on_game_over=True)
 
-    assert wrap_ups(dt) == [] and len(dt.continues) == 6
+    assert wrap_ups(dt) == [] and len(dt.messages) == 6
     assert len(dt.stops) == 1
     stop = dt.stops[0]
     assert stop.headers["content-type"] == "application/json" and json.loads(stop.content) == {}
@@ -344,9 +351,9 @@ def test_waker_started_after_game_over_sends_no_second_wrap_up():
                                        {"state": "done", "final": True, "spend": 0.01}])
         waker = run_waker(game, dt, clock, stop_on_game_over=stop)
         assert waker.started_after_game_over
-        assert dt.continues == [] and dt.stops == []
+        assert dt.continues == dt.messages == [] and dt.stops == []
         assert game.detail("continue_skipped")[-1]["reason"] == "started_after_game_over"
-        assert "continue_sent" not in game.kinds()
+        assert "wake_sent" not in game.kinds()
         # every figure of this process is after-game money, the first one (the baseline) too
         assert [s.get("phase") for s in game.spend] == ["after_game_over"] * 3
         assert all("turn" not in s for s in game.spend)
@@ -373,8 +380,8 @@ def test_wrap_up_refused_with_budget_exhausted():
     waker = run_waker(game, dt, clock)
     assert len(wrap_ups(dt)) == 1 and waker.budget_exhausted
     exhausted = game.detail("budget_exhausted")
-    assert len(exhausted) == 1 and exhausted[0]["reason"] == "game_over" and exhausted[0]["via"] == "continue"
-    assert [d["reason"] for d in game.detail("continue_sent")].count("game_over") == 0
+    assert len(exhausted) == 1 and exhausted[0]["reason"] == "game_over" and exhausted[0]["via"] == "messages"
+    assert [d["reason"] for d in game.detail("wake_sent")].count("game_over") == 0
     assert "wake_failed" not in game.kinds()
 
 

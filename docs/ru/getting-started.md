@@ -160,9 +160,12 @@ uv run dah bots run --game ID [--server http://127.0.0.1:8800] [--games-dir game
 не нажало ready («не нажал готово (закрыто по таймеру)»); счёт по ходам; деньги по ходам и фазам (от `dah-waker`,
 за ту фазу, к которой относится цифра); по каждому месту деньги и время «во время партии» и «после game_over»
 отдельно (сколько сессия потратила, подводя итог после партии; оба времени по часам журнала; только у мест с данными
-после game_over, как на /watch); телеметрия waker и ход, на котором кончились деньги.
+после game_over, как на /watch); телеметрия waker и ход, на котором кончились деньги; по каждому месту пробуждения
+waker («пробуждения: отправлено / ответ / без ответа, медиана до хода»: с ответом за `--ack-seconds` и без, медиана
+секунд до первого вызова игры после пробуждения).
 `--json` печатает то же в JSON (`submits_by_phase`, `no_orders_turns`, `not_ready_phases`, `spent_in_game_usd`,
-`spent_after_game_usd`, `in_game_s`, `after_game_s`, `post_game_watch_s`, ...).
+`spent_after_game_usd`, `in_game_s`, `after_game_s`, `post_game_watch_s`, `wakes_sent`, `wakes_answered`,
+`wakes_unanswered`, `wake_answer_median_s`, ...).
 
 ### `dah replay ID`
 

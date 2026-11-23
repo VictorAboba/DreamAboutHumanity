@@ -351,12 +351,12 @@ def test_waker_skips_continue_when_player_waits_and_keeps_the_reminder():
 
     game, dt = WaitingGame(clock), FakeDreamTeam(clock)
     run(game, dt, clock)
-    assert [text for _, text in dt.continues if not text.startswith("[DAH] Напоминание")] == []
-    assert len(dt.continues) == len(PHASES)  # the deadline reminders are still sent
+    assert [text for _, text in dt.wakes() if not text.startswith("[DAH] Напоминание")] == []
+    assert len(dt.wakes()) == len(PHASES)  # the deadline reminders are still sent
     skipped = [t for t in game.telemetry if t["kind"] == "continue_skipped"]
     assert [(s["detail"]["reason"], s["detail"]["phase"]) for s in skipped] == [
         ("player_waiting", phase) for phase in PHASES]
-    assert all(at == T0 + i * 600 + 540 for i, (at, _) in enumerate(dt.continues))
+    assert all(at == T0 + i * 600 + 540 for i, (at, _) in enumerate(dt.wakes()))
 
 
 def test_waker_skips_continue_when_player_just_called():
@@ -375,7 +375,7 @@ def test_waker_skips_continue_when_player_just_called():
     run(game, dt, clock)
     reasons = [t["detail"]["reason"] for t in game.telemetry if t["kind"] == "continue_skipped"]
     assert reasons == ["player_active"]
-    opens = [text for _, text in dt.continues if not text.startswith("[DAH] Напоминание")]
+    opens = [text for _, text in dt.wakes() if not text.startswith("[DAH] Напоминание")]
     assert len(opens) == 2  # П1 and П2 still woken
 
 
@@ -395,9 +395,12 @@ def test_waker_wakes_a_stopped_session_even_if_its_poll_is_pending():
     dt.session["state"] = "stopped"  # the agent is gone, its wait_phase still pending on the server
     run(game, dt, clock)
     assert "continue_skipped" not in game.kinds()
-    opens = [t["detail"] for t in game.telemetry if t["kind"] == "continue_sent"
+    opens = [t["detail"] for t in game.telemetry if t["kind"] == "wake_sent"
              and t["detail"]["reason"] == "phase_open"]
     assert [o["phase"] for o in opens] == list(PHASES)
+    # a stopped session gets no message (it would be 409 not_running): continue starts it again
+    assert all(o["via"] == "continue" and o["fallback"] == "session_stopped" for o in opens)
+    assert dt.messages == []
 
 
 def test_waker_skip_detail_carries_the_session_state():

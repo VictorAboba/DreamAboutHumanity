@@ -1,5 +1,13 @@
 """The waker loop: follow the game's phases and wake a DreamTeam session when its seat has to act; after game_over,
-ask the session to wrap up (or stop it) and keep reporting its spend until it is stopped or idle."""
+ask the session to wrap up (or stop it) and keep reporting its spend until it is stopped or idle.
+
+A wake goes to every member of a running session as a message to `["all"]` (`--wake-mode all`, the default): a
+`continue` reaches only the coordinator, who may be off duty while another member holds the seat's turns. A stopped
+session answers such a message 409 `not_running`; then the wake falls back to `continue`, which starts it again.
+A message does not reopen a completed goal, resume a session the user paused, or answer a request that blocks the
+work: a phase wake of a session in state `done` (or with a done goal), `paused` or `waiting` is a `continue` too.
+`--wake-mode continue` is the old way, `both` sends the message and the `continue`. After a phase wake the waker
+watches the player's own game calls (host-only presence fields) and records `wake_answered` or `wake_unanswered`."""
 
 from __future__ import annotations
 
@@ -30,6 +38,21 @@ AFTER_GAME_OVER = "after_game_over"
 # a review or an approval, or paused by the user) and may spend again once resumed, so the watch keeps polling it.
 IDLE_STATES = frozenset({"done", "budget"})
 IDLE_POLLS = 2
+WAKE_MODES = ("all", "continue", "both")
+DEFAULT_WAKE_MODE = "all"
+TO_ALL = ["all"]
+# `continue` goes to the coordinator (the member who holds the planning task, else the first agent).
+TO_COORDINATOR = ["coordinator"]
+# A wake counts as answered when a player call of that seat comes in the same phase within ACK_SECONDS; while one
+# is pending the game is polled at least every ACK_POLL_SECONDS.
+ACK_SECONDS = 120.0
+ACK_POLL_SECONDS = 15.0
+# Summary states (or `final: true`) of a session that is not running: a message would get 409 `not_running`.
+NOT_RUNNING_STATES = frozenset({"stopped", "failed", "created"})
+# Summary states of a running session that a message to members does not get playing again, but `continue` does: it
+# reopens a completed goal, resumes a session the user paused, answers a pending question (http-api.md, "The next
+# instruction"). The value is the wake's `fallback`.
+CONTINUE_STATES = {"done": "goal_done", "paused": "paused", "waiting": "waiting"}
 
 
 def _stderr(message: str) -> None:
@@ -40,7 +63,10 @@ class Waker:
     def __init__(self, game: GameClient, dreamteam: DreamTeamClient, session_id: str, *,
                  clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
                  log: Callable[[str], None] = _stderr, stop_on_game_over: bool = False,
-                 post_game_minutes: float = POST_GAME_MINUTES):
+                 post_game_minutes: float = POST_GAME_MINUTES, wake_mode: str = DEFAULT_WAKE_MODE,
+                 ack_seconds: float = ACK_SECONDS):
+        if wake_mode not in WAKE_MODES:
+            raise ValueError(f"wake_mode must be one of {', '.join(WAKE_MODES)}")
         self._game = game
         self._dt = dreamteam
         self._session_id = session_id
@@ -62,6 +88,10 @@ class Waker:
         # True when the first poll of this process already saw game_over (a waker started or restarted after the
         # match): the wrap-up was due to an earlier process, so it is not sent again.
         self.started_after_game_over = False
+        self.wake_mode = wake_mode
+        self.ack_seconds = max(0.0, ack_seconds)
+        # The last phase wake not yet answered: {at, turn, phase, seq, reason} (`at` on this process's clock).
+        self._pending_ack: dict[str, Any] | None = None
 
     # --- loop ---------------------------------------------------------------------------------------------
 
@@ -95,6 +125,7 @@ class Waker:
             return False
         if self._link_pending:  # the game server was not up when run() started
             self.link_session()
+        self._check_ack(info)
         if info.get("game_over"):
             self._over_info = info
             if self._phase_key is None:  # no phase seen by this process: the figure is post-game spend
@@ -102,6 +133,7 @@ class Waker:
                 self._report_spend(None, after_game=True)
             else:
                 self._report_spend(self._phase_key)
+            self._pending_ack = None  # _check_ack above resolved it with the game_over info
             self._log("партия окончена")
             return True
         key = (info.get("turn"), info.get("phase"))
@@ -171,8 +203,88 @@ class Waker:
         return left is not None and left <= 0 < (self._deadline_at or 0) - self._clock()
 
     def _wait_seconds(self) -> float:
+        wait = float(POLL_SECONDS)
         left = self._until_reminder()
-        return POLL_SECONDS if left is None else max(1.0, min(POLL_SECONDS, left))
+        if left is not None:
+            wait = min(wait, left)
+        if self._pending_ack is not None:
+            wait = min(wait, ACK_POLL_SECONDS, self._pending_ack["at"] + self.ack_seconds - self._clock())
+        return max(1.0, wait)
+
+    # --- did the wake reach someone who plays? ---------------------------------------------------------------
+
+    def _check_ack(self, info: dict[str, Any]) -> None:
+        """Resolve the pending phase wake from the host-only presence fields: `wake_answered` {seconds} once a player
+        call of this seat came after the wake in the same phase within ack_seconds, `wake_unanswered` {seconds} once
+        ack_seconds passed (or the phase closed) without one. With `player_calls` (the seat's recent calls) the
+        answer is the first call after the wake that is not a phase-status read (`phase`, `wait_phase`): a member
+        that only waits again has not played; such a wake is `wake_unanswered` with `passive_only`."""
+        pending = self._pending_ack
+        if pending is None:
+            return
+        calls = info.get("player_calls")
+        if not isinstance(calls, list):  # a game server of an earlier version
+            self._check_ack_presence(info)
+            return
+        now, at = self._clock(), pending["at"]
+        answer, passive = None, False
+        for call in calls:
+            if not isinstance(call, dict) or call.get("phase_seq") != pending["seq"]:
+                continue
+            ago = _number(call.get("s_ago"))
+            if ago is None or now - ago < at:
+                continue
+            if call.get("passive"):
+                passive = passive or now - ago - at <= self.ack_seconds
+            elif answer is None or now - ago < answer:
+                answer = now - ago
+        if answer is not None and answer - at <= self.ack_seconds:
+            self._ack_resolved("wake_answered", answer - at)
+            return
+        closed = info.get("phase_seq") != pending["seq"] or bool(info.get("game_over"))
+        if closed or now - at >= self.ack_seconds:
+            extra: dict[str, Any] = {"phase_closed": True} if closed else {}
+            if passive:
+                extra["passive_only"] = True
+            self._ack_resolved("wake_unanswered", now - at, **extra)
+
+    def _check_ack_presence(self, info: dict[str, Any]) -> None:
+        """_check_ack from the presence fields of an earlier game server (no `player_calls`): in the wake's phase the
+        first call of the phase (`player_first_active_s_ago`) when it came after the wake, else the last one
+        (`player_active_s_ago`); after the phase changed, `player_last_call` names the last call and its phase."""
+        pending = self._pending_ack
+        if pending is None:
+            return
+        now, at = self._clock(), pending["at"]
+        if info.get("phase_seq") == pending["seq"] and not info.get("game_over"):
+            call_at = None
+            for field_name in ("player_first_active_s_ago", "player_active_s_ago"):
+                ago = _number(info.get(field_name))
+                if ago is not None and now - ago >= at:
+                    call_at = now - ago
+                    break
+            if call_at is not None and call_at - at <= self.ack_seconds:
+                self._ack_resolved("wake_answered", call_at - at)
+            elif now - at >= self.ack_seconds:
+                self._ack_resolved("wake_unanswered", now - at)
+            return
+        last = info.get("player_last_call")
+        if isinstance(last, dict) and last.get("phase_seq") == pending["seq"]:
+            ago = _number(last.get("s_ago"))
+            if ago is not None and 0 <= now - ago - at <= self.ack_seconds:
+                self._ack_resolved("wake_answered", now - ago - at)
+                return
+        self._ack_resolved("wake_unanswered", now - at, phase_closed=True)
+
+    def _ack_resolved(self, kind: str, seconds: float, **extra: Any) -> None:
+        pending, self._pending_ack = self._pending_ack, None
+        if pending is None:
+            return
+        detail = {"turn": pending["turn"], "phase": pending["phase"], "reason": pending["reason"],
+                  "seconds": round(max(0.0, seconds), 1), **extra}
+        if kind == "wake_unanswered":
+            detail["ack_seconds"] = self.ack_seconds
+        self._telemetry(kind, detail)
 
     # --- waking -------------------------------------------------------------------------------------------
 
@@ -181,27 +293,86 @@ class Waker:
             return
         where = {"reason": reason, "turn": self._info.get("turn"), "phase": self._info.get("phase")}
         before = self._dt.get_session(self._session_id)
-        resp, attempts = self._continue(wake_text(self._info, reminder=reason == "reminder"))
+        # `at`: when the wake was out (after any retries), not when the waker began to send it
+        at = self._deliver(wake_text(self._info, reminder=reason == "reminder"), where, before, restart=True)
+        if at is not None:
+            if self._pending_ack is not None:  # an earlier wake of this phase, still unanswered
+                self._ack_resolved("wake_unanswered", at - self._pending_ack["at"], superseded=True)
+            self._pending_ack = {"at": at, "turn": where["turn"], "phase": where["phase"], "seq": self._seq,
+                                 "reason": reason}
+
+    def _deliver(self, text: str, where: dict[str, Any], before: DtResponse | None, *,
+                 restart: bool) -> float | None:
+        """Send one wake as the wake mode says; the clock time when some member got it (the successful send
+        returned), None when nobody did. `restart`: a stopped session may be started again, and a completed, paused
+        or blocked one woken, with `continue` (phase wakes); without it (the wrap-up) a stopped session is left
+        alone and any other gets the message only."""
+        mode = self.wake_mode
+        if mode == "continue":
+            return self._send_continue(text, where, before)
+        if before is not None and before.ok and _not_running(before.session):
+            if restart:
+                return self._send_continue(text, where, before, fallback="session_stopped")
+            self._telemetry("continue_skipped", {**where, "reason": "not_running", "mode": mode,
+                                                 "session_state": before.session.get("state")})
+            return None
+        blocked = _needs_continue(before.session) if before is not None and before.ok else None
+        if restart and blocked and mode == "all":  # `both` sends the continue after the message anyway
+            return self._send_continue(text, where, before, fallback=blocked)
+        resp, attempts = self._retry(lambda: self._dt.send_message(self._session_id, text, TO_ALL), "messages")
         if resp.ok:
-            self._telemetry("continue_sent", {**where, "state": resp.session.get("state")})
-            if before.ok:
+            sent_at = self._clock()
+            self._telemetry("wake_sent", {**where, "mode": mode, "via": "messages", "to": TO_ALL,
+                                          "status": resp.status})
+            if mode == "both" and restart:
+                self._send_continue(text, where, before, also=True)
+            return sent_at
+        if resp.code == "budget_exhausted":
+            self._exhaust({**where, "via": "messages"})
+            return None
+        if resp.code != "not_running":
+            self._telemetry("wake_failed", {**where, "mode": mode, "via": "messages", "to": TO_ALL,
+                                            "status": resp.status, "code": resp.code, "attempts": attempts})
+        if not restart:
+            if resp.code == "not_running":
+                self._telemetry("continue_skipped", {**where, "reason": "not_running", "mode": mode})
+            return None
+        return self._send_continue(text, where, before, fallback=resp.code)
+
+    def _send_continue(self, text: str, where: dict[str, Any], before: DtResponse | None, *,
+                       fallback: str | None = None, also: bool = False) -> float | None:
+        """`continue` with the wake text; the clock time when it was taken, or None."""
+        resp, attempts = self._retry(lambda: self._dt.continue_session(self._session_id, text), "continue")
+        if resp.ok:
+            sent_at = self._clock()
+            detail = {**where, "mode": self.wake_mode, "via": "continue", "to": TO_COORDINATOR,
+                      "status": resp.status, "state": resp.session.get("state")}
+            if fallback:
+                detail["fallback"] = fallback
+            if also:
+                detail["also"] = True
+            self._telemetry("wake_sent", detail)
+            if before is not None and before.ok:
                 self._compare(before.session, resp.session, where)
-        elif resp.code == "budget_exhausted":
+            return sent_at
+        if resp.code == "budget_exhausted":
             self._exhaust({**where, "via": "continue"})
         else:
-            self._telemetry("wake_failed", {**where, "status": resp.status, "code": resp.code,
+            self._telemetry("wake_failed", {**where, "mode": self.wake_mode, "via": "continue",
+                                            "to": TO_COORDINATOR, "status": resp.status, "code": resp.code,
                                             "attempts": attempts})
+        return None
 
-    def _continue(self, text: str) -> tuple[DtResponse, int]:
+    def _retry(self, send: Callable[[], DtResponse], label: str) -> tuple[DtResponse, int]:
         attempts = 1
-        resp = self._dt.continue_session(self._session_id, text)
+        resp = send()
         for delay in RETRY_DELAYS:
             if not resp.retryable:
                 break
-            self._log(f"DreamTeam ответил {resp.status} {resp.code}, повтор через {delay} с")
+            self._log(f"DreamTeam ответил {resp.status} {resp.code} на {label}, повтор через {delay} с")
             self._sleep(delay)
             attempts += 1
-            resp = self._dt.continue_session(self._session_id, text)
+            resp = send()
         return resp, attempts
 
     def _compare(self, before: dict[str, Any], after: dict[str, Any], where: dict[str, Any]) -> None:
@@ -250,7 +421,8 @@ class Waker:
     # --- after game_over ------------------------------------------------------------------------------------
 
     def after_game_over(self) -> None:
-        """The one wrap-up `continue` (or `stop` with --stop-on-game-over), then a read of the session summary every
+        """The one wrap-up (a message to all members; `continue` with --wake-mode continue; a stopped session is not
+        started again for it) or `stop` with --stop-on-game-over, then a read of the session summary every
         POST_GAME_POLL_SECONDS, each new cost posted as `/v1/spend` with phase `after_game_over`, until the session is
         stopped (`final`) or idle (`done`/`budget` and no new spend over IDLE_POLLS reads in a row), or
         post_game_minutes have passed. A waker whose first poll already saw game_over sends neither the wrap-up nor
@@ -333,13 +505,10 @@ class Waker:
             if exc.status in (401, 403):
                 raise
             self._log(f"whoami: {exc.code} {exc.message}")
-        resp, attempts = self._continue(wrap_up_text(self._over_info, seat if isinstance(seat, str) else None))
-        if resp.ok:
-            self._telemetry("continue_sent", {**where, "state": resp.session.get("state")})
-        elif resp.code == "budget_exhausted":
-            self._exhaust({**where, "via": "continue"})
-        else:
-            self._telemetry("wake_failed", {**where, "status": resp.status, "code": resp.code, "attempts": attempts})
+        restart = self.wake_mode == "continue"  # a message never starts a stopped session just to wrap up
+        self._deliver(wrap_up_text(self._over_info, seat if isinstance(seat, str) else None), where,
+                      DtResponse(200, None, {"session": self._session}) if self._session else None,
+                      restart=restart)
 
     def _stop(self) -> None:
         attempts = 1
@@ -365,6 +534,27 @@ class Waker:
             self._game.telemetry(kind, detail)
         except GameApiError as exc:
             self._log(f"не удалось отправить телеметрию {kind}: {exc.code} {exc.message}")
+
+
+def _number(value: Any) -> float | None:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def _not_running(session: dict[str, Any]) -> bool:
+    """The summary says a message would get 409 `not_running`: stopped for good, or a stopped/failed/never
+    started state."""
+    return session.get("final") is True or session.get("state") in NOT_RUNNING_STATES
+
+
+def _needs_continue(session: dict[str, Any]) -> str | None:
+    """Why a message to members would not get this running session playing, but `continue` would: its goal is
+    completed (`goal_done`), the user paused it (`paused`), or a request blocks the work (`waiting`). None
+    otherwise."""
+    goal = session.get("goal") if isinstance(session.get("goal"), dict) else {}
+    if goal.get("status") == "done":
+        return "goal_done"
+    state = session.get("state")
+    return CONTINUE_STATES.get(state) if isinstance(state, str) else None
 
 
 def _cost(session: dict[str, Any] | None) -> float | None:

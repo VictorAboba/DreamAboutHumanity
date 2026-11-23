@@ -1,4 +1,4 @@
-"""Client of the DreamTeam HTTP API (/api/v1): the session summary, `continue` and `stop`."""
+"""Client of the DreamTeam HTTP API (/api/v1): the session summary, messages to members, `continue` and `stop`."""
 
 from __future__ import annotations
 
@@ -61,6 +61,10 @@ class DreamTeamClient:
     def continue_session(self, session_id: str, text: str) -> DtResponse:
         return self._send("POST", f"/sessions/{session_id}/continue", {"text": text})
 
+    def send_message(self, session_id: str, text: str, to: list[str] | None = None) -> DtResponse:
+        """A message from the user to members of a running session (`["all"]` by default): 201, or 409
+        `not_running` for a stopped session (which a message does not start; `continue` does)."""
+        return self._send("POST", f"/sessions/{session_id}/messages", {"to": to or ["all"], "text": text})
 
     def stop_session(self, session_id: str) -> DtResponse:
         """Stop the session and its background jobs (reason `user`). The body is `{}`: DreamTeam wants

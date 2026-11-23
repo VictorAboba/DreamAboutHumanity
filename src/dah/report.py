@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from statistics import median
 from typing import Any
 
 PHASE_SHORT = {"negotiation_1": "П1", "actions": "Д", "negotiation_2": "П2"}
@@ -25,7 +26,17 @@ def _seat_total() -> dict[str, Any]:
             "submit_rejected": 0, "submits_by_phase": {p: 0 for p in PHASE_ORDER}, "idle_resources": {},
             "idle_units": 0, "no_orders_turns": [], "not_ready_phases": [], "spent_usd": None,
             "budget_exhausted_turn": None, "telemetry": {}, "spent_in_game_usd": None,
-            "spent_after_game_usd": None, "in_game_s": None, "after_game_s": None, "post_game_watch_s": None}
+            "spent_after_game_usd": None, "in_game_s": None, "after_game_s": None, "post_game_watch_s": None,
+            "wakes_sent": 0, "wakes_answered": 0, "wakes_unanswered": 0, "wake_answer_median_s": None}
+
+
+def _phase_wake(kind: str, detail: Any) -> bool:
+    """One phase wake delivered by dah-waker: `wake_sent` (not the extra `continue` of `--wake-mode both`) or an older
+    waker's `continue_sent`, but not the wrap-up after game_over."""
+    detail = detail if isinstance(detail, dict) else {}
+    if detail.get("reason") == "game_over":
+        return False
+    return kind == "continue_sent" or (kind == "wake_sent" and not detail.get("also"))
 
 
 def _after_game_figure(ev: dict[str, Any]) -> bool:
@@ -53,6 +64,9 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
     journal clock: `in_game_s` from the first phase to game_over, `after_game_s` from game_over to the waker's
     `post_game_finished` (else to its last after-game figure); `post_game_watch_s` is the waker's own measure of
     its watch (`duration_s`).
+    Wakes (dah-waker): `wakes_sent` phase wakes delivered (the wrap-up not counted), `wakes_answered` /
+    `wakes_unanswered` from its `wake_answered` / `wake_unanswered`, `wake_answer_median_s` the median seconds from a
+    wake to the player's first game call after it.
     """
     report: dict[str, Any] = {"game_id": None, "scenario": None, "rules_chars": None, "seats": {}, "phases": [],
                               "turns": [], "totals": {}, "result": None}
@@ -78,6 +92,7 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
     over_ts: float | None = None
     after_spend: dict[str, tuple[float, float]] = {}  # seat -> (last after_game_over figure, its ts)
     post_game: dict[str, tuple[dict[str, Any], float]] = {}  # seat -> (detail of its last `post_game_finished`, ts)
+    answer_s: dict[str, list[float]] = {}  # seat -> seconds of each answered wake
 
     for ev in events:
         kind = ev["type"]
@@ -186,6 +201,15 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
             totals["spent_usd"] = ev["spent_usd"]
         elif kind == "telemetry" and totals is not None:
             totals["telemetry"][ev["kind"]] = totals["telemetry"].get(ev["kind"], 0) + 1
+            detail = ev.get("detail") if isinstance(ev.get("detail"), dict) else {}
+            if _phase_wake(ev["kind"], detail):
+                totals["wakes_sent"] += 1
+            elif ev["kind"] == "wake_answered":
+                totals["wakes_answered"] += 1
+                if isinstance(detail.get("seconds"), (int, float)) and not isinstance(detail["seconds"], bool):
+                    answer_s.setdefault(seat, []).append(float(detail["seconds"]))
+            elif ev["kind"] == "wake_unanswered":
+                totals["wakes_unanswered"] += 1
             if ev["kind"] == "post_game_finished" and isinstance(ev.get("detail"), dict):
                 post_game[seat] = (ev["detail"], ev["ts"])
             if ev["kind"] == "budget_exhausted" and totals["budget_exhausted_turn"] is None:
@@ -199,6 +223,8 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
     report["in_game_s"] = in_game_s
     for seat, totals in report["totals"].items():
         totals["in_game_s"] = in_game_s
+        if answer_s.get(seat):
+            totals["wake_answer_median_s"] = round(median(answer_s[seat]), 1)
         detail, finished_ts = post_game.get(seat, ({}, None))
         at_over = detail.get("cost_at_game_over_usd")
         if (isinstance(at_over, (int, float)) and not isinstance(at_over, bool)
@@ -237,6 +263,14 @@ def _money_split(t: dict[str, Any]) -> str:
             f"{_usd(t.get('spent_after_game_usd'))}, {_secs(t.get('after_game_s'))})")
 
 
+def _wakes(t: dict[str, Any]) -> str:
+    """`; пробуждения: отправлено 6, ответ 4, без ответа 2, медиана до хода 35.0с` for a seat a waker woke."""
+    if not (t.get("wakes_sent") or t.get("wakes_answered") or t.get("wakes_unanswered")):
+        return ""
+    return (f"; пробуждения: отправлено {t['wakes_sent']}, ответ {t['wakes_answered']}, без ответа "
+            f"{t['wakes_unanswered']}, медиана до хода {_secs(t.get('wake_answer_median_s'))}")
+
+
 def render_report(report: dict[str, Any]) -> str:
     """Russian text version of build_report()."""
     nick = {s: info["nick"] for s, info in report["seats"].items()}
@@ -266,7 +300,7 @@ def render_report(report: dict[str, Any]) -> str:
             f"{t['idle_units']}; не подал приказов в ходах {t['no_orders_turns'] or '—'}; не нажал готово "
             f"(закрыто по таймеру): {not_ready}; деньги {money}{_money_split(t)}"
             + (f", кончились на ходу {t['budget_exhausted_turn']}" if t["budget_exhausted_turn"] else "")
-            + f"; телеметрия: {telemetry}")
+            + _wakes(t) + f"; телеметрия: {telemetry}")
     lines.append("")
     lines.append("ФАЗЫ (до первого вызова / первой принятой подачи / ready; вызовы; правки):")
     for ph in report["phases"]:

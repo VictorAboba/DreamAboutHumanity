@@ -33,6 +33,8 @@ MAX_BODY_BYTES = 64_000
 # Routes only a host program (dah-waker) calls; with the `X-DAH-Host` header any call is host traffic. Host calls
 # do not count as the player's first call and are kept apart from the player's calls in the report.
 HOST_ROUTES = frozenset({"/v1/telemetry", "/v1/spend", "/v1/seat/dreamteam_session"})
+# A player's phase-status reads: listed as `passive` in the host's `player_calls` (not an answer to a wake).
+PASSIVE_ROUTES = frozenset({"/v1/phase", "/v1/wait_phase"})
 HOST_HEADER = "x-dah-host"
 ADMIN_HEADER = "x-dah-admin-key"
 STATUS = {"UNAUTHORIZED": 401, "FORBIDDEN": 403, "NOT_FOUND": 404, "INVALID": 400, "UNKNOWN_ID": 400,
@@ -280,7 +282,8 @@ def create_app(games_dir: str, *, admin_key: str | None = None, clock: Clock = t
             request.state.dah_host = host
             if not host:
                 game.note_first_call(seat)
-                game.note_player_activity(seat, seq_at_arrival)
+                game.note_player_activity(seat, seq_at_arrival, arrival=True,
+                                          passive=route.split(" ", 1)[1] in PASSIVE_ROUTES)
             raw = b""
             try:
                 raw = await _read_body(request)

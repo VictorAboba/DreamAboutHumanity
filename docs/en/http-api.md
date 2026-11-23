@@ -74,11 +74,18 @@ once with `changed: true`.
 `allowed` lists tool names: in N1 and N2 the state, order tools, messages, inbox, ready and history; in A the same
 without `send_message`. A seat that is out, or a match that is over, gets only `get_state`, `history` and `inbox`.
 
-For host calls (the `X-DAH-Host` header, which `dah-waker` sends), `/v1/phase` and `/v1/wait_phase` add two fields
+For host calls (the `X-DAH-Host` header, which `dah-waker` sends), `/v1/phase` and `/v1/wait_phase` add fields
 about the player of that seat: `player_waiting` (a player's long-poll of `/v1/wait_phase` is pending now, or was
 pending when the current phase opened, so it returns with the new phase) and `player_active_s_ago` (seconds since
 the player's last own call, if that call started in the current phase; else `null`: a call that started in the
-previous phase, such as the player's `ready` that closed it, does not count). Players never get these fields.
+previous phase, such as the player's `ready` that closed it, does not count), `player_first_active_s_ago`
+(seconds since the player's first own call of the current phase, same rule) and `player_last_call`
+(`{"phase_seq", "s_ago"}` of the player's last own call in any phase, or `null`; the waker tells by it whether a
+wake was answered before the phase closed), and `player_calls`: the player's last 64 own calls, oldest first,
+`[{"phase_seq", "s_ago", "passive"}]` by the time each call came in, `passive` for a phase-status read (`/v1/phase`,
+`/v1/wait_phase`); the waker finds there the first call after a wake that is more than waiting. These presence
+fields are saved with the match's runtime state, so a server restart keeps them. Players and spectators never get these fields, and a host call shows
+only its own seat's player.
 
 ### State
 
@@ -148,8 +155,9 @@ last one as `since` to get only newer ones. Each `text` is wrapped as `<<untrust
 | POST | `/v1/spend` | `{"spent_usd", "source", "tokens"?, "turn"?, "phase"?}` |
 | POST | `/v1/seat/dreamteam_session` | `{"dreamteam_session_id"}` |
 
-- `kind` of telemetry is `continue_sent`, `continue_skipped`, `session_restarted`, `goal_reopened`,
-  `budget_exhausted`, `wake_failed`, `session_stopped_by_waker` or `post_game_finished`; `detail` is a JSON object
+- `kind` of telemetry is `wake_sent`, `wake_answered`, `wake_unanswered`, `continue_sent` (earlier wakers),
+  `continue_skipped`, `session_restarted`, `goal_reopened`, `budget_exhausted`, `wake_failed`,
+  `session_stopped_by_waker` or `post_game_finished`; `detail` is a JSON object
   of up to 2000 characters.
 - `spent_usd` is the seat's total spend so far. `turn` and `phase` name the phase the figure is for (the one that
   just closed); without them the figure is a baseline taken before any phase closed. The journal's `spend_report`

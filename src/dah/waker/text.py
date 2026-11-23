@@ -1,4 +1,4 @@
-"""Self-contained wake texts sent to a DreamTeam session as `continue`."""
+"""Self-contained wake texts sent to a DreamTeam session (a message to all members, or `continue`)."""
 
 from __future__ import annotations
 
@@ -59,7 +59,7 @@ RESULT_REASONS = {"turn_limit": "лимит ходов", "last_standing": "ос�
 
 
 def wrap_up_text(phase_info: dict[str, Any], seat: str | None = None) -> str:
-    """The one `continue` after game_over, e.g. `[DAH] Партия окончена: ход 10, лимит ходов, победитель A; ты B,
+    """The one wrap-up after game_over (a message to all members, or `continue` with --wake-mode continue), e.g. `[DAH] Партия окончена: ход 10, лимит ходов, победитель A; ты B,
     твоё место 2 из 3; счёт: A 12, B 9, C 4. Заверши цель одним коротким итоговым сообщением, больше ничего не
     делай.`"""
     result = phase_info.get("result") if isinstance(phase_info.get("result"), dict) else {}

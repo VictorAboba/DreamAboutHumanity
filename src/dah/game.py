@@ -33,8 +33,13 @@ P2 = "negotiation_2"
 GAME_OVER = "game_over"
 NEXT_PHASE = {"negotiation_1": "actions", "actions": "negotiation_2"}
 SEAT_KINDS = ("swarm", "agent", "human", "bot")
+# `continue_sent`: older wakers; newer ones write `wake_sent` (a message to all members or a `continue`).
 TELEMETRY_KINDS = ("continue_sent", "continue_skipped", "session_restarted", "goal_reopened", "budget_exhausted",
-                   "wake_failed", "session_stopped_by_waker", "post_game_finished")
+                   "wake_failed", "session_stopped_by_waker", "post_game_finished", "wake_sent", "wake_answered",
+                   "wake_unanswered")
+# How many recent player calls per seat the host's phase info lists (`player_calls`): dah-waker finds there the first
+# call after a wake. A phase-status read (`phase`, `wait_phase`) is `passive`: it is not a move.
+PLAYER_CALLS_KEPT = 64
 # `for_phase` of a spend figure taken after game_over (dah-waker keeps reporting while the swarm wraps up).
 AFTER_GAME_OVER = "after_game_over"
 SPEND_SOURCES = ("participant_program", "host")
@@ -185,6 +190,9 @@ class Game:
         self.player_polls: dict[str, int] = {}
         self.polled_at_open: set[str] = set()
         self.player_seen_at: dict[str, tuple[int, float]] = {}  # seat -> (phase_seq, clock time)
+        self.player_first_seen_at: dict[str, tuple[int, float]] = {}  # seat -> its first call of that phase
+        # seat -> its last PLAYER_CALLS_KEPT calls, oldest first: (phase_seq, clock time at arrival, passive)
+        self.player_calls: dict[str, list[tuple[int, float, bool]]] = {}
 
     # --- lifecycle ------------------------------------------------------------------------------------
 
@@ -235,6 +243,11 @@ class Game:
         game.first_called = set(rt["first_called"])
         game.msg_counts = rt["msg_counts"]
         game.messages = gdir.load_messages()
+        presence = rt.get("presence") or {}  # absent in a runtime.json of an earlier version
+        game.player_seen_at = {s: (int(v[0]), float(v[1])) for s, v in (presence.get("seen") or {}).items()}
+        game.player_first_seen_at = {s: (int(v[0]), float(v[1])) for s, v in (presence.get("first") or {}).items()}
+        game.player_calls = {s: [(int(c[0]), float(c[1]), bool(c[2])) for c in calls]
+                             for s, calls in (presence.get("calls") or {}).items()}
         return game
 
     def _save(self) -> None:
@@ -242,6 +255,11 @@ class Game:
             "state": self.state.to_dict(), "books": {s: b.to_dict() for s, b in self.books.items()},
             "ready": sorted(self.ready_seats), "phase_seq": self.phase_seq, "phase_opened_at": self.phase_opened_at,
             "deadline": self.deadline, "first_called": sorted(self.first_called), "msg_counts": self.msg_counts,
+            # the player's own calls (host-only presence): kept over a restart, so a wake answered just before the
+            # phase closed is still seen as answered
+            "presence": {"seen": {s: list(v) for s, v in self.player_seen_at.items()},
+                         "first": {s: list(v) for s, v in self.player_first_seen_at.items()},
+                         "calls": {s: [list(c) for c in calls] for s, calls in self.player_calls.items()}},
         })
 
     # --- phases ---------------------------------------------------------------------------------------
@@ -355,23 +373,45 @@ class Game:
                     self.player_polls[player_seat] = max(0, self.player_polls.get(player_seat, 0) - 1)
         return self.phase_seq != after_seq
 
-    def note_player_activity(self, seat: str, phase_seq: int | None = None) -> None:
+    def note_player_activity(self, seat: str, phase_seq: int | None = None, *, arrival: bool = False,
+                             passive: bool = False) -> None:
         """A player's own (non-host) call arrived or finished now. `phase_seq`: the phase the call started in
         (the server passes the seq it saw before `tick()`); a call that started in an earlier phase (its own
         `ready` or a deadline closed that phase while it ran) is not activity in the current one, since the player
-        has not seen the new phase yet. A wait_phase poll that returns with the new phase is `polled_at_open`."""
+        has not seen the new phase yet. A wait_phase poll that returns with the new phase is `polled_at_open`.
+        `arrival`: the call has just come in; it is listed in `player_calls`, `passive` for a phase-status read."""
         if phase_seq is not None and phase_seq != self.phase_seq:
             return
-        self.player_seen_at[seat] = (self.phase_seq, self.clock())
+        now = self.clock()
+        self.player_seen_at[seat] = (self.phase_seq, now)
+        first = self.player_first_seen_at.get(seat)
+        if first is None or first[0] != self.phase_seq:
+            self.player_first_seen_at[seat] = (self.phase_seq, now)
+        if arrival:
+            calls = self.player_calls.setdefault(seat, [])
+            calls.append((self.phase_seq, now, passive))
+            del calls[:-PLAYER_CALLS_KEPT]
 
     def player_presence(self, seat: str) -> dict[str, Any]:
         """For the host only: is the player waiting in wait_phase (now, or its poll was pending when this phase
-        opened and returns with it), and how many seconds ago its last call was, if it started in this phase."""
+        opened and returns with it), how many seconds ago its last and its first call of this phase were, and its last
+        call of any phase (`player_last_call` {phase_seq, s_ago}: dah-waker tells whether a wake was answered before
+        the phase closed), and its last PLAYER_CALLS_KEPT calls (`player_calls` [{phase_seq, s_ago, passive}], oldest
+        first: dah-waker finds the first call after a wake, and whether it was more than a phase-status read)."""
+        now = self.clock()
         seen = self.player_seen_at.get(seat)
-        active = (round(max(0.0, self.clock() - seen[1]), 1)
-                  if seen is not None and seen[0] == self.phase_seq else None)
+        first = self.player_first_seen_at.get(seat)
+
+        def ago(entry: tuple[int, float] | None) -> float | None:
+            return (round(max(0.0, now - entry[1]), 1)
+                    if entry is not None and entry[0] == self.phase_seq else None)
+
         return {"player_waiting": self.player_polls.get(seat, 0) > 0 or seat in self.polled_at_open,
-                "player_active_s_ago": active}
+                "player_active_s_ago": ago(seen), "player_first_active_s_ago": ago(first),
+                "player_last_call": ({"phase_seq": seen[0], "s_ago": round(max(0.0, now - seen[1]), 1)}
+                                     if seen is not None else None),
+                "player_calls": [{"phase_seq": seq, "s_ago": round(max(0.0, now - at), 1), "passive": passive}
+                                 for seq, at, passive in self.player_calls.get(seat, [])]}
 
     def phase_info(self, seat: str, *, host: bool = False) -> dict[str, Any]:
         alive = self.alive_seats()
