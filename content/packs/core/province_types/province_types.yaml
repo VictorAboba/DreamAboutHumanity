@@ -5,14 +5,14 @@
 - id: agri
   name: Агромир
   short: агро
-  income: {provisions: 5}
+  income: {provisions: 4}
 - id: waste
   name: Пустошь
   short: пуст.
   income: {alloy: 1, provisions: 1}
-  defense_mul: 1.25
+  defense_mul: 1.1
 - id: capital
   name: Столица
   short: столица
-  income: {alloy: 3, provisions: 3}
-  defense_mul: 1.5
+  income: {alloy: 3, provisions: 2}
+  defense_mul: 1.25

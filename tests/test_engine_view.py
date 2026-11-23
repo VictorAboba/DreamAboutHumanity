@@ -52,7 +52,7 @@ def test_state_text_full(st, rs):
     text = render_state_text(st, rs, "A", DeadlineInfo("14:30Z", 12 * 60), book=book)
     lines = text.splitlines()
     assert lines[0] == "ХОД 1/10 | Д ДЕЙСТВИЯ | до 14:30Z (ещё 12 мин) | ОК 3"
-    assert lines[1] == "Казна: Сплав 40 (+8) Провиант 30 (+6)"
+    assert lines[1] == "Казна: Сплав 30 (+8) Провиант 15 (+4)"   # core 0.2: start 30/15, food 2+4+1 - 3 upkeep
     assert "P01 Столица Аргос [ТЫ] столица штурм×3 | казарма | → P02 P03 P04" in lines
     assert "P05 Столица Тессар [Соло] столица ? | → P06 P07 P08" in lines
     assert "P07 Нивы Лира [Соло] агро пусто | → P02 P05" in lines

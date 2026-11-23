@@ -19,8 +19,11 @@ from dah.engine import (DeadlineInfo, GameState, Ruleset, SeatOrders, TurnReport
                         cancel_order, cp_left, estimate, issue_order_id, new_game_state, orders_hash,
                         render_report_text, render_state_text, reserved_resources, resolve, rules_text, scores,
                         state_hash, submit_orders, view_state)
-from dah.engine.model import canonical_json
-from dah.engine.orders import FLAT_MOVE_EXAMPLE, STRING_ORDERS_EXAMPLE, decode_json_arg, resolve_unit_ref
+from dah.engine import diplomacy as dip
+from dah.engine.content import DEFAULT_DIPLOMACY_LIMITS
+from dah.engine.model import as_int, canonical_json, sha256_json
+from dah.engine.orders import (FLAT_MOVE_EXAMPLE, P1_LOCKED_HINT, STRING_ORDERS_EXAMPLE, decode_json_arg,
+                               resolve_unit_ref)
 from dah.engine.view import PHASE_LABELS
 from dah.journal import Journal, read_events
 from dah.store import GameDir, write_json, read_json
@@ -31,6 +34,9 @@ PLAYABLE_PHASES = ("negotiation_1", "actions", "negotiation_2")
 NEGOTIATION_PHASES = ("negotiation_1", "negotiation_2")
 P2 = "negotiation_2"
 GAME_OVER = "game_over"
+PACT_STATUS = {"active": "действует", "proposed": "предложен", "rejected": "отклонён", "withdrawn": "отозван",
+               "lapsed": "не принят вовремя", "left": "окончен (выход)", "broken": "нарушен",
+               "expired": "истёк срок", "ended": "окончен (сторона выбыла)"}
 NEXT_PHASE = {"negotiation_1": "actions", "actions": "negotiation_2"}
 SEAT_KINDS = ("swarm", "agent", "human", "bot")
 # `continue_sent`: older wakers; newer ones write `wake_sent` (a message to all members or a `continue`).
@@ -46,25 +52,33 @@ SPEND_SOURCES = ("participant_program", "host")
 MAX_TELEMETRY_DETAIL_CHARS = 2000
 DT_SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
-READ_TOOLS = ["get_state", "history", "inbox"]
-ORDER_TOOLS = ["list_orders", "validate_orders", "submit_orders", "cancel_order", "amend_order", "estimate"]
+READ_TOOLS = ["get_state", "history", "inbox", "list_pacts"]
+CHECK_TOOLS = ["list_orders", "validate_orders", "estimate"]
+ORDER_TOOLS = [*CHECK_TOOLS, "submit_orders", "cancel_order", "amend_order"]
+DIPLOMACY_TOOLS = ["send_gift", "propose_pact", "respond_pact", "leave_pact", "list_pacts"]
+# Orders are given only in actions; negotiation_1 can only check them (user decision 12).
 ALLOWED = {
-    "negotiation_1": ["get_state", *ORDER_TOOLS, "send_message", "inbox", "ready", "unready", "history"],
-    "actions": ["get_state", *ORDER_TOOLS, "inbox", "ready", "unready", "history"],
-    "negotiation_2": ["get_state", *ORDER_TOOLS, "send_message", "inbox", "ready", "unready", "history"],
+    "negotiation_1": ["get_state", *CHECK_TOOLS, "send_message", *DIPLOMACY_TOOLS, "inbox", "ready", "unready",
+                      "history"],
+    "actions": ["get_state", *ORDER_TOOLS, "list_pacts", "inbox", "ready", "unready", "history"],
+    "negotiation_2": ["get_state", *ORDER_TOOLS, "send_message", *DIPLOMACY_TOOLS, "inbox", "ready", "unready",
+                      "history"],
 }
+SYSTEM_SENDER = "ИГРА"   # inbox entries written by the game itself (gifts, pacts): not player text, not wrapped
 
 RULES_TOPICS = {
     "turn": "ХОД", "phases": "ХОД", "resources": "РЕСУРСЫ", "provinces": "ПРОВИНЦИИ", "units": "ЮНИТЫ",
     "buildings": "ЗДАНИЯ", "orders": "ПРИКАЗЫ", "p2": "П2", "cp": "П2", "combat": "РАСЧЁТ",
     "resolution": "РАСЧЁТ", "victory": "ПОБЕДА", "fog": "ВИДИМОСТЬ", "visibility": "ВИДИМОСТЬ",
-    "messages": "СООБЩЕНИЯ",
+    "messages": "СООБЩЕНИЯ", "diplomacy": "ДИПЛОМАТИЯ", "pacts": "ДИПЛОМАТИЯ", "gifts": "ДИПЛОМАТИЯ",
 }
 
 # A `DAH` token (Latin or Cyrillic А/Н, spaces inside) in any brackets would pass for a host wake-up message.
 # It is matched after NFKC normalization (fullwidth letters) with format characters (zero-width) removed.
 _DAH_RE = re.compile(r"(?<!\w)D\s*[AА]\s*[HН](?!\w)", re.IGNORECASE)
 _BRACKET_CATEGORIES = frozenset({"Ps", "Pe", "Pi", "Pf"})
+# A bracketed game tag ([ИГРА], (GAME)...) in a player's text would pass for an inbox entry written by the game.
+_GAME_TAG_RE = re.compile(r"[\[\(\{<«‹【〔]\s*(?:ИГРА|IGRA|GAME)\s*[\]\)\}>»›】〕]", re.IGNORECASE)
 
 
 class GameError(Exception):
@@ -100,14 +114,20 @@ def make_config(*, game_id: str, scenario: str, seats: list[dict[str, Any]], see
         normalized.append(entry)
     return {"game_id": game_id, "seed": seed, "scenario": rs.scenario.id, "pack_dirs": pack_dirs,
             "seats": normalized, "phase_limits": limits, "message_limits": rs.scenario.message_limits,
+            "diplomacy_limits": dict(rs.scenario.diplomacy_limits),
             "turn_limit": turn_limit or rs.scenario.turn_limit}
+
+
+def diplomacy_limits(config: dict[str, Any]) -> dict[str, int]:
+    """Per-phase limits of gifts and pact proposals (a config of an earlier version has none: the defaults)."""
+    return {**DEFAULT_DIPLOMACY_LIMITS, **(config.get("diplomacy_limits") or {})}
 
 
 def game_ruleset(config: dict[str, Any]) -> Ruleset:
     """The scenario's ruleset with this game's turn and phase limits (so rules text matches the game)."""
     rs = build_ruleset(config.get("pack_dirs"), config["scenario"])
     scenario = replace(rs.scenario, turn_limit=config["turn_limit"], phase_limits=dict(config["phase_limits"]),
-                       message_limits=config["message_limits"])
+                       message_limits=config["message_limits"], diplomacy_limits=diplomacy_limits(config))
     return replace(rs, scenario=scenario)
 
 
@@ -128,7 +148,7 @@ def escape_untrusted(text: str) -> str:
         start, end = max(pos, _bracket_edge(text, match.start(), -1)), _bracket_edge(text, match.end(), 1)
         out += [text[pos:start], "(DAH?)"]
         pos = end
-    return "".join(out) + text[pos:]
+    return _GAME_TAG_RE.sub("(ИГРА?)", "".join(out) + text[pos:])
 
 
 def _bracket_edge(text: str, index: int, step: int) -> int:
@@ -143,6 +163,11 @@ def _bracket_edge(text: str, index: int, step: int) -> int:
 
 def wrap_untrusted(nick: str, text: str) -> str:
     return f"<<untrusted from={escape_untrusted(nick)}>>{escape_untrusted(text)}<</untrusted>>"
+
+
+def system_text(text: str) -> str:
+    """An inbox entry from the game itself (it may quote nicks, which are escaped by the caller)."""
+    return f"[{SYSTEM_SENDER}] {text}"
 
 
 def _rule_sections(text: str) -> list[str]:
@@ -180,6 +205,8 @@ class Game:
         self.first_called: set[str] = set()
         self.msg_counts: dict[str, dict[str, Any]] = {}
         self.messages: list[dict[str, Any]] = []
+        self.diplomacy_log: list[dict[str, Any]] = []        # this turn's diplomacy ops (replayed before resolve)
+        self.diplomacy_counts: dict[str, dict[str, int]] = {}  # seat -> {gifts, proposals} in the current phase
         self.seats = {s["seat"]: s for s in config["seats"]}
         self.nick_to_seat = {s["nick"]: s["seat"] for s in config["seats"]}
         self._waiters: list[tuple[asyncio.AbstractEventLoop, asyncio.Future]] = []
@@ -242,6 +269,8 @@ class Game:
         game.deadline = rt["deadline"]
         game.first_called = set(rt["first_called"])
         game.msg_counts = rt["msg_counts"]
+        game.diplomacy_log = list(rt.get("diplomacy_log") or [])
+        game.diplomacy_counts = dict(rt.get("diplomacy_counts") or {})
         game.messages = gdir.load_messages()
         presence = rt.get("presence") or {}  # absent in a runtime.json of an earlier version
         game.player_seen_at = {s: (int(v[0]), float(v[1])) for s, v in (presence.get("seen") or {}).items()}
@@ -255,6 +284,7 @@ class Game:
             "state": self.state.to_dict(), "books": {s: b.to_dict() for s, b in self.books.items()},
             "ready": sorted(self.ready_seats), "phase_seq": self.phase_seq, "phase_opened_at": self.phase_opened_at,
             "deadline": self.deadline, "first_called": sorted(self.first_called), "msg_counts": self.msg_counts,
+            "diplomacy_log": self.diplomacy_log, "diplomacy_counts": self.diplomacy_counts,
             # the player's own calls (host-only presence): kept over a restart, so a wake answered just before the
             # phase closed is still seen as answered
             "presence": {"seen": {s: list(v) for s, v in self.player_seen_at.items()},
@@ -294,6 +324,7 @@ class Game:
         self.ready_seats.clear()
         self.first_called.clear()
         self.msg_counts = {}
+        self.diplomacy_counts = {}
         self.phase_opened_at = now
         self.deadline = now + self.config["phase_limits"][self.phase]
         self.journal.append("phase_open", turn=self.state.turn, phase=self.phase, deadline=iso_time(self.deadline))
@@ -317,8 +348,12 @@ class Game:
         self.state.phase = "resolution"
         books = {seat: self.books.get(seat, SeatOrders()) for seat in self.alive_seats()}
         self.gdir.save_turn("orders", turn, {s: b.to_dict() for s, b in books.items()})
-        new_state, report = resolve(self.state, books, self.ruleset, self.config["seed"])
+        if self.diplomacy_log:
+            self.gdir.save_turn("diplomacy", turn, self.diplomacy_log)
+        new_state, report = resolve(self.state, books, self.ruleset, self.config["seed"], self.diplomacy_log)
         self.gdir.save_turn("reports", turn, report.to_dict())
+        self.diplomacy_log = []
+        self._pact_results(turn, report)
         self.journal.append(
             "turn_resolved", turn=turn, state_hash=state_hash(new_state), scores=report.public["scores"],
             idle_resources={s: v["resources"] for s, v in report.idle.items()},
@@ -530,7 +565,8 @@ class Game:
         hasty = " [П2, наспех]" if o["phase_added"] == P2 and o["kind"] == "move" else ""
         if o["kind"] == "move":
             units = " ".join(f"{short(u)}×{n}" for u, n in o["units"].items())
-            return f"{o['id']} move {o['from']}→{o['to']} {units}{hasty}"
+            breach = " [pact=break]" if o.get("pact") == "break" else ""
+            return f"{o['id']} move {o['from']}→{o['to']} {units}{breach}{hasty}"
         if o["kind"] == "recruit":
             return f"{o['id']} recruit {o['province']} {short(o['unit'])}×{o['count']}"
         if o["kind"] == "build":
@@ -557,9 +593,15 @@ class Game:
                                        f"{STRING_ORDERS_EXAMPLE}")
         return [decode_json_arg(item) for item in items]
 
+    def _require_orders_phase(self) -> None:
+        if self.phase == "negotiation_1":
+            raise GameError("PHASE_LOCKED", P1_LOCKED_HINT)
+
     def validate(self, seat: str, items: Any) -> dict[str, Any]:
+        """Works in every playable phase; in negotiation_1 orders are checked as they would be in actions."""
         items = self._items(items)
-        res = submit_orders(self.state, self.ruleset, seat, self._book(seat), items, self.phase)
+        phase = "actions" if self.phase == "negotiation_1" else self.phase
+        res = submit_orders(self.state, self.ruleset, seat, self._book(seat), items, phase)
         results = []
         for check in res.results:
             entry = check.to_dict()
@@ -570,6 +612,7 @@ class Game:
         return {"results": results, "ok_count": len(items) - len(rejected)}
 
     def submit(self, seat: str, items: Any, mode: str = "append") -> dict[str, Any]:
+        self._require_orders_phase()
         items = self._items(items)
         book = self._book(seat)
         phase = self.phase
@@ -589,14 +632,20 @@ class Game:
                             rejected=[{"order": r["order"], "reason": r["reason"]} for r in rejected],
                             orders_hash=new_hash, phase=phase, mode=mode)
         self._save()
-        return {"accepted": [c.order.to_dict() for c in accepted], "rejected": rejected, "orders_hash": new_hash,
-                "cp_left": cp_left(self.state, seat, self._book(seat))}
+        out = {"accepted": [c.order.to_dict() for c in accepted], "rejected": rejected, "orders_hash": new_hash,
+               "cp_left": cp_left(self.state, seat, self._book(seat))}
+        warnings = [{"order_id": c.order.id, "warning": c.warning} for c in accepted if c.warning]
+        if warnings:
+            out["warnings"] = warnings
+        return out
 
     def cancel(self, seat: str, order_id: str) -> dict[str, Any]:
+        self._require_orders_phase()
         res = cancel_order(self.state, self.ruleset, seat, self._book(seat), order_id, self.phase)
         return self._apply_edit(seat, "cancel", order_id, res)
 
     def amend(self, seat: str, order_id: str, patch: Any) -> dict[str, Any]:
+        self._require_orders_phase()
         patch = decode_json_arg(patch)
         if isinstance(patch, dict) and set(patch) == {"patch"}:   # {"patch": {...}} or {"patch": "<JSON>"}
             patch = decode_json_arg(patch["patch"])
@@ -620,6 +669,8 @@ class Game:
                "cp_left": cp_left(self.state, seat, res.book)}
         if res.order is not None:
             out["order"] = res.order.to_dict()
+        if getattr(res, "warning", None):
+            out["warning"] = res.warning
         return out
 
     # --- estimate -------------------------------------------------------------------------------------
@@ -681,11 +732,7 @@ class Game:
             full = self.resolve_unit(ref)
             if full is None:
                 raise self._estimate_error("UNKNOWN_ID", f"{side}: нет юнита {str(ref)[:40]!r}; юниты: {known}")
-            count = n
-            if isinstance(n, str) and n.strip().isdigit():
-                count = int(n)
-            elif isinstance(n, float) and n.is_integer():
-                count = int(n)
+            count = n if isinstance(n, bool) else as_int(n)
             if isinstance(count, bool) or not isinstance(count, int) or count < 0:
                 raise self._estimate_error("INVALID", f"{side}: число юнитов {full} — целое ≥ 0, а не "
                                                       f"{str(n)[:20]!r}")
@@ -863,13 +910,237 @@ class Game:
         for number, m in enumerate(received, start=1):
             if since is not None and number <= since:
                 continue
-            out.append({"id": number, "turn": m["turn"], "phase": m["phase"], "from": players[m["from"]].nick,
-                        "to": "all" if m["to"] == "all" else [players[s].nick for s in m["to"]],
-                        "public": m["to"] == "all", "text": wrap_untrusted(players[m["from"]].nick, m["text"])})
-        last_id = out[-1]["id"] if out else (since or 0)
+            entry = {"id": number, "turn": m["turn"], "phase": m["phase"],
+                     "to": "all" if m["to"] == "all" else [players[s].nick for s in m["to"]],
+                     "public": m["to"] == "all"}
+            if m.get("system"):  # written by the game, not by a player: not wrapped as untrusted
+                entry.update({"from": SYSTEM_SENDER, "system": True, "event": m.get("event"),
+                              "text": system_text(m["text"])})
+            else:
+                entry.update({"from": players[m["from"]].nick,
+                              "text": wrap_untrusted(players[m["from"]].nick, m["text"])})
+            out.append(entry)
+        # never beyond the newest entry: a `since` past it must not move a client's cursor over future messages
+        last_id = out[-1]["id"] if out else min(since or 0, len(received))
         lines = [f"#{m['id']} ход {m['turn']} {PHASE_LABELS.get(m['phase'], m['phase'])} "
                  f"{'всем' if m['public'] else 'лично'}: {m['text']}" for m in out]
         return {"messages": out, "last_id": last_id, "text": "\n".join(lines) or "новых сообщений нет"}
+
+    def _notice(self, to: list[str] | str, text: str, event: str, *, turn: int | None = None,
+                phase: str | None = None) -> None:
+        """An inbox entry from the game itself (`system`), to seats or "all"; not counted against message limits."""
+        record = {"id": len(self.messages) + 1, "ts": round(self.clock(), 3),
+                  "turn": self.state.turn if turn is None else turn, "phase": phase or self.phase, "from": None,
+                  "to": to if to == "all" else sorted(to), "text": text, "system": True, "event": event}
+        self.gdir.append_message(record)
+        self.messages.append(record)
+
+    # --- diplomacy: gifts and pacts --------------------------------------------------------------------
+
+    def _nick(self, seat: str | None) -> str:
+        return escape_untrusted(self.state.players[seat].nick) if seat in self.state.players else "—"
+
+    def _seat_ref(self, ref: Any) -> Any:
+        """A nick or a seat id -> the seat id (anything else is returned for the engine to refuse)."""
+        if isinstance(ref, list) and len(ref) == 1:
+            ref = ref[0]
+        if isinstance(ref, str):
+            return self.nick_to_seat.get(ref.strip()) or (ref.strip() if ref.strip() in self.seats else ref)
+        return ref
+
+    def _diplomacy(self, seat: str, make: Callable[[], dict[str, Any]], example: str) -> dict[str, Any]:
+        self._require_active(seat)
+        try:
+            op = make()
+        except dip.DiplomacyError as exc:
+            if exc.code == "PHASE_LOCKED" and self.phase == "actions":
+                raise GameError(exc.code, "в фазе Д дипломатия закрыта: подношения и пакты — в П1 и П2") from None
+            others = ", ".join(p.nick for s, p in self.state.players.items() if s != seat and p.alive)
+            hint = f" (игроки: {others})" if exc.code == "UNKNOWN_ID" and "игрок" in exc.message else ""
+            raise GameError(exc.code, f"{exc.message}{hint}. Пример: {example}") from None
+        pact = dip.apply_op(self.state, op)
+        self.diplomacy_log.append(op)
+        return {"op": op, "pact": pact}
+
+    def _count(self, seat: str, kind: str) -> None:
+        limit = diplomacy_limits(self.config)[f"{kind}_per_phase"]
+        used = self.diplomacy_counts.setdefault(seat, {})
+        if used.get(kind, 0) >= limit:
+            what = "подношений" if kind == "gifts" else "предложений пакта"
+            raise GameError("LIMIT_EXCEEDED", f"лимит {what} в фазе: {limit}")
+
+    def _bump(self, seat: str, kind: str) -> int:
+        used = self.diplomacy_counts.setdefault(seat, {})
+        used[kind] = used.get(kind, 0) + 1
+        return diplomacy_limits(self.config)[f"{kind}_per_phase"] - used[kind]
+
+    def _resources_text(self, amounts: dict[str, int]) -> str:
+        return ", ".join(f"{self.ruleset.resources[r].name} {n}" for r, n in amounts.items())
+
+    def gift_example(self, seat: str) -> str:
+        other = next((p.nick for s, p in self.state.players.items() if s != seat), "Ник")
+        res = next(iter(self.ruleset.resources), "core:alloy").split(":")[-1]
+        return f'send_gift(to="{other}", resources={{"{res}": 10}})'
+
+    def send_gift(self, seat: str, to: Any, resources: Any) -> dict[str, Any]:
+        """Give free (unreserved) resources to another living seat at once; the recipient gets a game notice."""
+        self._require_active(seat)
+        self._count(seat, "gifts")
+        reserved = reserved_resources(self.ruleset, self.state.players[seat].faction, self._book(seat))
+        done = self._diplomacy(seat, lambda: dip.make_gift(self.state, self.ruleset, seat, self._seat_ref(to),
+                                                           decode_json_arg(resources), self.phase, reserved),
+                               self.gift_example(seat))
+        op = done["op"]
+        left = self._bump(seat, "gifts")
+        self._save()     # the transfer is durable before the journal and the inbox say it happened
+        what = self._resources_text(op["resources"])
+        self.journal.append("gift", seat=seat, to=op["recipient"], resources=op["resources"], turn=self.state.turn,
+                            phase=self.phase)
+        self._notice([op["recipient"]], f"{self._nick(seat)} прислал тебе подношение: {what}. Ресурсы уже в твоей "
+                                        "казне.", "gift")
+        return {"gift": {"to": self.state.players[op["recipient"]].nick, "resources": op["resources"]},
+                "gifts_left": left, "resources": dict(self.state.players[seat].resources),
+                "text": f"подношение {self.state.players[op['recipient']].nick}: {what}; подношений в фазе "
+                        f"осталось {left}"}
+
+    def _pact_terms(self, pact: dict[str, Any]) -> str:
+        if pact.get("until_turn") is not None:
+            return f"до хода {pact['until_turn']} включительно"
+        if pact.get("turns") is not None:
+            return f"на {pact['turns']} ход(а)"
+        return "бессрочно"
+
+    def propose_pact(self, seat: str, to: Any, turns: Any = None) -> dict[str, Any]:
+        self._require_active(seat)
+        self._count(seat, "pact_proposals")
+        example = 'propose_pact(to="Ник", turns=3) или propose_pact(to="Ник") — бессрочно'
+        done = self._diplomacy(seat, lambda: dip.make_proposal(self.state, seat, self._seat_ref(to), turns,
+                                                               self.phase), example)
+        op, pact = done["op"], done["pact"]
+        self._bump(seat, "pact_proposals")
+        recipient = op["recipient"]
+        was_ready = recipient in self.ready_seats
+        self.ready_seats.discard(recipient)      # an offer needs an answer: the phase waits for the recipient again
+        self._save()
+        if was_ready:
+            self.journal.append("ready_cleared", seat=recipient, turn=self.state.turn, phase=self.phase,
+                                reason="pact_proposed")
+        self.journal.append("pact_proposed", seat=seat, to=op["recipient"], pact_id=pact["id"], turns=op["turns"],
+                            turn=self.state.turn, phase=self.phase)
+        self._notice([op["recipient"]], f"{self._nick(seat)} предлагает пакт {pact['id']} ({self._pact_terms(pact)}"
+                                        "): армии сторон пакта при встрече не сражаются. Ответь "
+                                        f"respond_pact(id=\"{pact['id']}\", decision=\"accept\" или \"reject\") "
+                                        "до конца хода.", "pact_proposed")
+        return {"pact": self._pact_view(pact, seat),
+                "text": f"предложение {pact['id']} отправлено ({self._pact_terms(pact)}); ждёт ответа до расчёта"}
+
+    def respond_pact(self, seat: str, pact_id: Any, decision: Any) -> dict[str, Any]:
+        self._require_active(seat)
+        example = 'respond_pact(id="pact-A-B-1", decision="accept") или decision="reject"'
+        done = self._diplomacy(seat, lambda: dip.make_response(self.state, seat, str(pact_id), decision,
+                                                               self.phase), example)
+        op, pact = done["op"], done["pact"]
+        accepted = op["accept"]
+        self._save()
+        self.journal.append("pact_accepted" if accepted else "pact_rejected", seat=seat, pact_id=pact["id"],
+                            seats=sorted((pact["a"], pact["b"])), turns=pact["turns"],
+                            until_turn=pact["until_turn"], turn=self.state.turn, phase=self.phase)
+        if accepted:
+            self._notice("all", f"Пакт заключён: {self._nick(pact['a'])} и {self._nick(pact['b'])} "
+                                f"({self._pact_terms(pact)}). Их армии при встрече не сражаются, пока пакт "
+                                "действует.", "pact_accepted")
+        else:
+            self._notice([pact["a"]], f"{self._nick(seat)} отклонил пакт {pact['id']}.", "pact_rejected")
+        verdict = "заключён" if accepted else "отклонён"
+        return {"pact": self._pact_view(pact, seat), "text": f"пакт {pact['id']} {verdict}"}
+
+    def leave_pact(self, seat: str, pact_id: Any) -> dict[str, Any]:
+        self._require_active(seat)
+        example = 'leave_pact(id="pact-A-B-1")'
+        done = self._diplomacy(seat, lambda: dip.make_leave(self.state, seat, str(pact_id), self.phase), example)
+        pact = done["pact"]
+        partner = dip.partner_of(pact, seat)
+        self._save()
+        if pact["status"] == dip.WITHDRAWN:
+            self.journal.append("pact_withdrawn", seat=seat, pact_id=pact["id"], turn=self.state.turn,
+                                phase=self.phase)
+            self._notice([partner], f"{self._nick(seat)} отозвал предложение пакта {pact['id']}.", "pact_withdrawn")
+            text = f"предложение {pact['id']} отозвано"
+        else:
+            self.journal.append("pact_left", seat=seat, pact_id=pact["id"], seats=sorted((pact["a"], pact["b"])),
+                                ends_before_turn=pact["ends_before_turn"], turn=self.state.turn, phase=self.phase)
+            self._notice("all", f"{self._nick(seat)} выходит из пакта с {self._nick(partner)}: пакт перестаёт "
+                                f"действовать перед расчётом хода {pact['ends_before_turn']}.", "pact_left")
+            text = (f"выход из пакта {pact['id']} объявлен всем; пакт действует до расчёта хода "
+                    f"{pact['ends_before_turn']} (не включая его)")
+        return {"pact": self._pact_view(pact, seat), "text": text}
+
+    def _pact_view(self, pact: dict[str, Any], seat: str) -> dict[str, Any]:
+        nick = self.state.players
+        return {"id": pact["id"], "with": nick[dip.partner_of(pact, seat)].nick, "proposed_by": nick[pact["a"]].nick,
+                "status": pact["status"], "turns": pact["turns"], "since_turn": pact["since_turn"],
+                "until_turn": pact["until_turn"], "leaving": nick[pact["leaving"]].nick if pact.get("leaving") else None,
+                "ends_before_turn": pact.get("ends_before_turn"), "broken_by": [nick[s].nick for s in
+                                                                                pact.get("broken_by") or []]}
+
+    def pacts(self, seat: str) -> dict[str, Any]:
+        """The seat's own pacts and proposals (with ids) and every active pact between others (public, no ids)."""
+        mine = [self._pact_view(p, seat) for p in self.state.pacts if seat in (p["a"], p["b"])]
+        public = [{"seats": [self.state.players[s].nick for s in p["seats"]], "turns": p["turns"],
+                   "until_turn": p["until_turn"],
+                   "leaving": self.state.players[p["leaving"]].nick if p.get("leaving") else None,
+                   "ends_before_turn": p["ends_before_turn"]}
+                  for p in (dip.public_pact(x) for x in dip.active_pacts(self.state)) if seat not in p["seats"]]
+        lines = []
+        for p in mine:
+            if p["status"] == dip.ACTIVE:
+                extra = (f"; {p['leaving']} выходит, конец перед расчётом хода {p['ends_before_turn']}"
+                         if p["leaving"] else "")
+                lines.append(f"{p['id']}: пакт с {p['with']}, действует "
+                             f"{'до хода ' + str(p['until_turn']) + ' включительно' if p['until_turn'] else 'бессрочно'}"
+                             f"{extra}")
+            elif p["status"] == dip.PROPOSED:
+                terms = f"на {p['turns']} ход(а)" if p["turns"] else "бессрочно"
+                if p["proposed_by"] == p["with"]:
+                    lines.append(f"{p['id']}: тебе предлагает {p['with']} ({terms}) — respond_pact до конца хода")
+                else:
+                    lines.append(f"{p['id']}: ты предложил {p['with']} ({terms}), ждёт ответа")
+            else:
+                lines.append(f"{p['id']}: с {p['with']} — {PACT_STATUS.get(p['status'], p['status'])}"
+                             + (f" (нарушил {', '.join(p['broken_by'])})" if p["broken_by"] else ""))
+        for p in public:
+            lines.append(f"публично: {' — '.join(p['seats'])}, "
+                         f"{'до хода ' + str(p['until_turn']) if p['until_turn'] else 'бессрочно'}"
+                         + (f"; {p['leaving']} выходит" if p["leaving"] else ""))
+        return {"mine": mine, "public": public, "text": "\n".join(lines) or "пактов нет"}
+
+    def _pact_results(self, turn: int, report: TurnReport) -> None:
+        """Journal and announce the pact changes of a resolution (breaks, expiries, endings); public."""
+        for e in report.events:
+            kind = e["kind"]
+            if kind not in ("pact_broken", "pact_expired", "pact_ended", "pact_lapsed"):
+                continue
+            seats = e["seats"]
+            fields = {"pact_id": e["pact"], "seats": seats, "turn": turn}
+            if kind == "pact_broken":
+                fields["broken_by"] = e["broken_by"]
+            if kind == "pact_ended":
+                fields.update(reason=e.get("reason"), seat=e.get("seat"))
+            self.journal.append(kind, **fields)
+            pair = " и ".join(self._nick(s) for s in seats)
+            if kind == "pact_broken":
+                who = ", ".join(self._nick(s) for s in e["broken_by"])
+                self._notice("all", f"Пакт нарушен: {pair}. Нарушил: {who} (ход {turn}).", kind, turn=turn,
+                             phase="resolution")
+            elif kind == "pact_expired":
+                self._notice("all", f"Срок пакта истёк: {pair} (ход {turn}).", kind, turn=turn, phase="resolution")
+            elif kind == "pact_ended":
+                why = "выход из пакта вступил в силу" if e.get("reason") == "left" else "сторона выбыла"
+                self._notice("all", f"Пакт окончен: {pair} — {why} (ход {turn}).", kind, turn=turn,
+                             phase="resolution")
+            else:
+                self._notice(seats, f"Предложение пакта {e['pact']} не принято до конца хода {turn} и сгорело.",
+                             kind, turn=turn, phase="resolution")
 
     # --- host telemetry and per-call journaling --------------------------------------------------------
 
@@ -958,7 +1229,8 @@ class Game:
                 "deadline": iso_time(self.deadline) if self.deadline is not None else None,
                 "seconds_left": self.seconds_left(), "ready": self.ready_text(), "seats": seats,
                 "scores": scores(self.state, self.ruleset), "result": self.state.result,
-                "messages": len(self.messages), "state_hash": state_hash(self.state)}
+                "messages": sum(1 for m in self.messages if not m.get("system")), "pacts": self.state.pacts,
+                "diplomacy_log": self.diplomacy_log, "state_hash": state_hash(self.state)}
 
 
 # ---------------------------------------------------------------- DreamTeam session link
@@ -1011,10 +1283,11 @@ class Replay:
     turns: list[ReplayTurn]
     result_expected: dict[str, Any] | None   # {winners, scores} of the journal's game_over, if any
     result_actual: dict[str, Any] | None
+    ruleset_legacy: str | None = None        # the same rules hashed as before phase limits left the hash
 
     @property
     def ruleset_ok(self) -> bool:
-        return self.ruleset_expected == self.ruleset_actual
+        return self.ruleset_expected in (self.ruleset_actual, self.ruleset_legacy)
 
     @property
     def result_ok(self) -> bool:
@@ -1040,9 +1313,20 @@ def replay(gdir: GameDir) -> Replay:
         raw = gdir.load_turn("orders", turn)
         if raw is None:
             raise FileNotFoundError(f"no saved orders for turn {turn}")
-        state, _ = resolve(state, {s: SeatOrders.from_dict(b) for s, b in raw.items()}, rs, config["seed"])
+        ops = gdir.load_turn("diplomacy", turn) or []
+        dip.apply_ops(state, ops)
+        state, _ = resolve(state, {s: SeatOrders.from_dict(b) for s, b in raw.items()}, rs, config["seed"], ops)
         turns.append(ReplayTurn(turn, expected[turn], state_hash(state)))
     result_expected = {"winners": over["winners"], "scores": over["scores"]} if over else None
     result_actual = ({"winners": state.result["winners"], "scores": state.result["scores"]}
                      if state.result else None)
-    return Replay(created.get("ruleset_hash"), rs.hash, turns, result_expected, result_actual)
+    return Replay(created.get("ruleset_hash"), rs.hash, turns, result_expected, result_actual,
+                  legacy_ruleset_hash(rs, config))
+
+
+def legacy_ruleset_hash(rs: Ruleset, config: dict[str, Any]) -> str:
+    """The ruleset hash as games before diplomacy journaled it: the scenario's phase limits were hashed too (a game
+    with the defaults of its time has them in its config). Kept so `dah replay` of such a game still matches."""
+    data = rs.to_dict()
+    data["scenario"]["phase_limits"] = dict(config["phase_limits"])
+    return sha256_json(data)

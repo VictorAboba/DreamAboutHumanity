@@ -53,7 +53,7 @@ Fields marked * are required. `name` is up to 48 characters, `short` (an abbrevi
 | building | `id`\*, `name`\*, `short`, `cost`\*, `build_turns`\* (1..10), `effects`, `recruit`, `max_per_province` |
 | faction | `id`\*, `name`\*, `lore` (up to 1000 characters), `bonuses`, `penalties`, `starting`\* |
 | map | `id`\*, `name`\*, `max_players`\* (1..16), `provinces`\*, `edges`\*, `starts`\* |
-| scenario | `id`\*, `name`\*, `map`\*, `factions`\*, `turn_limit`\*, `phase_limits`\*, `message_limits`, `overrides` |
+| scenario | `id`\*, `name`\*, `map`\*, `factions`\*, `turn_limit`\*, `phase_limits`\*, `message_limits`, `diplomacy_limits`, `overrides` |
 
 Details:
 
@@ -68,6 +68,10 @@ Details:
 - `message_limits` may set `negotiation_1` and `negotiation_2` (each with `per_recipient`, `private`, `public`) and
   `max_chars` (1..4000). Anything not set keeps the default: in N1 6 per recipient, 20 private, 2 public; in N2
   10 per recipient, 10 private, 1 public; 800 characters.
+- `diplomacy_limits` may set `gifts_per_phase` and `pact_proposals_per_phase` (0..50 per seat and negotiation
+  phase; default 3 and 3).
+- Phase and diplomacy limits are match settings: every match's config records them, and they are left out of the
+  ruleset hash (changing a default does not make `dah replay` of an older match report changed content).
 - The first faction of a scenario's `factions` is the one seats get.
 
 ## Effects
@@ -104,7 +108,7 @@ There are six effect types. Each one is allowed only in some places.
 | `p2.cost.new_attack` | int 1..5 | 2 | CP price of a new move or retarget in N2 |
 | `p2.cancel_refund` | float 0..1 | 0.75 | share of the reserve returned on an N2 cancel |
 | `command_points` | int 0..10 | 3 | CP per turn |
-| `combat.fortify_bonus` | float 0..1 | 0.25 | defense bonus of `fortify` |
+| `combat.fortify_bonus` | float 0..1 | 0.25 | defense bonus of `fortify` (the `core` scenarios override it to 0.15) |
 | `combat.counter_mul` | float 1..3 | 1.5 | counter multiplier |
 | `starvation.loss_frac` | float 0..1 | 0.10 | share of the army lost to starvation |
 

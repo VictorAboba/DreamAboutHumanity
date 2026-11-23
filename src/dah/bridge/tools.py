@@ -30,6 +30,10 @@ _ORDER_ITEM = {
         "units": _UNITS,
         "province": {"type": "string", "description": "recruit/build/fortify: провинция"},
         "building": {"type": "string", "description": "build: здание (mine, barracks...)"},
+        "pact": {"type": "string", "enum": ["honor", "break"],
+                 "description": "move: honor (по умолчанию) — соблюдать пакты: в провинцию союзника войска не "
+                                "войдут, вернутся без боя; break — нарушить пакт с владельцем цели (с ничейной — с "
+                                "союзником, идущим туда же): этот ход бьётся, пакт публично разорван"},
     },
     "required": ["kind"],
 }
@@ -49,7 +53,9 @@ _PATCH = {"type": "object",
           "properties": {"unit": {"type": "string", "description": "move: юнит (плоская форма, вместе с count)"},
                          "count": {"type": "integer", "minimum": 1,
                                    "description": "move: сколько юнитов unit; recruit: новое число"},
-                         "units": _UNITS, "to": {"type": "string", "description": "move: новая цель"}}}
+                         "units": _UNITS, "to": {"type": "string", "description": "move: новая цель"},
+                         "pact": {"type": "string", "enum": ["honor", "break"],
+                                  "description": "move: honor или break (в П2 honor→break стоит как новая атака)"}}}
 _ORDERS_HINT = (f" Плоская форма move: {FLAT_MOVE}; если вложенные объекты теряются — передай orders одной "
                 "JSON-строкой.")
 
@@ -83,16 +89,20 @@ TOOLS: tuple[ToolSpec, ...] = (
                       "format": {"type": "string", "enum": ["text", "json"], "default": "text",
                                  "description": "text (коротко, по умолчанию) или json"}})),
     ToolSpec("list_orders", "Твои поданные приказы, их хэш и остаток ОК.", _schema()),
-    ToolSpec("validate_orders", "Проверить приказы без подачи: причина отказа и цена в ОК." + _ORDERS_HINT,
+    ToolSpec("validate_orders", "Проверить приказы без подачи (в любой фазе, в П1 — как будто сейчас Д): причина "
+                                "отказа, цена в ОК, предупреждения (ход в провинцию союзника по пакту вернётся)."
+                                + _ORDERS_HINT,
              _schema({"orders": _ORDERS}, ["orders"])),
-    ToolSpec("submit_orders", "Подать приказы; mode: replace_all заменяет все, append добавляет." + _ORDERS_HINT,
+    ToolSpec("submit_orders", "Подать приказы — только в фазе Д (в П2 — append за ОК; в П1 нельзя, только "
+                              "validate_orders); mode: replace_all заменяет все, append добавляет." + _ORDERS_HINT,
              _schema({"orders": _ORDERS,
                       "mode": {"type": "string", "enum": ["replace_all", "append"], "default": "replace_all"}},
                      ["orders"])),
-    ToolSpec("cancel_order", "Отменить приказ по ID (в П2 стоит ОК).", _schema({"id": _ID}, ["id"])),
-    ToolSpec("amend_order", "Изменить приказ (в П2 стоит ОК): у move — юниты (плоско unit+count или units) "
-                            "и/или to, у recruit — count. Пример: amend_order(id=\"o3\", patch={\"unit\": "
-                            "\"assault\", \"count\": 1}); patch можно передать одной JSON-строкой.",
+    ToolSpec("cancel_order", "Отменить приказ по ID (в Д бесплатно, в П2 стоит ОК; в П1 нельзя).",
+             _schema({"id": _ID}, ["id"])),
+    ToolSpec("amend_order", "Изменить приказ (в Д бесплатно, в П2 стоит ОК; в П1 нельзя): у move — юниты (плоско "
+                            "unit+count или units), to и/или pact, у recruit — count. Пример: amend_order(id=\"o3\", "
+                            "patch={\"unit\": \"assault\", \"count\": 1}); patch можно передать одной JSON-строкой.",
              _schema({"id": _ID, "patch": _PATCH}, ["id", "patch"])),
     ToolSpec("estimate", "Прогноз боя: вероятность победы атакующего и средние потери сторон (200 прогонов). "
                          f"Пример: {EST_EXAMPLE}.",
@@ -111,8 +121,32 @@ TOOLS: tuple[ToolSpec, ...] = (
              _schema({"to": {"anyOf": [{"type": "array", "items": {"type": "string"}},
                                        {"type": "string", "enum": ["all"]}]},
                       "text": {"type": "string", "maxLength": 800}}, ["to", "text"])),
-    ToolSpec("inbox", "Входящие сообщения; since — только новее этой отметки.",
-             _schema({"since": {"type": ["integer", "string"]}})),
+    ToolSpec("inbox", "Входящие: сообщения игроков (обёрнуты untrusted) и записи [ИГРА] от самой игры "
+                      "(подношения, пакты). По умолчанию — только новые с прошлого вызова inbox; all=true или "
+                      "since=0 — вся история; since=N — новее номера N.",
+             _schema({"since": {"type": ["integer", "string"], "description": "Номер последнего прочитанного; 0 — всё"},
+                      "all": {"type": "boolean", "default": False, "description": "Вся история входящих"}})),
+    ToolSpec("send_gift", "Подношение (только П1 и П2): сразу отдать игроку свои свободные (не в резерве приказов) "
+                          "ресурсы. Пример: send_gift(to=\"Ник\", resources={\"alloy\": 10}).",
+             _schema({"to": {"type": "string", "description": "Ник получателя"},
+                      "resources": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 1},
+                                    "description": "{ресурс: число}, например {\"alloy\": 10, \"provisions\": 5}"}},
+                     ["to", "resources"])),
+    ToolSpec("propose_pact", "Предложить пакт (только П1 и П2): армии сторон при встрече не сражаются. turns — на "
+                             "сколько расчётов, считая текущий ход; без turns — бессрочно. Пример: "
+                             "propose_pact(to=\"Ник\", turns=3).",
+             _schema({"to": {"type": "string", "description": "Ник"},
+                      "turns": {"type": ["integer", "null"], "minimum": 1,
+                                "description": "Число ходов; null или без него — бессрочно"}}, ["to"])),
+    ToolSpec("respond_pact", "Ответить на предложение пакта (только П1 и П2) до конца хода: decision accept или "
+                             "reject. Пример: respond_pact(id=\"pact-A-B-1\", decision=\"accept\").",
+             _schema({"id": {"type": "string", "description": "ID пакта из входящих или list_pacts"},
+                      "decision": {"type": "string", "enum": ["accept", "reject"]}}, ["id", "decision"])),
+    ToolSpec("leave_pact", "Выйти из пакта (объявляется всем; из П1 — пакт не действует уже в расчёте этого хода, "
+                           "из П2 — со следующего) или отозвать своё предложение. Пример: "
+                           "leave_pact(id=\"pact-A-B-1\").",
+             _schema({"id": {"type": "string", "description": "ID пакта"}}, ["id"])),
+    ToolSpec("list_pacts", "Твои пакты и предложения (с ID) и все действующие пакты других (публично).", _schema()),
     ToolSpec("ready", "Нажать «готово»; confirm_hash — orders_hash твоих текущих приказов.",
              _schema({"confirm_hash": {"type": "string"}}, ["confirm_hash"])),
     ToolSpec("unready", "Снять «готово».", _schema()),
@@ -159,6 +193,10 @@ EXAMPLES = {
                    'amend_order(id="o3", patch={"to": "P03"})',
     "ready": 'ready(confirm_hash="<orders_hash из list_orders>")',
     "estimate": EST_EXAMPLE,
+    "send_gift": 'send_gift(to="Ник", resources={"alloy": 10})',
+    "propose_pact": 'propose_pact(to="Ник", turns=3) или propose_pact(to="Ник")',
+    "respond_pact": 'respond_pact(id="pact-A-B-1", decision="accept")',
+    "leave_pact": 'leave_pact(id="pact-A-B-1")',
 }
 
 
@@ -185,6 +223,7 @@ class Bridge:
     def __init__(self, client: GameClient):
         self._client = client
         self.last_phase_seq: int | None = None
+        self.last_inbox_id = 0     # the newest inbox entry this bridge process has returned
         self._handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
             "whoami": lambda a: client.whoami(),
             "rules": lambda a: client.rules(a.get("topic")),
@@ -203,7 +242,12 @@ class Bridge:
                                                   a.get("province_type"), a.get("fortified", False),
                                                   a.get("hasty", False)),
             "send_message": lambda a: client.send_message(_required(a, "to"), str(_required(a, "text"))),
-            "inbox": lambda a: client.inbox(a.get("since")),
+            "inbox": self._inbox,
+            "send_gift": lambda a: client.send_gift(_required(a, "to"), _lenient_json(_required(a, "resources"))),
+            "list_pacts": lambda a: client.list_pacts(),
+            "propose_pact": lambda a: client.propose_pact(_required(a, "to"), a.get("turns")),
+            "respond_pact": lambda a: client.respond_pact(str(_required(a, "id")), _required(a, "decision")),
+            "leave_pact": lambda a: client.leave_pact(str(_required(a, "id"))),
             "ready": lambda a: client.ready(str(_required(a, "confirm_hash"))),
             "unready": lambda a: client.unready(),
             "history": lambda a: client.history(a.get("turn")),
@@ -212,6 +256,26 @@ class Bridge:
     def _remember(self, data: dict[str, Any]) -> dict[str, Any]:
         if isinstance(data.get("phase_seq"), int):
             self.last_phase_seq = data["phase_seq"]
+        return data
+
+    def _inbox(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Only entries newer than the last one this process returned (like wait_phase's phase_seq); `all` or
+        `since=0` gives the whole history, `since=N` the entries after N."""
+        since = args.get("since")
+        if isinstance(since, str) and since.strip().isascii() and since.strip().isdigit() and len(since.strip()) < 10:
+            since = int(since.strip())
+        everything = args.get("all") is True or str(args.get("all")).strip().lower() == "true"
+        if everything or since == 0:
+            data = self._client.inbox(None)
+        elif since is not None:
+            data = self._client.inbox(since)
+        else:
+            data = self._client.inbox(self.last_inbox_id or None)
+        # the cursor moves only past entries actually returned: a guessed `since` beyond the newest entry must not
+        # make later default calls skip messages that arrive afterwards
+        ids = [m["id"] for m in data.get("messages") or [] if isinstance(m, dict) and isinstance(m.get("id"), int)]
+        if ids:
+            self.last_inbox_id = max(self.last_inbox_id, max(ids))
         return data
 
     def _wait_phase(self, args: dict[str, Any]) -> dict[str, Any]:

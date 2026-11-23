@@ -18,14 +18,26 @@ stdio MCP-сервер `dah`, который переводит вызовы и�
 | ключ зрителя | `dahw_<game>_...` | только браузер: страница `http://127.0.0.1:8800/watch/<id>` (и `/v1/spectate/*`); агентам его не давать |
 
 Ключ зрителя печатается вместе с ключами мест, новый выдаёт `dah game spectator-key <id>`. Ключ места на странице
-наблюдения не принимается, ключ зрителя не работает в API игрока.
+наблюдения не принимается, ключ зрителя не работает в API игрока. Страница наблюдения принимает и ссылку `/watch/<id>#key=<ключ зрителя>`: ключ во фрагменте не уходит на сервер, страница сохраняет его в sessionStorage, сразу убирает из адресной строки и шлёт только заголовком `Authorization: Bearer`; без фрагмента ключ спрашивает форма.
 
 ## Инструменты `dah`
 
 `whoami`, `rules(topic?)`, `phase`, `wait_phase(max_seconds=45)`, `get_state(since_turn?, format?)`, `list_orders`,
 `validate_orders(orders)`, `submit_orders(orders, mode)`, `cancel_order(id)`, `amend_order(id, patch)`,
-`estimate(attacker, defender, province_type, fortified?, hasty?)`, `send_message(to, text)`, `inbox(since?)`,
+`estimate(attacker, defender, province_type, fortified?, hasty?)`, `send_message(to, text)`, `inbox(since?, all?)`,
+`send_gift(to, resources)`, `propose_pact(to, turns?)`, `respond_pact(id, decision)`, `leave_pact(id)`, `list_pacts`,
 `ready(confirm_hash)`, `unready`, `history(turn?)`.
+
+- Приказы подаются только в фазе Д (`submit_orders`; в П2 — `append`, `amend_order`, `cancel_order` за ОК). В П1
+  `submit_orders`, `cancel_order`, `amend_order` отвечают `PHASE_LOCKED`: там приказы можно только проверить
+  (`validate_orders` работает в любой фазе).
+- `inbox()` моста по умолчанию отдаёт только записи новее последней, которую этот процесс моста уже вернул;
+  `inbox(all=true)` или `inbox(since=0)` — вся история. Записи `[ИГРА]` (`system: true`) пишет сама игра: подношения
+  и пакты.
+- Дипломатия — в П1 и П2: `send_gift` (свободные ресурсы сразу уходят игроку, ≤3 за фазу), пакты
+  (`propose_pact` → `respond_pact`; `leave_pact`). У `move` есть поле `pact`: `honor` (по умолчанию: в провинцию
+  союзника войска не войдут) или `break` (нарушение: бой, пакт публично разорван). Подробно —
+  [Правила игры](ru/rules.md#дипломатия-подношения-и-пакты).
 
 - `orders` — JSON-массив приказов. Надёжнее всего плоская форма `move` (один тип юнитов на приказ):
   `[{"kind": "move", "from": "P01", "to": "P04", "unit": "assault", "count": 2}]`. Вложенная тоже работает:
@@ -182,7 +194,8 @@ uv run --project C:/path/to/DreamAboutHumanity dah-waker \
   (`POST /api/v1/sessions/{id}/stop`, телеметрия `session_stopped_by_waker`); запущенный уже после game_over
   (в т. ч. перезапуск) не шлёт ни `continue`, ни stop (`continue_skipped`, `started_after_game_over`);
 - после game_over каждые 30 с читает сводку сессии и шлёт новый расход с `phase: after_game_over`, пока сессия не
-  остановится или не затихнет (`done`/`budget` без нового расхода два чтения подряд; `waiting`/`paused` опрашивает
+  остановится, или пока её цель не окажется выполненной (`goal.status` done) при сессии не в работе (не
+  `running`/`starting`) и расходе, не менявшемся 60 с (причина `goal_done`), или пока она не затихнет (`done`/`budget` без нового расхода два чтения подряд; `waiting`/`paused` опрашивает
   дальше), но не дольше `--post-game-minutes` (30), затем пишет `post_game_finished` и
   завершается; `dah report` показывает эти деньги и время отдельно («после game_over»);
 - пишет телеметрию `wake_sent`, `wake_answered`, `wake_unanswered`, `continue_skipped`, `session_restarted`,

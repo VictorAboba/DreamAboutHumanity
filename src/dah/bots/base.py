@@ -39,6 +39,15 @@ class Api(Protocol):
     def ready(self, confirm_hash: str) -> dict[str, Any]: ...
 
 
+class DiplomacyApi(Api, Protocol):
+    """Gifts and pacts (only the bots that override `Bot.diplomacy` use these)."""
+
+    def send_gift(self, to: str, resources: dict[str, int]) -> dict[str, Any]: ...
+    def propose_pact(self, to: str, turns: int | None) -> dict[str, Any]: ...
+    def respond_pact(self, pact_id: str, decision: str) -> dict[str, Any]: ...
+    def leave_pact(self, pact_id: str) -> dict[str, Any]: ...
+
+
 def seat_seed(game_id: str, seat: str) -> int:
     return int.from_bytes(hashlib.sha256(f"{game_id}|{seat}|bot".encode()).digest()[:8], "big")
 
@@ -57,6 +66,9 @@ class Bot:
     def message(self, view: StateView) -> str | None:
         """Public message to send in the current negotiation phase, if any."""
         return None
+
+    def diplomacy(self, view: StateView, api: DiplomacyApi) -> None:
+        """Gifts and pact moves in a negotiation phase (called before `message`); none by default."""
 
     def action_orders(self, view: StateView, estimate: Estimator) -> list[Order]:
         """Orders for the actions phase (submitted with mode replace_all)."""
@@ -100,6 +112,12 @@ class Bot:
         estimate = _qualified_estimator(api, view)
         confirm_hash: str | None = None
         if phase in NEGOTIATION_PHASES:
+            if type(self).diplomacy is not Bot.diplomacy:
+                try:
+                    self.diplomacy(view, api)  # type: ignore[arg-type]
+                except ApiError as exc:  # a refused gift or pact is not worth failing the phase over
+                    log.info("bot %s: diplomacy rejected: %s", self.seat, exc)
+                view = parse_state(api.state(), me)
             text = self.message(view)
             if text:
                 try:

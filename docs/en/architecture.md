@@ -28,6 +28,7 @@ src/dah/
     schemas/               a JSON Schema for each content type
     model.py               game state (dataclasses), canonical JSON, state_hash
     orders.py              order checks, reservations, CP prices for N2
+    diplomacy.py           gifts and pacts as ops on the state (shared by the live match and replay)
     combat.py              the battle formula and estimate
     resolve.py             game setup and turn resolution (a deterministic pure function)
     view.py                fog of war, state text, turn reports, rules text
@@ -39,7 +40,7 @@ src/dah/
   server/                  FastAPI app (app.py) and the registry of loaded matches (registry.py)
   bridge/                  dah-bridge: MCP tools over HTTP
   waker/                   dah-waker: wakes DreamTeam sessions
-  bots/                    passive, builder and rush bots (plain HTTP clients)
+  bots/                    passive, builder, rush and diplomat bots (plain HTTP clients)
   cli.py                   the dah command
 tests/                     pytest; test_e2e_bots.py runs CLI → server → bots → report and replay → bridge
 docs/                      SLICE.md (spec), CONCEPT.md (concept), CONNECT.md (connecting agents), en/, ru/
@@ -52,8 +53,12 @@ docs/                      SLICE.md (spec), CONCEPT.md (concept), CONNECT.md (co
 - `new_game_state(ruleset, seats, seed)` deals the starts and returns the state of turn 1.
 - `submit_orders`, `cancel_order`, `amend_order` take a seat's order book and return a new one, with a reason for
   each refusal. They never change their input.
-- `resolve(state, orders_by_seat, ruleset, seed)` returns the new state and a `TurnReport`: all events, the part
-  each seat may see, the public part (owner changes, eliminations, scores, result) and idle statistics.
+- `resolve(state, orders_by_seat, ruleset, seed, diplomacy=())` returns the new state and a `TurnReport`: all
+  events, the part each seat may see, the public part (owner changes, eliminations, scores, result, the public
+  diplomacy facts) and idle statistics. Pacts in force decide which armies do not fight; `diplomacy` (the turn's
+  ops, already applied to the state) only goes into the report.
+- `diplomacy.make_gift`, `make_proposal`, `make_response`, `make_leave` check a request and return an op;
+  `apply_op` applies it to the state (`GameState.pacts`, resources).
 - `view_state` and `render_state_text` apply the fog of war; `rules_text` writes the rules from the ruleset.
 
 ## Game
@@ -65,6 +70,8 @@ docs/                      SLICE.md (spec), CONCEPT.md (concept), CONNECT.md (co
 - an injected clock: `tick()` closes a phase whose deadline has passed, so tests run without waiting;
 - each seat's order book for the current turn, ready flags and `confirm_hash` checks;
 - message limits and the `untrusted` wrapping;
+- gifts and pacts: limits per phase, the ops of the current turn (`diplomacy_log`), the game's own inbox entries
+  (`system`, `[ИГРА]`);
 - `phase_seq` and `wait_phase`, which wakes waiting requests on every phase change.
 
 Every change is written to the journal, and the live snapshot to `private/runtime.json`. `Game.load` restores a
@@ -82,8 +89,9 @@ match from it after a server restart.
 | `private/runtime.json` | live snapshot: state, order books, ready flags, phase timing |
 | `private/states/turn_<N>.json` | the state at the start of turn N |
 | `private/orders/turn_<N>.json` | the order books resolved at the end of turn N |
+| `private/diplomacy/turn_<N>.json` | the diplomacy ops of turn N in order (only for turns that had any) |
 | `private/reports/turn_<N>.json` | the full report of turn N |
-| `private/messages.jsonl` | full message texts |
+| `private/messages.jsonl` | full message texts, and the game's own inbox entries (`system: true`) |
 | `private/bot_keys.json` | keys of bot seats, for `dah bots run` |
 
 The server never gives `private/` to players. The journal holds message sizes, not texts.
@@ -107,6 +115,9 @@ The server never gives `private/` to players. The journal holds message sizes, n
 | `turn_resolved` | turn, `state_hash`, scores, idle resources and units, `autopilot` (seats that resolved with no orders) |
 | `spend_report` | seat, `spent_usd`, source, tokens, `for_turn`/`for_phase` (the phase the figure is for; `null` for a baseline), `at_turn`/`at_phase` (when it was received), `turn`/`phase` (the "for" pair, else the "at" pair) |
 | `telemetry` | seat, kind, detail |
+| `gift` | seat (giver), to, resources, turn, phase |
+| `pact_proposed` / `pact_accepted` / `pact_rejected` / `pact_withdrawn` / `pact_left` | seat, `pact_id`, seats or to, turns, `until_turn` / `ends_before_turn`, turn, phase |
+| `pact_broken` / `pact_expired` / `pact_ended` / `pact_lapsed` | `pact_id`, seats, turn; `broken_by` / reason (`left`, `eliminated`) |
 | `game_over` | winners, reason (`last_standing` or `turn_limit`), scores, turn |
 
 A crash in the middle of a write leaves at most one torn line; readers skip it and the writer continues after it.
@@ -125,13 +136,16 @@ So the same ruleset, seed and orders always give the same match.
 ## state_hash and replay
 
 `state_hash` is the sha256 of the state's canonical JSON (sorted keys, no spaces), without the per-seat order id
-counters. The journal records it in every `turn_resolved` event.
+counters (and without `pacts` while there are none, so a match without diplomacy hashes as before pacts existed).
+The journal records it in every `turn_resolved` event.
 
 `dah replay <id>`:
 
-1. rebuilds the ruleset from the config and compares its hash with `ruleset_hash` in the journal;
+1. rebuilds the ruleset from the config and compares its hash with `ruleset_hash` in the journal (a match created
+   before phase limits left the hash matches by the older hash, computed with its config's limits);
 2. creates the initial state from the seed;
-3. resolves each turn with the orders saved in `private/orders/`;
+3. applies each turn's diplomacy ops from `private/diplomacy/` and resolves the turn with the orders saved in
+   `private/orders/`;
 4. compares each turn's `state_hash` and the final winners and scores with the journal.
 
 A mismatch means the rules or content changed, or resolution is not deterministic. The command exits with code 1.

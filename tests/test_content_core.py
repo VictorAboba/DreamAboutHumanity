@@ -43,22 +43,31 @@ def test_core_scenarios_build(scenario, map_id, n):
 def test_core_content_values():
     rs = build_ruleset(None, "slice3")
     assert rs.scenario.turn_limit == 10
-    assert rs.scenario.phase_limits == {"negotiation_1": 1200, "actions": 1200, "negotiation_2": 600}
+    assert rs.scenario.phase_limits == {"negotiation_1": 720, "actions": 300, "negotiation_2": 300}
+    assert build_ruleset(None, "slice2").scenario.phase_limits == rs.scenario.phase_limits
+    assert rs.scenario.diplomacy_limits == {"gifts_per_phase": 3, "pact_proposals_per_phase": 3}
     assert build_ruleset(None, "blitz_test").scenario.phase_limits["actions"] == 5
     assert rs.scenario.message_limits["negotiation_1"] == {"per_recipient": 6, "private": 20, "public": 2}
     assert rs.scenario.message_limits["max_chars"] == 800
     assert rs.unit_cost("core:armor") == {"core:alloy": 25}
-    assert rs.unit_upkeep("core:armor") == {"core:provisions": 2}
+    # core 0.2.0 balance (docs/SLICE.md section 3; scripts/simulate.py measured it)
+    assert rs.unit_upkeep("core:armor") == {"core:provisions": 1}
+    assert rs.unit_cost("core:artillery") == {"core:alloy": 15}
     assert rs.units["core:assault"].counters == ("core:artillery",)
     assert rs.units["core:armor"].counters == ("core:assault",)
     assert rs.units["core:artillery"].counters == ("core:armor",)
     assert rs.buildings["core:barracks"].recruit and rs.buildings["core:barracks"].build_turns == 2
-    assert rs.buildings["core:mine"].income == {"core:alloy": 3}
-    assert rs.province_types["core:capital"].defense_mul == 1.5
+    assert rs.buildings["core:mine"].income == {"core:alloy": 5}
+    assert rs.building_cost("core:mine") == {"core:alloy": 10} and rs.building_cost("core:farm") == {"core:alloy": 8}
+    assert rs.province_types["core:capital"].defense_mul == 1.25
+    assert rs.province_types["core:capital"].income == {"core:alloy": 3, "core:provisions": 2}
+    assert rs.province_types["core:agri"].income == {"core:provisions": 4}
+    assert rs.province_types["core:waste"].defense_mul == 1.1
+    assert rs.stat("combat.fortify_bonus") == 0.15   # scenario override of the engine default 0.25
     assert rs.stat("p2.hasty_penalty") == 0.15 and rs.stat("command_points") == 3
     fac = rs.factions["core:covenant"]
-    assert fac.start_resources == {"core:alloy": 40, "core:provisions": 30}
-    assert fac.start_units == {"core:assault": 3} and fac.start_buildings == ("core:barracks",)
+    assert fac.start_resources == {"core:alloy": 30, "core:provisions": 15}
+    assert fac.start_units == {"core:assault": 4} and fac.start_buildings == ("core:barracks",)
     assert rs.resolve("unit", "assault") == "core:assault"
     assert rs.resolve("unit", "nope") is None
 

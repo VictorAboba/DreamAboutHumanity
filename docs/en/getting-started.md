@@ -61,23 +61,32 @@ uv run dah replay demo            # re-runs every turn and checks each state_has
   `dah-bridge` and into `dah-waker --key`, and opens the player routes `/v1/*`. A **spectator key**
   `dahw_<game>_...` (printed with them; reissue with `dah game spectator-key`) is for people watching: it is typed
   into the page `http://127.0.0.1:8800/watch/<id>` and opens only that page and `/v1/spectate/*`. Neither works in
-  the other's place.
+  the other's place. The watch page also accepts a link `/watch/<id>#key=<spectator key>`. The key stays in the fragment, which the browser never sends to the server; the page saves it in sessionStorage, removes it from the address bar at once and sends it only as the `Authorization: Bearer` header. Without a fragment the page asks for the key in a form.
 - Turn 1 does not start at creation. Its first phase opens when the server loads the match, so setup time does not
   count against the phase.
 - A phase closes on its deadline or as soon as every living seat has pressed ready. Bots press ready at once, so a
   bot match usually ends in seconds.
 
-The three bots:
+The four bots (the three that play share their movement code: each army attacks its best neighbouring target
+when `estimate` is high enough, interior armies march to the border, the capital keeps a garrison, armies that stay
+fortify):
 
 - `passive` does nothing and is always ready.
-- `builder` builds farms and mines, recruits from surplus, keeps the army at home and fortifies the capital.
-- `rush` recruits as much as it can, attacks a neighbouring foreign or neutral province when `estimate` gives
-  a win probability of 0.6 or more, and otherwise marches towards the nearest one.
+- `builder` lays a farm or a mine every turn while the match is young, recruits what it can feed, attacks only when
+  `estimate` is 0.75 or more (0.6 once it has stopped building) and accepts every pact offered to it.
+- `rush` spends everything on the army (a farm only when food limits recruiting) and attacks when `estimate` gives
+  a win probability of 0.6 or more.
+- `diplomat` proposes a pact to each neighbour, accepts pacts, sometimes sends a small gift, attacks only seats it
+  has no pact with (0.65 or more) and, in the last two turns, breaks a pact (`"pact": "break"`) when `estimate` is
+  0.85 or more.
+
+`uv run python scripts/simulate.py` plays hundreds of bot matches on the engine directly, without a server, and
+prints balance tables (docs/SLICE.md, section 3).
 
 ## A match with AI agents
 
 ```sh
-uv run dah game create --scenario core:slice3 --seed 7 --limits 20m,20m,10m --turns 10 \
+uv run dah game create --scenario core:slice3 --seed 7 --limits 12m,5m,5m --turns 10 \
     --seat A:swarm:Niko --seat B:agent:Solo --seat C:bot-rush:Bot
 uv run dah goal-text <id> A        # goal text for the swarm or agent of seat A (it holds no key)
 ```
@@ -112,7 +121,7 @@ Creates `games/<id>/` and prints the seat keys once.
 | `--scenario ID` | required; full id such as `core:slice3` (a short `slice3` also works if it is unique) |
 | `--seat SEAT:KIND:NICK` | required, once per seat; `KIND` is listed below |
 | `--seed N` | game seed; random if omitted |
-| `--limits N1,A,N2` | phase lengths, e.g. `20m,20m,10m` (`s`, `m`, `h` or seconds); default from the scenario |
+| `--limits N1,A,N2` | phase lengths, e.g. `12m,5m,5m` (`s`, `m`, `h` or seconds); default from the scenario |
 | `--turns N` | turn limit; default from the scenario |
 | `--id ID` | match id: letters, digits, hyphen, up to 64 characters |
 | `--dt-session SEAT=ID` | DreamTeam session id of a seat, recorded in the config and journal (later: `dah game set-session`, or the waker records it itself) |
@@ -120,7 +129,7 @@ Creates `games/<id>/` and prints the seat keys once.
 | `--packs DIR` | pack folder, repeat for each pack; with it only the listed packs load (include `core`) |
 | `--games-dir DIR` | where to create the match (default `games`) |
 
-- `KIND` is `swarm`, `agent`, `human`, or a bot: `bot-passive`, `bot-builder`, `bot-rush`.
+- `KIND` is `swarm`, `agent`, `human`, or a bot: `bot-passive`, `bot-builder`, `bot-rush`, `bot-diplomat`.
 - `--declared` example: `--declared 'B={"system":"...","model":"...","agents":1,"version":"..."}'`.
 
 Seat ids are letters and digits, up to 16 characters. Seat ids and nicks must be unique within a match. The
@@ -165,7 +174,9 @@ shown only for seats with after-game data, as on /watch); waker telemetry and th
 the money ran out; per seat the waker's phase wakes («пробуждения: отправлено / ответ / без ответа, медиана до хода»:
 wakes sent, answered and unanswered within `--ack-seconds`, the median seconds to the first game call after a wake). `--json` prints the same as JSON (`submits_by_phase`, `no_orders_turns`, `not_ready_phases`,
 `spent_in_game_usd`, `spent_after_game_usd`, `in_game_s`, `after_game_s`, `post_game_watch_s`, `wakes_sent`,
-`wakes_answered`, `wakes_unanswered`, `wake_answer_median_s`, ...).
+`wakes_answered`, `wakes_unanswered`, `wake_answer_median_s`, `pacts_signed`, `pacts_kept`, `pacts_broken`,
+`gifts_sent`, `gifts_received`, `gifted_resources`, `received_resources`, ...). Diplomacy per seat is in the text too
+(«пакты: заключено / соблюдено / нарушено; подношения: отдано / получено»), for seats that had any.
 
 ### `dah replay ID`
 

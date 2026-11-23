@@ -12,6 +12,9 @@ EVENT_TYPES = frozenset({
     "game_created", "seat_info", "phase_open", "phase_close", "recon", "call", "first_call_in_phase",
     "orders_validated", "orders_submitted", "order_edit", "order_edit_p2", "ready", "unready", "ready_cleared",
     "message", "turn_resolved", "spend_report", "telemetry", "game_over",
+    # diplomacy (CONCEPT.md section 7): gifts and pacts
+    "gift", "pact_proposed", "pact_accepted", "pact_rejected", "pact_withdrawn", "pact_left", "pact_broken",
+    "pact_expired", "pact_ended", "pact_lapsed",
 })
 
 

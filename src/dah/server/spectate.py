@@ -22,6 +22,12 @@ The handlers stay on the event loop on purpose: Game has no lock and every playe
 running them in a threadpool would race `tick()` and the message list. Only the journal parse, which reads nothing
 but the append-only journal file, runs in a thread.
 
+Diplomacy (CONCEPT.md section 7): `pacts` of a snapshot are the pacts in force after that turn. The delayed spectator
+sees them, and gifts and pact events in the feed, as public facts only: who gave to whom (no amounts), who signed,
+left or broke a pact (no pact ids, which would count a pair's private proposals); proposals and refusals are hidden
+until the game is over. The game's own inbox notices (`system` entries of the message log) are not player messages and
+are not listed under messages: the events say the same.
+
 The delayed spectator never sees the game-wide message id (its gaps would count the private messages in between):
 public messages are numbered among public messages only. Seat kinds, bot types and declared setups are hidden until
 the game is over, as they are from the players.
@@ -44,6 +50,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, Response
 
 from dah.engine import GameState, TurnReport, scores
+from dah.engine import diplomacy as dip
 from dah.engine.view import PHASE_LABELS, event_text
 from dah.game import GAME_OVER, Game, iso_time
 from dah.journal import read_events
@@ -276,7 +283,23 @@ def _public_events(report: dict[str, Any], game: Game, state: GameState) -> list
     events = [{"kind": "captured", "province": c["province"], "from": c["from"], "to": c["to"],
                "seats": sorted(s for s in (c["from"], c["to"]) if s)} for c in public.get("ownership_changes", [])]
     events += [{"kind": "eliminated", "province": None, "seat": s, "seats": [s]} for s in public.get("eliminated", [])]
+    events += [dip.public_event(e) for e in public.get("diplomacy", [])]
     return [_event_entry(e, game, state) for e in events]
+
+
+def _pacts(state: GameState, full: bool) -> list[dict[str, Any]]:
+    """Pacts in force in `state` (public: sides and terms); the full view adds ids and every proposal and ended pact."""
+    nick = {s: p.nick for s, p in state.players.items()}
+    rows = state.pacts if full else dip.active_pacts(state)
+    out = []
+    for pact in rows:
+        entry = {**dip.public_pact(pact), "status": pact["status"]}
+        if full:
+            entry.update(id=pact["id"], proposed_by=pact["a"], broken_by=list(pact.get("broken_by") or []),
+                         ended_turn=pact.get("ended_turn"), ended_reason=pact.get("ended_reason"))
+        entry["nicks"] = [nick.get(s, s) for s in entry["seats"]]
+        out.append(entry)
+    return out
 
 
 def _message_entry(m: dict[str, Any], state: GameState, number: int) -> dict[str, Any]:
@@ -328,9 +351,15 @@ def snapshot(game: Game, cache: GameCache, turn: int, level: str) -> dict[str, A
             orders = {s: b.get("orders", []) for s, b in raw_orders.items()}
         else:
             events = _public_events(report, game, state)
+    elif in_progress and full:
+        # the turn in progress: its diplomacy so far (gifts with amounts, proposals) for the admin
+        events = [_event_entry(e, game, state) for op in game.diplomacy_log
+                  if (e := dip.op_event(op, state)) is not None]
     messages = []
     public_seen = 0
     for m in game.messages:
+        if m.get("system"):  # the game's own notices: the events (and pacts) say the same
+            continue
         if m["to"] == "all":
             public_seen += 1
         elif not full:
@@ -341,6 +370,7 @@ def snapshot(game: Game, cache: GameCache, turn: int, level: str) -> dict[str, A
     out: dict[str, Any] = {
         "turn": turn, "in_progress": in_progress, "level": level, "full": full,
         "provinces": provinces, "players": players, "scores": sc, "events": events, "messages": messages,
+        "pacts": _pacts(state, full),
         "result": state.result if state.phase == GAME_OVER else None,
     }
     if orders is not None:
@@ -395,7 +425,9 @@ def build_timings(path: Path) -> dict[str, Any]:
     total_fields = ("calls", "req_chars", "resp_chars", "host_calls", "host_req_chars", "host_resp_chars",
                     "submits", "edits", "p2_edits", "validate_rejected", "submit_rejected", "spent_usd",
                     "submits_by_phase", "no_orders_turns", "not_ready_phases", "idle_units", "telemetry",
-                    "spent_in_game_usd", "spent_after_game_usd", "in_game_s", "after_game_s")
+                    "spent_in_game_usd", "spent_after_game_usd", "in_game_s", "after_game_s", "pacts_signed",
+                    "pacts_kept", "pacts_broken", "gifts_sent", "gifts_received", "gifted_resources",
+                    "received_resources")
     out = {
         "seats": rep["seats"], "rules_chars": rep["rules_chars"],
         "phases": [{"turn": ph["turn"], "phase": ph["phase"], "closed": ph["closed"], "duration_s": ph["duration_s"],

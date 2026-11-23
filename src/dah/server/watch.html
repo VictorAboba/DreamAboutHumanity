@@ -186,6 +186,25 @@ h4 { margin: 12px 0 6px; font-size: 14px; }
   function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
   function loadKey() { try { return sessionStorage.getItem(storeKey); } catch (e) { return null; } }
   function saveKey(k) { try { if (k) sessionStorage.setItem(storeKey, k); else sessionStorage.removeItem(storeKey); } catch (e) {} }
+  // A link /watch/<id>#key=... carries the key in the fragment, which the browser never sends to a server. The key
+  // is taken from it, kept in sessionStorage like a typed one, and the fragment is removed from the address bar at
+  // once (history.replaceState), so it is not left visible or in this tab's history entry. The key then goes out
+  // only as the Bearer header of the spectator API calls.
+  function takeFragmentKey() {
+    var hash = location.hash || "";
+    if (hash.length < 2) return null;
+    var k = null;
+    try { k = new URLSearchParams(hash.substring(1)).get("key"); } catch (e) { k = null; }
+    if (k === null) return null;
+    try { history.replaceState(history.state, "", location.pathname + location.search); }
+    // fallback: replace this history entry (assigning location.hash would push a new one and leave the
+    // #key=... entry reachable with Back)
+    catch (e) { try { location.replace(location.pathname + location.search + "#"); } catch (e2) {} }
+    k = k.trim();
+    if (!k) return null;
+    saveKey(k);
+    return k;
+  }
 
   function ApiError(status, code, message) { this.status = status; this.code = code; this.message = message; }
   function get(path) {
@@ -638,7 +657,15 @@ h4 { margin: 12px 0 6px; font-size: 14px; }
   });
   setInterval(tickCountdown, 1000);
 
-  S.key = loadKey();
+  window.addEventListener("hashchange", function () {
+    var k = takeFragmentKey();
+    if (!k || k === S.key) return;
+    S.key = k;
+    $("keyerror").textContent = "";
+    start();
+  });
+
+  S.key = takeFragmentKey() || loadKey();
   if (S.key) start(); else askKey("");
 })();
 </script>

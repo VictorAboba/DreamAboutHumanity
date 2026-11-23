@@ -9,11 +9,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-# Numbers of the `core` pack the bots plan with (SLICE.md section 3); the server stays the authority.
-UNIT_COST_ALLOY: dict[str, int] = {"assault": 12, "armor": 25, "artillery": 20}
-UNIT_UPKEEP_FOOD: dict[str, int] = {"assault": 1, "armor": 2, "artillery": 1}
-BUILDING_COST_ALLOY: dict[str, int] = {"mine": 20, "farm": 15, "barracks": 30}
+# Numbers of the `core` pack (0.2.0) the bots plan with (SLICE.md section 3); the server stays the authority.
+# tests/test_bots_logic.py checks they match content/packs/core.
+UNIT_COST_ALLOY: dict[str, int] = {"assault": 12, "armor": 25, "artillery": 15}
+UNIT_UPKEEP_FOOD: dict[str, int] = {"assault": 1, "armor": 1, "artillery": 1}
+BUILDING_COST_ALLOY: dict[str, int] = {"mine": 10, "farm": 8, "barracks": 30}
 RECRUIT_BUILDINGS: frozenset[str] = frozenset({"barracks"})
+FARM_SITE = "agri"  # province type a farm prefers
 BUILD_RESOURCE = "alloy"
 FOOD_RESOURCE = "provisions"
 
@@ -52,6 +54,12 @@ class StateView:
     command_points: int
     provinces: dict[str, Province]
     id_prefix: str  # e.g. "core:" when the server uses full IDs, else ""
+    seat: str = ""  # own seat id as the server reports it ("you.seat")
+    turn_limit: int = 0  # 0 when the server did not say
+    players: tuple[str, ...] = ()  # seats of living players (self included)
+    pacts: tuple[dict[str, Any], ...] = ()  # active pacts: {seats: [a, b], id?: own pacts only, ...}
+    pact_proposals: tuple[dict[str, Any], ...] = ()  # own open proposals: {id, from, to, turns}
+    net_income: dict[str, int] | None = None  # short resource id -> income minus upkeep; None if not sent
 
     def is_mine(self, province: Province) -> bool:
         return province.owner is not None and province.owner in self.me
@@ -68,6 +76,31 @@ class StateView:
 
     def resource(self, short: str) -> int:
         return self.resources.get(short, 0)
+
+    def pact_with(self, other: str | None) -> dict[str, Any] | None:
+        """Own active pact with `other` (a seat), if any."""
+        if other is None:
+            return None
+        return next((p for p in self.pacts if other in p.get("seats", ()) and self.me & set(p.get("seats", ()))),
+                    None)
+
+    def is_partner(self, other: str | None) -> bool:
+        return self.pact_with(other) is not None
+
+    def feedable(self, unit: str, turns: int) -> int | None:
+        """How many more `unit` the food stock and net food income keep fed for `turns` turns (None: unknown)."""
+        if self.net_income is None or turns <= 0:
+            return None
+        per_unit = UNIT_UPKEEP_FOOD.get(unit, 1) or 1
+        budget = self.resource(FOOD_RESOURCE) + turns * self.net_income.get(FOOD_RESOURCE, 0)
+        return max(0, budget // (per_unit * turns))
+
+
+def farm_site(view: StateView) -> Province | None:
+    """Where a new farm goes (an agri world first), or None when every own province has one."""
+    sites = [p for p in view.own_provinces() if "farm" not in p.buildings]
+    preferred = [p for p in sites if p.kind == FARM_SITE]
+    return (preferred or sites or [None])[0]
 
 
 def parse_state(payload: dict[str, Any], me: set[str] | frozenset[str]) -> StateView:
@@ -101,6 +134,8 @@ def parse_state(payload: dict[str, Any], me: set[str] | frozenset[str]) -> State
 
     resources = _resources(player.get("resources", state.get("resources", {})))
     seen_ids += list(resources)
+    players = tuple(str(p.get("seat")) for p in state.get("players") or []
+                    if isinstance(p, dict) and p.get("alive", True))
     return StateView(
         turn=int(state.get("turn", 0)),
         phase=str(state.get("phase", "")),
@@ -109,7 +144,19 @@ def parse_state(payload: dict[str, Any], me: set[str] | frozenset[str]) -> State
         command_points=int(player.get("command_points", player.get("cp", state.get("command_points", 0)))),
         provinces=provinces,
         id_prefix=_prefix(seen_ids),
+        seat=str(player.get("seat", "")),
+        turn_limit=int(state.get("turn_limit") or 0),
+        players=players,
+        pacts=tuple(dict(p) for p in state.get("pacts") or [] if isinstance(p, dict)),
+        pact_proposals=tuple(dict(p) for p in state.get("pact_proposals") or [] if isinstance(p, dict)),
+        net_income=_net_income(player.get("net_income")),
     )
+
+
+def _net_income(raw: Any) -> dict[str, int] | None:
+    if not isinstance(raw, dict):
+        return None
+    return {short_id(str(r)): int(v) for r, v in raw.items() if isinstance(v, (int, float))}
 
 
 def _player_block(state: dict[str, Any]) -> dict[str, Any]:

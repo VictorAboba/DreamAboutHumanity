@@ -38,6 +38,12 @@ AFTER_GAME_OVER = "after_game_over"
 # a review or an approval, or paused by the user) and may spend again once resumed, so the watch keeps polling it.
 IDLE_STATES = frozenset({"done", "budget"})
 IDLE_POLLS = 2
+# A session whose goal is completed (`goal.status` done) and whose cost has not changed for this many seconds ends the
+# post-game watch as `goal_done`, well before --post-game-minutes (which stays the upper bound).
+GOAL_DONE_QUIET_SECONDS = 60.0
+# ...but never while the session is at work: a running wrap-up turn may post its cost only when it ends, so a flat cost
+# and a goal status left `done` from before the wrap-up do not mean the session has finished spending.
+BUSY_STATES = frozenset({"starting", "running"})
 WAKE_MODES = ("all", "continue", "both")
 DEFAULT_WAKE_MODE = "all"
 TO_ALL = ["all"]
@@ -424,8 +430,9 @@ class Waker:
         """The one wrap-up (a message to all members; `continue` with --wake-mode continue; a stopped session is not
         started again for it) or `stop` with --stop-on-game-over, then a read of the session summary every
         POST_GAME_POLL_SECONDS, each new cost posted as `/v1/spend` with phase `after_game_over`, until the session is
-        stopped (`final`) or idle (`done`/`budget` and no new spend over IDLE_POLLS reads in a row), or
-        post_game_minutes have passed. A waker whose first poll already saw game_over sends neither the wrap-up nor
+        stopped (`final`), its goal is completed (`goal.status` done), it is not running (BUSY_STATES) and its cost
+        has not changed for GOAL_DONE_QUIET_SECONDS (`goal_done`), it is idle (`done`/`budget` and no new spend over IDLE_POLLS reads in a
+        row), or post_game_minutes have passed. A waker whose first poll already saw game_over sends neither the wrap-up nor
         the stop (an earlier process did) and only watches the spend. Ends with `post_game_finished` telemetry
         (reason, duration, spend delta), Ctrl-C included (reason `interrupted`)."""
         started = self._clock()
@@ -443,6 +450,7 @@ class Waker:
         last_cost, posted, polls, idle_polls = cost_at_over, cost_at_over, 0, 0
         state = self._session_state
         deadline = started + self.post_game_minutes * 60
+        cost_since = started  # when the cost was last seen to change (game_over counts as a change)
         interrupted: KeyboardInterrupt | None = None
         try:
             while reason is None and self._clock() < deadline:
@@ -458,7 +466,12 @@ class Waker:
                 cost = _cost(session)
                 if cost is not None and cost != posted and self._post_after(cost):
                     posted = cost
+                if cost is not None and cost != last_cost:
+                    cost_since = self._clock()
                 reason = _stopped(session)
+                if (reason is None and _goal_done(session) and state not in BUSY_STATES and cost is not None
+                        and last_cost is not None and self._clock() - cost_since >= GOAL_DONE_QUIET_SECONDS):
+                    reason = "goal_done"
                 if state in IDLE_STATES and cost is not None and cost == last_cost:
                     idle_polls += 1
                 else:
@@ -555,6 +568,11 @@ def _needs_continue(session: dict[str, Any]) -> str | None:
         return "goal_done"
     state = session.get("state")
     return CONTINUE_STATES.get(state) if isinstance(state, str) else None
+
+
+def _goal_done(session: dict[str, Any]) -> bool:
+    goal = session.get("goal")
+    return isinstance(goal, dict) and goal.get("status") == "done"
 
 
 def _cost(session: dict[str, Any] | None) -> float | None:

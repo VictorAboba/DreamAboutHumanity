@@ -24,7 +24,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="после game_over остановить сессию (POST .../stop) вместо итогового сообщения всем "
                              "(или continue при --wake-mode continue)")
     parser.add_argument("--post-game-minutes", type=float, default=POST_GAME_MINUTES,
-                        help="сколько минут после game_over следить за расходом сессии, пока она не остановится "
+                        help="сколько минут после game_over следить за расходом сессии, пока она не остановится, "
+                             "не выполнит цель (расход не менялся 60 с) "
                              f"или не затихнет (по умолчанию {POST_GAME_MINUTES:g})")
     parser.add_argument("--wake-mode", choices=WAKE_MODES, default=DEFAULT_WAKE_MODE,
                         help="как будить: all — сообщение всем участникам роя (POST .../messages, у остановленной "

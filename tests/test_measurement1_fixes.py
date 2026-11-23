@@ -81,12 +81,12 @@ def test_report_splits_no_orders_from_not_ready_and_counts_submissions_per_phase
     clock = FakeClock()
     game = new_game(tmp_path, clock)
     cap = next(p.id for p in game.state.owned("B") if p.type == "core:capital")
-    # П1: B submits (orders are accepted in П1), both press ready. Д: only A presses ready, the deadline closes
-    # it with B not ready. П2: deadline with nobody ready. A never submitted anything all turn.
-    game.submit("B", [{"kind": "fortify", "province": cap}], "append")
+    # П1: both press ready. Д: B submits, only A presses ready, the deadline closes it with B not ready. П2: deadline
+    # with nobody ready. A never submitted anything all turn.
     ready(game, "A")
     ready(game, "B")
     assert game.phase == "actions"
+    game.submit("B", [{"kind": "fortify", "province": cap}], "append")
     ready(game, "A")
     clock.now += 1200
     game.tick()
@@ -103,12 +103,12 @@ def test_report_splits_no_orders_from_not_ready_and_counts_submissions_per_phase
     assert a["no_orders_turns"] == [1] and b["no_orders_turns"] == []
     assert a["not_ready_phases"] == [[1, "negotiation_2"]]
     assert b["not_ready_phases"] == [[1, "actions"], [1, "negotiation_2"]]
-    assert b["submits_by_phase"] == {"negotiation_1": 1, "actions": 0, "negotiation_2": 0}
+    assert b["submits_by_phase"] == {"negotiation_1": 0, "actions": 1, "negotiation_2": 0}
     text = render_report(report)
     assert "автопилот" not in text
     assert "не подал приказов в ходах [1]" in text
     assert "не нажал готово (закрыто по таймеру): 1 Д, 1 П2" in text
-    assert "подач в П1 / Д / П2: 1 / 0 / 0" in text
+    assert "подач в П1 / Д / П2: 0 / 1 / 0" in text
 
 
 def test_report_not_ready_falls_back_for_old_journals():

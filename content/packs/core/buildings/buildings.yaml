@@ -1,12 +1,12 @@
 - id: mine
   name: Шахта
-  cost: {alloy: 20}
+  cost: {alloy: 10}
   build_turns: 1
   effects:
-    - {type: income, resource: alloy, amount: 3}
+    - {type: income, resource: alloy, amount: 5}
 - id: farm
   name: Ферма
-  cost: {alloy: 15}
+  cost: {alloy: 8}
   build_turns: 1
   effects:
     - {type: income, resource: provisions, amount: 3}

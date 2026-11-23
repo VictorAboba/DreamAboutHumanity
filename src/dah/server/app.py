@@ -166,6 +166,27 @@ def inbox(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict
     return game.inbox(seat, _int_param(request, "since"))
 
 
+def send_gift(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.send_gift(seat, body.get("to"), body.get("resources"))
+
+
+def list_pacts(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.pacts(seat)
+
+
+def propose_pact(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.propose_pact(seat, body.get("to"), body.get("turns"))
+
+
+def respond_pact(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    decision = body.get("decision", body.get("accept"))
+    return game.respond_pact(seat, request.path_params["pact_id"], decision)
+
+
+def leave_pact(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.leave_pact(seat, request.path_params["pact_id"])
+
+
 def ready(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
     return game.set_ready(seat, body.get("confirm_hash"))
 
@@ -210,6 +231,11 @@ SEAT_ROUTES: list[tuple[str, str, Handler]] = [
     ("POST", "/v1/estimate", estimate),
     ("POST", "/v1/messages", send_message),
     ("GET", "/v1/inbox", inbox),
+    ("POST", "/v1/gifts", send_gift),
+    ("GET", "/v1/pacts", list_pacts),
+    ("POST", "/v1/pacts", propose_pact),
+    ("POST", "/v1/pacts/{pact_id}/respond", respond_pact),
+    ("POST", "/v1/pacts/{pact_id}/leave", leave_pact),
     ("POST", "/v1/ready", ready),
     ("POST", "/v1/unready", unready),
     ("GET", "/v1/history", history),

@@ -11,7 +11,9 @@
 - **Аутентификация.** Каждому маршруту нужен заголовок `Authorization: Bearer <ключ>`. Ключ места имеет вид
   `dah_<game>_<seat>_<random>`; по самому ключу сервер понимает партию и место. На сервере хранятся только sha256
   ключей. Админский маршрут вместо этого принимает админ-ключ из переменной окружения `DAH_ADMIN_KEY`.
-  Ключ зрителя (`dahw_<game>_<random>`) открывает только `/watch/<id>` и `/v1/spectate/*`, но не эти маршруты;
+  Ключ зрителя (`dahw_<game>_<random>`) открывает только `/watch/<id>` (и ссылкой `/watch/<id>#key=<ключ>`:
+  фрагмент не уходит на сервер, страница переносит ключ в sessionStorage и заголовок Bearer) и
+  `/v1/spectate/*`, но не эти маршруты;
   ключ места не открывает страницу зрителя.
 - **Ответы** — JSON: `{"ok": true, ...}` или `{"ok": false, "error": {"code": "...", "message": "..."}}`.
   Сообщения на русском. Поле `text`, где оно есть, — готовый текст для LLM. Отказ `/v1/estimate`, `/v1/state`,
@@ -50,13 +52,18 @@
 | GET | `/v1/wait_phase` | `?after_seq=&max_seconds=45` | `changed` и поля `/v1/phase` |
 | GET | `/v1/state` | `?format=text\|json&since_turn=` | `text`, для `json` — `state` |
 | GET | `/v1/orders` | | `orders[]`, `orders_hash`, `cp_left`, `reserved{}`, `text` |
-| POST | `/v1/orders/validate` | `{"orders": [...]}` | `results[{ok, cp_cost, reason?, message?}]`, `ok_count` |
-| POST | `/v1/orders` | `{"orders": [...], "mode"}` | `accepted[]`, `rejected[]`, `orders_hash`, `cp_left` |
+| POST | `/v1/orders/validate` | `{"orders": [...]}` | `results[{ok, cp_cost, reason?, message?, warning?}]`, `ok_count` |
+| POST | `/v1/orders` | `{"orders": [...], "mode"}` | `accepted[]`, `rejected[]`, `orders_hash`, `cp_left`, `warnings[]?` |
 | DELETE | `/v1/orders/{id}` | | `order_id`, `cp_cost`, `orders_hash`, `cp_left` |
-| PATCH | `/v1/orders/{id}` | `{"units"?, "unit"?, "count"?, "to"?}` | то же и изменённый `order` |
+| PATCH | `/v1/orders/{id}` | `{"units"?, "unit"?, "count"?, "to"?, "pact"?}` | то же, изменённый `order`, `warning?` |
 | POST | `/v1/estimate` | см. [Estimate](#estimate) | `win_prob`, средние потери |
 | POST | `/v1/messages` | `{"to": [ник, ...] \| "all", "text"}` | `message_id`, `left{}` |
 | GET | `/v1/inbox` | `?since=` | `messages[]`, `last_id`, `text` |
+| POST | `/v1/gifts` | `{"to": ник, "resources": {ресурс: n}}` | `gift`, `gifts_left`, `resources`, `text` |
+| GET | `/v1/pacts` | | `mine[]` (с ID), `public[]` (действующие пакты других), `text` |
+| POST | `/v1/pacts` | `{"to": ник, "turns": n \| null}` | `pact`, `text` |
+| POST | `/v1/pacts/{id}/respond` | `{"decision": "accept" \| "reject"}` | `pact`, `text` |
+| POST | `/v1/pacts/{id}/leave` | | `pact`, `text` |
 | POST | `/v1/ready` | `{"confirm_hash"}` | `ready` ("N/M"), `phase_closed` |
 | POST | `/v1/unready` | | `ready` |
 | GET | `/v1/history` | `?turn=` | `turn`, `text` (до расчёта хода 1 без `turn` — `turn: null` и подсказка) |
@@ -71,8 +78,11 @@
 перестал быть равен `N`, или через `max_seconds` (по умолчанию 45, не больше 55) с `changed: false`. Без
 `after_seq` отвечает сразу с `changed: true`.
 
-`allowed` — имена инструментов: в П1 и П2 состояние, инструменты приказов, сообщения, входящие, ready и история;
-в Д то же без `send_message`. Выбывшему месту и после конца партии доступны только `get_state`, `history` и `inbox`.
+`allowed` — имена инструментов. П1: состояние, `list_orders`, `validate_orders`, `estimate` (в П1 приказы только
+проверяются: `POST /v1/orders`, `DELETE` и `PATCH` отвечают `409 PHASE_LOCKED` с подсказкой), сообщения, дипломатия
+(`send_gift`, `propose_pact`, `respond_pact`, `leave_pact`, `list_pacts`), входящие, ready и история. Д: состояние,
+все инструменты приказов, `list_pacts`, входящие, ready и история (без сообщений и дипломатии). П2: всё. Выбывшему
+месту и после конца партии доступны только `get_state`, `history`, `inbox` и `list_pacts`.
 
 Служебным вызовам (с заголовком `X-DAH-Host`, его шлёт `dah-waker`) `/v1/phase` и `/v1/wait_phase` добавляют
 поля об игроке этого места: `player_waiting` (long-poll игрока `/v1/wait_phase` ждёт сейчас или ждал в момент
@@ -141,8 +151,22 @@
 [Правилах игры](rules.md#сообщения).
 
 `GET /v1/inbox` возвращает сообщения, адресованные месту. Их `id` считает только эти сообщения (1, 2, ...);
-передайте последний в `since`, чтобы получить только более новые. Каждый `text` обёрнут в
-`<<untrusted from=Ник>>…<</untrusted>>`.
+передайте последний в `since`, чтобы получить только более новые (HTTP без `since` отдаёт всё; инструмент `inbox`
+моста сам помнит последний возвращённый номер). `last_id` — номер последней отданной записи, а если новых нет —
+`since`, но не больше числа записей (никогда не дальше последней). Текст игрока обёрнут в `<<untrusted from=Ник>>…<</untrusted>>`. Записи самой
+игры (пришло подношение, тебе предложили пакт, пакт заключён, объявлен выход, нарушен, истёк) идут с
+`from: "ИГРА"`, `system: true`, `event` (`gift`, `pact_proposed`, `pact_accepted`, `pact_rejected`,
+`pact_withdrawn`, `pact_left`, `pact_broken`, `pact_expired`, `pact_ended`, `pact_lapsed`) и текстом, который
+начинается с `[ИГРА]`, без обёртки; лимиты сообщений их не считают.
+
+### Подношения и пакты
+
+Только в П1 и П2 (иначе `409 PHASE_LOCKED`; правила — в [Правилах игры](rules.md#дипломатия-подношения-и-пакты)).
+`to` — ник или ID места. Отказы: `INVALID` (неверные количества, сам себе, выбывший игрок, неверные `turns` или
+`decision`), `UNKNOWN_ID` (нет такого игрока, ресурса или пакта), `NOT_ENOUGH_RESOURCES` (больше свободного, не
+зарезервированного запаса), `LIMIT_EXCEEDED` (подношений или предложений за фазу), `PACT_EXISTS` (у пары уже есть
+пакт или открытое предложение). Каждый отказ показывает верный вызов. ID пакта вида `pact-A-B-1` знают только две
+стороны; публичные списки называют стороны и условия.
 
 ## Служебные маршруты
 
@@ -181,7 +205,8 @@ Authorization: Bearer <DAH_ADMIN_KEY>
 ```
 
 Возвращает полный статус партии: конфиг, `ruleset_hash`, ход, фазу, `phase_seq`, дедлайн, сколько мест готово,
-у каждого места — ресурсы, приказы, `orders_hash`, остаток ОК и флаг ready, а также счёт, итог, число сообщений и
+у каждого места — ресурсы, приказы, `orders_hash`, остаток ОК и флаг ready, а также счёт, итог, число сообщений
+игроков, `pacts` (все, с ID и статусами), `diplomacy_log` (подношения и действия с пактами этого хода) и
 `state_hash`. Без верного админ-ключа ответ — `403 FORBIDDEN`; если `DAH_ADMIN_KEY` не задан — всегда.
 
 ## Сервер

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -112,6 +113,21 @@ class GameClient:
 
     def inbox(self, since: int | str | None = None) -> dict[str, Any]:
         return self.request("GET", "/v1/inbox", params={"since": since})
+
+    def send_gift(self, to: Any, resources: Any) -> dict[str, Any]:
+        return self.request("POST", "/v1/gifts", body={"to": to, "resources": resources})
+
+    def list_pacts(self) -> dict[str, Any]:
+        return self.request("GET", "/v1/pacts")
+
+    def propose_pact(self, to: Any, turns: Any = None) -> dict[str, Any]:
+        return self.request("POST", "/v1/pacts", body={"to": to, "turns": turns})
+
+    def respond_pact(self, pact_id: str, decision: Any) -> dict[str, Any]:
+        return self.request("POST", f"/v1/pacts/{quote(str(pact_id), safe='')}/respond", body={"decision": decision})
+
+    def leave_pact(self, pact_id: str) -> dict[str, Any]:
+        return self.request("POST", f"/v1/pacts/{quote(str(pact_id), safe='')}/leave", body={})
 
     def ready(self, confirm_hash: str) -> dict[str, Any]:
         return self.request("POST", "/v1/ready", body={"confirm_hash": confirm_hash})

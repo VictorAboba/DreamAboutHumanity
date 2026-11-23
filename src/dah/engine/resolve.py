@@ -7,9 +7,10 @@ from collections import Counter
 from dataclasses import asdict, dataclass, field
 from typing import Any, Mapping, Sequence, Union
 
+from . import diplomacy as dip
 from .combat import Force, fight, pick_losses, round_half_up, strength
 from .content import Ruleset
-from .model import GameState, Order, PendingBuild, Player, Province, SeatOrders
+from .model import BREAK, GameState, Order, PendingBuild, Player, Province, SeatOrders
 from .orders import executable_orders, order_cost
 from .rng import stream
 
@@ -126,10 +127,14 @@ class TurnReport:
 # ---------------------------------------------------------------- resolution
 
 def resolve(state: GameState, orders_by_seat: OrdersInput, ruleset: Ruleset,
-            seed: int | str) -> tuple[GameState, TurnReport]:
-    """Resolve one turn. Orders are re-checked; invalid ones are dropped and reported."""
+            seed: int | str, diplomacy: Sequence[Mapping[str, Any]] = ()) -> tuple[GameState, TurnReport]:
+    """Resolve one turn. Orders are re-checked; invalid ones are dropped and reported.
+
+    ``diplomacy``: the turn's diplomacy ops, already applied to ``state`` (engine/diplomacy.py); they only go into
+    the report (gifts and signed pacts are public facts of the turn, amounts and ids stay with the two seats).
+    """
     r = _Resolution(copy.deepcopy(state), ruleset, seed)
-    return r.run({seat: _book(v) for seat, v in orders_by_seat.items()})
+    return r.run({seat: _book(v) for seat, v in orders_by_seat.items()}, diplomacy)
 
 
 def _book(value: SeatOrders | Sequence[Order]) -> SeatOrders:
@@ -145,6 +150,18 @@ class _Resolution:
         self.events: list[dict[str, Any]] = []
         self.factions: dict[str | None, str | None] = {seat: p.faction for seat, p in state.players.items()}
         self.retreats: list[tuple[str | None, list[str], dict[str, int], str]] = []
+        self.pacts: dict[frozenset[str], dict[str, Any]] = {}     # pacts in force in this resolution, by pair
+        self.broken: dict[frozenset[str], set[str]] = {}          # pair -> seats whose "break" orders broke it
+        self.break_targets: list[set[str]] = []                   # per move (in `moves` order): partners it breaks
+
+    def shielded(self, force: Force, other: str | None, other_force: Force | None = None) -> bool:
+        """`force` and the seat `other` (or its force) do not fight: a pact is in force between them and neither
+        side's force here breaks it. A breach is aimed: only the breaking move fights; the victim's own moves into
+        the breaker's provinces still bounce, and the pact protects every other meeting of the two seats."""
+        x = force.owner
+        if x is None or other is None or x == other or frozenset((x, other)) not in self.pacts:
+            return False
+        return other not in force.breaks and (other_force is None or x not in other_force.breaks)
 
     def ev(self, kind: str, seats: Sequence[str | None] = (), province: str | None = None, **data: Any) -> None:
         self.events.append({"kind": kind, "seats": sorted(s for s in set(seats) if s), "province": province, **data})
@@ -152,11 +169,18 @@ class _Resolution:
     def rng(self, system: str, entity: str):
         return stream(self.seed, self.turn, system, entity)
 
-    def run(self, books: dict[str, SeatOrders]) -> tuple[GameState, TurnReport]:
+    def run(self, books: dict[str, SeatOrders],
+            diplomacy: Sequence[Mapping[str, Any]] = ()) -> tuple[GameState, TurnReport]:
         s = self.s
         alive = [seat for seat, p in s.players.items() if p.alive]
         seen_before = {seat: visible_provinces(s, self.rs, seat) for seat in alive}
+        for op in diplomacy:
+            event = dip.op_event(op, s)
+            if event is not None:
+                self.events.append(event)
+        self.start_pacts()
         moves, fortify = self.apply_orders(alive, books)
+        self.find_breaks(moves)
         idle = self.idle_stats(alive, moves, fortify)
         arrivals, fortified = self.move(moves, fortify)
         owners_before = {pid: p.owner for pid, p in s.provinces.items()}
@@ -173,17 +197,68 @@ class _Resolution:
         self.economy(alive)
         self.builds()
         eliminated = self.eliminate(alive)
+        self.end_pacts(eliminated)
         sc = scores(s, self.rs)
         self.finish(sc)
         seen_after = {seat: visible_provinces(s, self.rs, seat) for seat in alive}
-        by_seat = {seat: [e for e in self.events
-                          if seat in e["seats"] or (_seen_at(e) in seen_before[seat] | seen_after[seat]
-                                                    and e["kind"] not in _PRIVATE_KINDS)]
+        by_seat = {seat: [_as_seen(e, seat) for e in self.events
+                          if seat in e["seats"] or e["kind"] in dip.PUBLIC_KINDS
+                          or (_seen_at(e) in seen_before[seat] | seen_after[seat]
+                              and e["kind"] not in _PRIVATE_KINDS)]
                    for seat in alive}
+        public_diplomacy = [dip.public_event(e) for e in self.events if e["kind"] in dip.PUBLIC_KINDS]
         report = TurnReport(self.turn, self.events, by_seat,
                             {"ownership_changes": changes, "eliminated": eliminated, "scores": sc,
-                             "result": s.result}, idle)
+                             "result": s.result, "diplomacy": public_diplomacy}, idle)
         return s, report
+
+    # 0. pacts: notices to leave take effect; the pacts in force; who breaks one with an explicit "break" order
+    def start_pacts(self) -> None:
+        for pact in dip.active_pacts(self.s):
+            if not dip.in_force(pact, self.turn):
+                pact.update(status=dip.LEFT, ended_turn=self.turn, ended_reason="left")
+                self.ev("pact_ended", [pact["a"], pact["b"]], None, pact=pact["id"], reason="left",
+                        seat=pact.get("leaving"))
+        self.pacts = {dip.pair_of(p): p for p in dip.active_pacts(self.s)}
+
+    def find_breaks(self, moves: list[tuple[str, Order]]) -> None:
+        """A "break" move is aimed at one seat: the owner of its target at the start of resolution (this covers a
+        head-on meeting on an edge too); only when the target has no owner, at the partners whose moves go into the
+        same province. If that seat is a pact partner, the pact is broken: this move fights it as without a pact,
+        and the pact ends after the resolution. Other meetings of the two seats in this resolution stay protected."""
+        self.break_targets = [set() for _ in moves]
+        if not self.pacts:
+            return
+        owner = {pid: p.owner for pid, p in self.s.provinces.items()}
+        for i, (seat, o) in enumerate(moves):
+            if o.pact != BREAK:
+                continue
+            target = owner.get(o.dst)
+            others = {target} if target is not None else {s2 for s2, o2 in moves if o2.dst == o.dst}
+            for other in sorted(x for x in others if x and x != seat):
+                pair = frozenset((seat, other))
+                if pair in self.pacts:
+                    self.broken.setdefault(pair, set()).add(seat)
+                    self.break_targets[i].add(other)
+
+    def end_pacts(self, eliminated: list[str]) -> None:
+        for pair, breakers in sorted(self.broken.items(), key=lambda kv: self.pacts[kv[0]]["id"]):
+            pact = self.pacts[pair]
+            pact.update(status=dip.BROKEN, ended_turn=self.turn, ended_reason="broken", broken_by=sorted(breakers))
+            self.ev("pact_broken", sorted(pair), None, pact=pact["id"], broken_by=sorted(breakers))
+        for pact in dip.active_pacts(self.s):
+            gone = sorted(x for x in (pact["a"], pact["b"]) if x in eliminated)
+            if gone:
+                pact.update(status=dip.ENDED, ended_turn=self.turn, ended_reason="eliminated")
+                self.ev("pact_ended", [pact["a"], pact["b"]], None, pact=pact["id"], reason="eliminated",
+                        seat=gone[0])
+            elif pact["until_turn"] is not None and pact["until_turn"] <= self.turn:
+                pact.update(status=dip.EXPIRED, ended_turn=self.turn, ended_reason="expired")
+                self.ev("pact_expired", [pact["a"], pact["b"]], None, pact=pact["id"])
+        for pact in self.s.pacts:
+            if pact["status"] == dip.PROPOSED:
+                pact.update(status=dip.LAPSED, ended_turn=self.turn)
+                self.ev("pact_lapsed", [pact["a"], pact["b"]], None, pact=pact["id"])
 
     # 1. orders: reserves, recruits, builds
     def apply_orders(self, alive: list[str], books: dict[str, SeatOrders]) -> tuple[list[tuple[str, Order]], set[str]]:
@@ -228,13 +303,14 @@ class _Resolution:
     # 2. movement and head-on battles
     def move(self, moves: list[tuple[str, Order]], fortify: set[str]) -> tuple[dict[str, list[Force]], set[str]]:
         edges: dict[tuple[str, str], Force] = {}
-        for seat, o in moves:
+        for i, (seat, o) in enumerate(moves):
             src = self.s.provinces[o.src]
             for unit, n in (o.units or {}).items():
                 src.units[unit] -= n
                 if not src.units[unit]:
                     del src.units[unit]
             force = Force(seat, dict(o.units or {}), dict(o.units or {}) if o.hasty else {}, origin=o.src)
+            force.breaks = set(self.break_targets[i]) if i < len(self.break_targets) else set()
             key = (o.src, o.dst)
             if key in edges:
                 edges[key].merge(force)
@@ -249,12 +325,30 @@ class _Resolution:
                 fortified.add(pid)
         for (a, b) in sorted(edges):
             if a < b and (b, a) in edges and edges[(a, b)].owner != edges[(b, a)].owner:
-                self.edge_battle(edges[(a, b)], edges[(b, a)], a, b)
+                if self.shielded(edges[(a, b)], edges[(b, a)].owner, edges[(b, a)]):
+                    for force, (src, dst) in ((edges[(a, b)], (a, b)), (edges[(b, a)], (b, a))):
+                        self.bounce(force, src, dst, head_on=True)
+                else:
+                    self.edge_battle(edges[(a, b)], edges[(b, a)], a, b)
+        for (src, dst), force in sorted(edges.items()):
+            if force.total() and self.shielded(force, self.s.provinces[dst].owner):
+                self.bounce(force, src, dst)
         arrivals: dict[str, list[Force]] = {}
         for (_, dst), force in sorted(edges.items()):
             if force.total():
                 arrivals.setdefault(dst, []).append(force)
         return arrivals, fortified
+
+    def bounce(self, force: Force, src: str, dst: str, head_on: bool = False) -> None:
+        """Honored pact: the move goes back to where it came from, whole and at once (it defends there), no fight."""
+        other = self.s.provinces[dst].owner
+        for origin_id, units in sorted(force.parts.items()):
+            origin = self.s.provinces[origin_id]
+            for unit, n in units.items():
+                origin.units[unit] = origin.units.get(unit, 0) + n
+            self.ev("pact_bounce", [force.owner, other], dst, seat=force.owner, units=dict(units),
+                    edge=[src, dst] if head_on else None, **{"from": origin_id})
+        force.clear()
 
     def edge_battle(self, ab: Force, ba: Force, a: str, b: str) -> None:
         before = (dict(ab.units), dict(ba.units))
@@ -290,51 +384,86 @@ class _Resolution:
         rng = self.rng("combat", pid)
         attackers = sorted(by_owner.values(), key=lambda f: f.owner or "")
         ties = {f.owner: rng.random() for f in attackers}
-        attackers.sort(key=lambda f: (-strength(self.rs, f, {}, defending=False, faction=self.factions.get(f.owner)),
-                                      ties[f.owner]))
-        champion = attackers[0]
+
+        def power(f: Force) -> float:
+            return strength(self.rs, f, {}, defending=False, faction=self.factions.get(f.owner))
+
+        attackers.sort(key=lambda f: (-power(f), ties[f.owner]))
+        # Attackers meet in order of strength. `group` holds the attackers still standing, all of them mutually
+        # protected by pacts; a newcomer fights every group member it is not shielded from (strongest first) and
+        # joins the group if it beats them all. Without pacts the group is one champion, as before pacts existed.
+        # The group keeps the order of strength at the start of the battle.
+        group = [attackers[0]]
         for challenger in attackers[1:]:
-            snap = (dict(champion.units), dict(challenger.units))
-            res = fight(self.rs, champion, challenger, rng, b_defending=False, factions=self.factions)
-            self.ev("battle", [champion.owner, challenger.owner], pid, stage="attackers",
-                    sides=[_side(champion, snap[0], res.losses_a, res.a_won, res.strength_a),
-                           _side(challenger, snap[1], res.losses_b, not res.a_won, res.strength_b)])
-            loser = challenger if res.a_won else champion
-            champion = champion if res.a_won else challenger
-            self.retreat_home(loser, pid)
-        if not champion.total():
+            standing = True
+            for champion in [g for g in group if not self.shielded(g, challenger.owner, challenger)]:
+                snap = (dict(champion.units), dict(challenger.units))
+                res = fight(self.rs, champion, challenger, rng, b_defending=False, factions=self.factions)
+                self.ev("battle", [champion.owner, challenger.owner], pid, stage="attackers",
+                        sides=[_side(champion, snap[0], res.losses_a, res.a_won, res.strength_a),
+                               _side(challenger, snap[1], res.losses_b, not res.a_won, res.strength_b)])
+                if res.a_won:
+                    self.retreat_home(challenger, pid)
+                    standing = False
+                    break
+                self.retreat_home(champion, pid)
+                group.remove(champion)
+            if standing:
+                group.append(challenger)
+        group = [g for g in group if g.total()]
+        if not group:
             prov.units = defender.units
             return
         if defender.total():
-            snap = (dict(champion.units), dict(defender.units))
-            res = fight(self.rs, champion, defender, rng, b_defending=True, factions=self.factions,
-                        defense_mul=self.rs.province_types[prov.type].defense_mul, fortified=fortified)
-            self.ev("battle", [champion.owner, defender.owner], pid, stage="defense", fortified=fortified,
-                    sides=[_side(champion, snap[0], res.losses_a, res.a_won, res.strength_a),
-                           _side(defender, snap[1], res.losses_b, not res.a_won, res.strength_b)])
-            if not res.a_won:
+            # The defender meets the group one by one (in the same order) until one of them beats it.
+            winner_at = None
+            for i, champion in enumerate(group):
+                snap = (dict(champion.units), dict(defender.units))
+                res = fight(self.rs, champion, defender, rng, b_defending=True, factions=self.factions,
+                            defense_mul=self.rs.province_types[prov.type].defense_mul, fortified=fortified)
+                self.ev("battle", [champion.owner, defender.owner], pid, stage="defense", fortified=fortified,
+                        sides=[_side(champion, snap[0], res.losses_a, res.a_won, res.strength_a),
+                               _side(defender, snap[1], res.losses_b, not res.a_won, res.strength_b)])
+                if res.a_won:
+                    winner_at = i
+                    break
                 self.retreat_home(champion, pid)
+            if winner_at is None:
                 prov.units = defender.units
                 return
+            group = [g for g in group[winner_at:] if g.total()]
             if defender.owner is not None:
                 self.retreat(defender, [n for n in self.rs.map.adjacency[pid]], pid)
             elif defender.total():
                 self.ev("destroyed", [], pid, units=dict(defender.units))
-        prov.owner = champion.owner
-        prov.units = champion.units
+        # Pact partners took the province together. The holder is the one that beat the defender (the earlier ones
+        # lost to it and went home); with no defender, the strongest at the start of the battle. The others go home
+        # whole after the battles: to their origin, or else to an own province next to this one.
+        holder = group[0]
+        if len(group) > 1:
+            self.ev("pact_joint", [g.owner for g in group], pid, holder=holder.owner,
+                    partners=sorted(g.owner for g in group if g is not holder))
+            for g in group[1:]:
+                self.retreat_home(g, pid, fallback=True)
+        prov.owner = holder.owner
+        prov.units = holder.units
 
     def retreat(self, force: Force, candidates: list[str], from_pid: str) -> None:
         if force.total():
-            self.retreats.append((force.owner, candidates, dict(force.units), from_pid))
+            self.retreats.append((force.owner, sorted(candidates), dict(force.units), from_pid))
 
-    def retreat_home(self, attacker: Force, from_pid: str) -> None:
-        """A losing attacker's survivors go back to the provinces they came from, each part to its own."""
+    def retreat_home(self, attacker: Force, from_pid: str, fallback: bool = False) -> None:
+        """A losing attacker's survivors go back to the provinces they came from, each part to its own. With
+        `fallback` (a pact partner leaving a jointly taken province), a part whose origin fell goes to the first
+        (by id) own province next to `from_pid` instead."""
+        near = sorted(self.rs.map.adjacency[from_pid]) if fallback else []
         for origin, units in sorted(attacker.parts.items()):
-            self.retreats.append((attacker.owner, [origin], dict(units), from_pid))
+            self.retreats.append((attacker.owner, [origin] + [n for n in near if n != origin], dict(units),
+                                  from_pid))
 
     def apply_retreats(self) -> None:
         for owner, candidates, units, from_pid in self.retreats:
-            target = next((c for c in sorted(candidates) if self.s.provinces[c].owner == owner), None)
+            target = next((c for c in candidates if self.s.provinces[c].owner == owner), None)
             if target is None:
                 self.ev("retreat_lost", [owner], from_pid, units=units)
                 continue
@@ -418,7 +547,14 @@ class _Resolution:
 
 # Events only their seats see: they would reveal resources or orders (fortify_broken reveals a fortify order).
 _PRIVATE_KINDS = frozenset({"order_rejected", "economy", "starvation", "build_started", "recruited",
-                            "fortify_broken"})
+                            "fortify_broken"}) | dip.PRIVATE_KINDS
+
+
+def _as_seen(event: dict[str, Any], seat: str) -> dict[str, Any]:
+    """A public diplomacy event loses its private fields (gift amounts, pact id) for a seat that is not a side."""
+    if event["kind"] in dip.PUBLIC_KINDS and seat not in event["seats"]:
+        return dip.public_event(event)
+    return event
 
 
 def _seen_at(event: Mapping[str, Any]) -> str | None:

@@ -51,7 +51,7 @@ engine_api: "^1"        # версия API движка — 1
 | здание | `id`\*, `name`\*, `short`, `cost`\*, `build_turns`\* (1..10), `effects`, `recruit`, `max_per_province` |
 | фракция | `id`\*, `name`\*, `lore` (до 1000 символов), `bonuses`, `penalties`, `starting`\* |
 | карта | `id`\*, `name`\*, `max_players`\* (1..16), `provinces`\*, `edges`\*, `starts`\* |
-| сценарий | `id`\*, `name`\*, `map`\*, `factions`\*, `turn_limit`\*, `phase_limits`\*, `message_limits`, `overrides` |
+| сценарий | `id`\*, `name`\*, `map`\*, `factions`\*, `turn_limit`\*, `phase_limits`\*, `message_limits`, `diplomacy_limits`, `overrides` |
 
 Подробнее:
 
@@ -67,6 +67,10 @@ engine_api: "^1"        # версия API движка — 1
 - В `message_limits` можно задать `negotiation_1` и `negotiation_2` (в каждом `per_recipient`, `private`,
   `public`) и `max_chars` (1..4000). Всё, что не задано, берётся по умолчанию: в П1 6 одному адресату, 20 личных,
   2 публичных; в П2 10 одному адресату, 10 личных, 1 публичное; 800 символов.
+- В `diplomacy_limits` можно задать `gifts_per_phase` и `pact_proposals_per_phase` (0..50 на место и фазу
+  переговоров; по умолчанию 3 и 3).
+- Лимиты фаз и дипломатии — настройки партии: их записывает конфиг каждой партии, и в хэш набора правил они не входят
+  (новое значение по умолчанию не заставит `dah replay` старой партии сообщать об изменённом контенте).
 - Места получают первую фракцию из списка `factions` сценария.
 
 ## Эффекты
@@ -105,7 +109,7 @@ engine_api: "^1"        # версия API движка — 1
 | `p2.cost.new_attack` | int 1..5 | 2 | цена нового движения или смены цели в П2, в ОК |
 | `p2.cancel_refund` | float 0..1 | 0.75 | доля резерва, которая возвращается при отмене в П2 |
 | `command_points` | int 0..10 | 3 | ОК за ход |
-| `combat.fortify_bonus` | float 0..1 | 0.25 | бонус обороны приказа `fortify` |
+| `combat.fortify_bonus` | float 0..1 | 0.25 | бонус обороны приказа `fortify` (сценарии `core` ставят 0.15) |
 | `combat.counter_mul` | float 1..3 | 1.5 | множитель контрюнита |
 | `starvation.loss_frac` | float 0..1 | 0.10 | доля армии, теряемая при голоде |
 

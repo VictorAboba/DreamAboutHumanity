@@ -73,5 +73,17 @@ class ApiClient:
     def send_message(self, to: list[str] | str, text: str) -> dict[str, Any]:
         return self._call("POST", "/v1/messages", json={"to": to, "text": text})
 
+    def send_gift(self, to: str, resources: dict[str, int]) -> dict[str, Any]:
+        return self._call("POST", "/v1/gifts", json={"to": to, "resources": resources})
+
+    def propose_pact(self, to: str, turns: int | None) -> dict[str, Any]:
+        return self._call("POST", "/v1/pacts", json={"to": to, "turns": turns})
+
+    def respond_pact(self, pact_id: str, decision: str) -> dict[str, Any]:
+        return self._call("POST", f"/v1/pacts/{pact_id}/respond", json={"decision": decision})
+
+    def leave_pact(self, pact_id: str) -> dict[str, Any]:
+        return self._call("POST", f"/v1/pacts/{pact_id}/leave", json={})
+
     def ready(self, confirm_hash: str) -> dict[str, Any]:
         return self._call("POST", "/v1/ready", json={"confirm_hash": confirm_hash})

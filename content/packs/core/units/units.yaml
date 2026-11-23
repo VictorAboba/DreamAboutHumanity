@@ -12,13 +12,13 @@
   attack: 5
   defense: 4
   cost: {alloy: 25}
-  upkeep: {provisions: 2}
+  upkeep: {provisions: 1}
   counters: [assault]
 - id: artillery
   name: Артиллерия
   short: арт
   attack: 4
   defense: 1
-  cost: {alloy: 20}
+  cost: {alloy: 15}
   upkeep: {provisions: 1}
   counters: [armor]

@@ -10,10 +10,14 @@ from itertools import count as _counter
 from typing import Any, Callable, Iterable, Mapping
 
 from .content import Ruleset
-from .model import ACTIONS, P2, GameState, Order, SeatOrders, sha256_json
+from .diplomacy import pact_between
+from .model import ACTIONS, BREAK, HONOR, INT_BOUND, P2, GameState, Order, SeatOrders, as_int, sha256_json
 
 KINDS = ("move", "recruit", "build", "fortify")
-FREE_PHASES = ("negotiation_1", ACTIONS)    # orders are drafts in negotiation_1, final in actions
+PACT_FLAGS = (HONOR, BREAK)
+FREE_PHASES = (ACTIONS,)    # orders are given in actions (free) and edited in negotiation_2 (priced in CP)
+P1 = "negotiation_1"
+P1_LOCKED_HINT = "в П1 приказы можно только проверить через validate_orders; подавать — в фазе Д"
 CP_CANCEL = 1
 CP_REDUCE = 1
 CP_FORTIFY = 1
@@ -44,12 +48,15 @@ class Check:
     message: str = ""
     cp_cost: int = 0
     order: Order | None = None
+    warning: str | None = None      # accepted, but probably not what the player wants (a pact bounce)
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"ok": self.ok, "cp_cost": self.cp_cost}
         if self.reason:
             out["reason"] = self.reason
             out["message"] = self.message
+        if self.warning:
+            out["warning"] = self.warning
         if self.order is not None:
             out["order"] = self.order.to_dict()
         return out
@@ -77,11 +84,14 @@ class EditResult:
     message: str = ""
     cp_cost: int = 0
     order: Order | None = None              # the amended order (amend only)
+    warning: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"ok": self.ok, "cp_cost": self.cp_cost}
         if self.reason:
             out.update(reason=self.reason, message=self.message)
+        if self.warning:
+            out["warning"] = self.warning
         if self.order is not None:
             out["order"] = self.order.to_dict()
         return out
@@ -96,19 +106,8 @@ def _require_str(data: Mapping[str, Any], key: str) -> str:
     return value
 
 
-def _as_int(value: Any) -> Any:
-    """"2" and 2.0 count as 2 (ASCII digits, integral floats, below 2**31); anything else is returned as is
-    for the caller to refuse."""
-    if isinstance(value, str):
-        text = value.strip()
-        if text.isascii() and text.isdigit() and len(text) <= 10 and int(text) < _INT_BOUND:
-            return int(text)
-    elif isinstance(value, float) and value.is_integer() and abs(value) < _INT_BOUND:
-        return int(value)
-    return value
-
-
-_INT_BOUND = 2 ** 31
+_as_int = as_int
+_INT_BOUND = INT_BOUND
 
 
 def _positive_int(value: Any, key: str) -> int:
@@ -242,6 +241,17 @@ def _units(ruleset: Ruleset, raw: Any, received: Mapping[str, Any] | None = None
     return dict(sorted(out.items()))
 
 
+def _pact_flag(value: Any) -> str:
+    """`pact` of a move: "honor" (default; null too) or "break"."""
+    if value is None:
+        return HONOR
+    flag = value.strip().lower() if isinstance(value, str) else value
+    if flag not in PACT_FLAGS:
+        raise OrderRejected(INVALID, f"pact — \"honor\" (соблюдать пакт, по умолчанию) или \"break\" (нарушить: "
+                                     f"бой с союзником, пакт публично разрывается); получено {_shown(value)}")
+    return flag
+
+
 def decode_json_arg(value: Any) -> Any:
     """A value sent as a JSON string (an order, a list of orders, a patch) becomes its object; anything else,
     including a malformed string, is returned as is for the caller to refuse."""
@@ -271,7 +281,7 @@ def parse_order(ruleset: Ruleset, data: Mapping[str, Any], order_id: str, phase:
     added = P2 if phase == P2 else ACTIONS
     if kind == "move":
         return Order(order_id, kind, added, src=_require_str(data, "from"), dst=_require_str(data, "to"),
-                     units=_move_units(ruleset, data))
+                     units=_move_units(ruleset, data), pact=_pact_flag(data.get("pact")))
     province = _require_str(data, "province")
     if kind == "recruit":
         unit = resolve_unit_ref(ruleset, _require_str(data, "unit"))
@@ -373,6 +383,8 @@ def _rules_problem(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrde
 def _new_order_cp(ruleset: Ruleset, faction: str, order: Order, phase: str) -> tuple[str, str] | int:
     if phase in FREE_PHASES:
         return 0
+    if phase == P1:
+        return PHASE_LOCKED, P1_LOCKED_HINT
     if phase != P2:
         return PHASE_LOCKED, "приказы сейчас не принимаются"
     if order.kind in ("recruit", "build"):
@@ -394,7 +406,25 @@ def _check(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders, orde
     if priced > cp_left(state, seat, book):
         return Check(False, NOT_ENOUGH_CP, f"нужно {priced} ОК, осталось {cp_left(state, seat, book)}",
                      cp_cost=priced, order=order)
-    return Check(True, cp_cost=priced, order=order)
+    return Check(True, cp_cost=priced, order=order, warning=pact_warning(state, seat, order))
+
+
+def pact_warning(state: GameState, seat: str, order: Order) -> str | None:
+    """A move into a pact partner's province: with "honor" it bounces back (no fight); with "break" it is the
+    public breach of the pact. Said as a warning, never a refusal."""
+    if order.kind != "move" or order.dst not in state.provinces:
+        return None
+    owner = state.provinces[order.dst].owner
+    pact = pact_between(state, seat, owner, state.turn)
+    if pact is None or owner is None:
+        return None
+    nick = state.players[owner].nick
+    if order.pact == BREAK:
+        return (f"{order.dst} — провинция союзника по пакту ({nick}): pact=break — это нарушение, этот ход "
+                f"будет биться, пакт публично разорвётся после расчёта; прочие встречи с {nick} в этом расчёте "
+                f"останутся без боя")
+    return (f"{order.dst} — провинция союзника по пакту ({nick}): с pact=honor войска вернутся в {order.src} без "
+            f"боя; чтобы атаковать, нужен pact=\"break\" (публичное нарушение пакта)")
 
 
 # ---------------------------------------------------------------- public operations
@@ -453,6 +483,8 @@ def _forfeit(ruleset: Ruleset, faction: str, removed: Counter[str]) -> Counter[s
 def _edit_phase_problem(state: GameState, seat: str, phase: str) -> tuple[str, str] | None:
     if seat not in state.players:
         return UNKNOWN_ID, f"неизвестное место {seat!r}"
+    if phase == P1:
+        return PHASE_LOCKED, P1_LOCKED_HINT
     if phase not in FREE_PHASES and phase != P2:
         return PHASE_LOCKED, "приказы сейчас не меняются"
     if not state.players[seat].alive:
@@ -482,10 +514,11 @@ def cancel_order(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders
 
 def amend_order(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders, order_id: str,
                 patch: Mapping[str, Any], phase: str) -> EditResult:
-    """Change ``units``/``to`` of a move or ``count`` of a recruit.
+    """Change ``units``/``to``/``pact`` of a move or ``count`` of a recruit.
 
-    In P2: reducing costs 1 CP; a new target or more units costs ``p2.cost.new_attack`` and makes the
-    move hasty (phase_added = negotiation_2); increasing a recruit is PHASE_LOCKED.
+    In P2: reducing (or turning "break" back to "honor") costs 1 CP; a new target, more units or turning "honor"
+    into "break" (the betrayal) costs ``p2.cost.new_attack`` and makes the move hasty (phase_added =
+    negotiation_2); increasing a recruit is PHASE_LOCKED.
     """
     problem = _edit_phase_problem(state, seat, phase)
     if problem:
@@ -497,7 +530,7 @@ def amend_order(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders,
     if not isinstance(patch, Mapping):
         return EditResult(False, book, INVALID, f"patch должен быть объектом, получено {_shown(patch)}")
     patch = {k: v for k, v in patch.items() if v is not None}     # null-filling clients: null = not changed
-    allowed = {"move": {"units", "to"}, "recruit": {"count"}}.get(old.kind, set())
+    allowed = {"move": {"units", "to", "pact"}, "recruit": {"count"}}.get(old.kind, set())
     accepted = allowed | ({"unit", "count"} if old.kind == "move" else set())   # move: the flat form too
     extra = set(patch) - accepted
     if not patch or extra:
@@ -510,7 +543,8 @@ def amend_order(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders,
         if old.kind == "move":
             moved = any(k in patch for k in ("units", "unit", "count"))
             new = replace(old, units=_move_units(ruleset, patch, patch=True) if moved else old.units,
-                          dst=_require_str(patch, "to") if "to" in patch else old.dst)
+                          dst=_require_str(patch, "to") if "to" in patch else old.dst,
+                          pact=_pact_flag(patch["pact"]) if "pact" in patch else old.pact)
         else:
             new = replace(old, count=_positive_int(patch["count"], "count"))
     except OrderRejected as exc:
@@ -534,7 +568,7 @@ def amend_order(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders,
         return EditResult(False, book, NOT_ENOUGH_CP, f"нужно {cost} ОК, осталось {cp_left(state, seat, book)}",
                           cost)
     work.cp_spent += cost
-    return EditResult(True, work, cp_cost=cost, order=new)
+    return EditResult(True, work, cp_cost=cost, order=new, warning=pact_warning(state, seat, new))
 
 
 def _amend_price(ruleset: Ruleset, faction: str, old: Order, new: Order) -> tuple[int, bool]:
@@ -547,9 +581,10 @@ def _amend_price(ruleset: Ruleset, faction: str, old: Order, new: Order) -> tupl
             raise OrderRejected(INVALID, "ничего не изменилось")
         return CP_REDUCE, False
     old_u, new_u = Counter(old.units or {}), Counter(new.units or {})
-    if new.dst != old.dst or any(new_u[u] > old_u[u] for u in new_u):
+    betrayal = old.pact == HONOR and new.pact == BREAK
+    if new.dst != old.dst or betrayal or any(new_u[u] > old_u[u] for u in new_u):
         return int(ruleset.stat("p2.cost.new_attack", faction)), True
-    if new_u == old_u:
+    if new_u == old_u and new.pact == old.pact:
         raise OrderRejected(INVALID, "ничего не изменилось")
     return CP_REDUCE, False
 

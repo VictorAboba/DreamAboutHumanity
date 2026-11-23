@@ -27,8 +27,9 @@ def _deadline_hhmm(deadline: Any) -> str | None:
 def _hint(phase: str, turn: int) -> str:
     since = f"since_turn={turn - 1}" if turn > 1 else ""
     if phase == "negotiation_1":
-        return (f"Посмотри dah.get_state({since}) и dah.inbox(), договорись с соседями (dah.send_message), "
-                "нажми dah.ready.")
+        return (f"Посмотри dah.get_state({since}) и dah.inbox(), договорись с соседями (dah.send_message, "
+                "пакты и подношения), приказы можно только проверить (dah.validate_orders), "
+                "подаются они в ДЕЙСТВИЯХ; нажми dah.ready.")
     if phase == "negotiation_2":
         return ("Посмотри dah.inbox() и dah.list_orders(), при нужде поправь приказы "
                 "(dah.amend_order / dah.cancel_order), нажми dah.ready.")

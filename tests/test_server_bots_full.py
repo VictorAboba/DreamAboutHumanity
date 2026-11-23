@@ -1,4 +1,4 @@
-"""Full game of three bots over a real HTTP server (scenario blitz_test) reaches game_over; report and replay work."""
+"""Three bots (rush, builder, diplomat) play blitz_test over a real HTTP server to game_over; report and replay work."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from dah.store import GameDir, init_game_dir
 
 SEATS = [{"seat": "A", "nick": "Раш", "kind": "bot", "bot": "rush"},
          {"seat": "B", "nick": "Строй", "kind": "bot", "bot": "builder"},
-         {"seat": "C", "nick": "Пасс", "kind": "bot", "bot": "passive"}]
+         {"seat": "C", "nick": "Дип", "kind": "bot", "bot": "diplomat"}]
 
 
 def free_port() -> int:
@@ -50,6 +50,7 @@ def test_three_bots_play_to_game_over(tmp_path, capsys):
     types = {e["type"] for e in read_events(GameDir(gdir.path).journal_path)}
     assert {"game_created", "seat_info", "phase_open", "phase_close", "recon", "call", "first_call_in_phase",
             "orders_submitted", "ready", "turn_resolved", "game_over"} <= types
+    assert {"pact_proposed", "pact_accepted"} <= types   # the diplomat offers pacts, the builder accepts them
     assert main(["replay", "blitz", "--games-dir", str(tmp_path)]) == 0
     assert main(["report", "blitz", "--games-dir", str(tmp_path)]) == 0
     out = capsys.readouterr().out

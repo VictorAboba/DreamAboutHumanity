@@ -21,6 +21,7 @@ class Force:
     hasty: dict[str, int] = field(default_factory=dict)   # how many of `units` came from P2 orders
     origin: InitVar[str | None] = None     # attacker's source province; None for a defender
     parts: dict[str, dict[str, int]] = field(init=False, default_factory=dict)  # origin -> its share of `units`
+    breaks: set[str] = field(default_factory=set)  # pact partners this force breaks with (its "break" moves)
 
     def __post_init__(self, origin: str | None) -> None:
         if origin is not None:
@@ -43,6 +44,7 @@ class Force:
         self.parts = {o: part for o, part in self.parts.items() if part}
 
     def merge(self, other: Force) -> None:
+        self.breaks |= other.breaks
         for unit, n in other.units.items():
             self.units[unit] = self.units.get(unit, 0) + n
         for unit, n in other.hasty.items():

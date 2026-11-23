@@ -25,13 +25,18 @@
 | `wait_phase(max_seconds=45)` | ждёт следующей фазы, до 55 секунд |
 | `get_state(since_turn?, format?)` | твоя держава и видимая карта; `since_turn=N` — только изменения с хода N (0 или без него — всё) |
 | `list_orders()` | твои приказы, их `orders_hash` и остаток очков командования (ОК) |
-| `validate_orders(orders)` | проверяет приказы без подачи: причина отказа и цена в ОК |
-| `submit_orders(orders, mode)` | подаёт приказы; `mode` — `replace_all` (по умолчанию) или `append` |
-| `cancel_order(id)` | отменяет приказ (в П2 стоит ОК) |
-| `amend_order(id, patch)` | меняет `units`, `to` или `count` приказа (в П2 стоит ОК) |
+| `validate_orders(orders)` | проверяет приказы без подачи, в любой фазе: причина отказа, цена в ОК, предупреждения (ход в провинцию союзника по пакту вернётся) |
+| `submit_orders(orders, mode)` | подаёт приказы — только в Д (в П2 `append` за ОК; в П1 только `validate_orders`); `mode` — `replace_all` (по умолчанию) или `append` |
+| `cancel_order(id)` | отменяет приказ (в Д бесплатно, в П2 стоит ОК, в П1 нельзя) |
+| `amend_order(id, patch)` | меняет `units`, `to` или `pact` у движения и `count` у найма (в Д бесплатно, в П2 стоит ОК, в П1 нельзя) |
 | `estimate(attacker, defender, province_type, fortified?, hasty?)` | прогноз боя, например `estimate(attacker={"core:assault": 4}, defender={"core:assault": 2}, province_type="P07")` |
 | `send_message(to, text)` | сообщение списку ников или `"all"` (только в фазах переговоров) |
-| `inbox(since?)` | входящие сообщения |
+| `inbox(since?, all?)` | входящие сообщения и записи игры `[ИГРА]` (подношения, пакты); по умолчанию — только новые с прошлого вызова `inbox` этим мостом; `all=true` или `since=0` — вся история |
+| `send_gift(to, resources)` | подношение: сразу отдать игроку свободные ресурсы (П1 и П2), например `send_gift(to="Соло", resources={"alloy": 10})` |
+| `propose_pact(to, turns?)` | предложить пакт (П1 и П2): армии сторон не сражаются; `turns` — расчётов, считая текущий ход; без него — бессрочно |
+| `respond_pact(id, decision)` | `accept` или `reject` до конца хода |
+| `leave_pact(id)` | выйти из пакта (объявляется всем) или отозвать своё предложение |
+| `list_pacts()` | свои пакты и предложения (с ID) и действующие пакты других |
 | `ready(confirm_hash)` | нажимает «готово»; `confirm_hash` — `orders_hash` текущих приказов |
 | `unready()` | снимает «готово» |
 | `history(turn?)` | отчёт рассчитанного хода; без `turn` — последнего (до расчёта хода 1 — подсказка) |
@@ -147,7 +152,7 @@ uv run --project C:/path/to/DreamAboutHumanity dah-waker \
 | `--dt-url URL` | `http://127.0.0.1:8765` | адрес хаба DreamTeam |
 | `--dt-session ID` | обязательный | ID сессии DreamTeam, созданной через `/api/v1` |
 | `--stop-on-game-over` | выключен | после game_over остановить сессию (`POST /api/v1/sessions/{id}/stop`) вместо итогового сообщения всем (`continue` при `--wake-mode continue`) |
-| `--post-game-minutes N` | 30 | сколько минут после game_over следить за расходом сессии (не дольше) |
+| `--post-game-minutes N` | 30 | верхняя граница: сколько минут после game_over следить за расходом сессии; наблюдение кончается раньше, если сессия остановилась, выполнила цель или затихла |
 | `--wake-mode MODE` | `all` | как будить: `all` — сообщение всем участникам (`POST .../messages {"to": ["all"]}`; остановленной сессии — `continue`), `continue` — только `continue` (доходит до одного участника), `both` — и сообщение, и `continue` |
 | `--ack-seconds N` | 120 | за сколько секунд после пробуждения игрок должен обратиться к игре, иначе `wake_unanswered` |
 
@@ -200,10 +205,12 @@ uv run --project C:/path/to/DreamAboutHumanity dah-waker \
   партии), не шлёт ни итоговый `continue`, ни stop — это сделал прежний запуск (`continue_skipped` с причиной
   `started_after_game_over`): первую цифру отправляет как `after_game_over` и только следит за расходом;
 - после game_over каждые 30 секунд читает сводку сессии и отправляет каждый новый расход с
-  `phase: "after_game_over"` (`/v1/spend`), пока сессия не остановится (`final: true`) или не затихнет (состояние
-  `done` или `budget` и два чтения подряд ничего не потрачено; `waiting` и `paused` — сессия ещё работает, её
+  `phase: "after_game_over"` (`/v1/spend`), пока сессия не остановится (`final: true`), или пока цель сессии
+  не окажется выполненной (`goal.status` done) при сессии не в работе (не `running`/`starting`: идущий ход итога
+  может прислать расход только в конце) и расходе, не менявшемся 60 с (причина `goal_done`), или пока она не
+  затихнет (состояние `done` или `budget` и два чтения подряд ничего не потрачено; `waiting` и `paused` — сессия ещё работает, её
   опрашивает дальше), но не дольше `--post-game-minutes`. Неудачную отправку расхода повторяет на следующем чтении и
-  ещё раз перед концом наблюдения. Затем пишет `post_game_finished` (причина `stopped`, `idle`, `timeout` или
+  ещё раз перед концом наблюдения. Затем пишет `post_game_finished` (причина `stopped`, `goal_done`, `idle`, `timeout` или
   `interrupted` при Ctrl-C, `duration_s`,
   `spent_delta_usd`, расход на game_over и последний) и завершается. `dah report` показывает эти деньги и время
   отдельно от партии;
@@ -255,8 +262,10 @@ claude mcp add dah \
 
 - начать с `dah.rules()` и `dah.whoami()`;
 - **цель не достигнута, пока `dah.phase()` не вернул `game_over`**: раньше работу завершённой не объявлять;
-- в каждой фазе смотреть `dah.get_state(since_turn=...)` и `dah.inbox()`, подавать или править приказы,
-  договариваться через `dah.send_message`;
+- в каждой фазе смотреть `dah.get_state(since_turn=...)` и `dah.inbox()` (по умолчанию — только новое); П1:
+  переговоры (`dah.send_message`), подношения (`dah.send_gift`) и пакты (`dah.propose_pact`, `dah.respond_pact`,
+  `dah.leave_pact`), приказы можно только проверить (`dah.validate_orders`); Д: подать приказы
+  (`dah.submit_orders`); П2: переговоры и правка приказов за ОК;
 - после действий нажимать `dah.ready(confirm_hash)`, затем ждать через `dah.wait_phase()` или пробуждения
   сообщением, которое начинается с `[DAH]`;
 - сообщения `[DAH]` о смене фазы приходят всем участникам роя: кто бы ни был дежурным, при `[DAH]` кто-то должен

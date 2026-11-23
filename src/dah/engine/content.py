@@ -37,6 +37,8 @@ DEFAULT_MESSAGE_LIMITS: dict[str, Any] = {
     "negotiation_2": {"per_recipient": 10, "private": 10, "public": 1},
     "max_chars": 800,
 }
+# Per seat and per negotiation phase: gifts sent and pact proposals made (scenario `diplomacy_limits`).
+DEFAULT_DIPLOMACY_LIMITS: dict[str, int] = {"gifts_per_phase": 3, "pact_proposals_per_phase": 3}
 
 _SUSPICIOUS = re.compile(r"ignore|игнорируй|system|токен|https?://|www\.", re.IGNORECASE)
 _DURATION_UNITS = {"s": 1, "m": 60, "h": 3600}
@@ -161,6 +163,7 @@ class ScenarioDef:
     turn_limit: int
     phase_limits: dict[str, int]           # seconds per phase
     message_limits: dict[str, Any]
+    diplomacy_limits: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_DIPLOMACY_LIMITS))
 
 
 @dataclass(frozen=True)
@@ -225,6 +228,10 @@ class Ruleset:
         data.pop("hash")
         data["map"].pop("layout", None)
         data["map"].pop("layout_computed", None)
+        # Game settings, not rules of resolution: every game's config records its own values, and a new default
+        # must not make `dah replay` of an older game report changed content.
+        data["scenario"].pop("phase_limits", None)
+        data["scenario"].pop("diplomacy_limits", None)
         return data
 
 
@@ -556,7 +563,8 @@ class _Builder:
                       for k, v in _merge(DEFAULT_MESSAGE_LIMITS, d.get("message_limits", {})).items()}
             out[fid] = (raw, ScenarioDef(
                 fid, d["name"], map_id or d["map"], tuple(f for f in factions if f), d["turn_limit"],
-                {k: _duration(v) for k, v in d["phase_limits"].items()}, limits))
+                {k: _duration(v) for k, v in d["phase_limits"].items()}, limits,
+                _merge(DEFAULT_DIPLOMACY_LIMITS, d.get("diplomacy_limits", {}))))
         return out
 
     def roles(self, resources: Mapping[str, ResourceDef]) -> dict[str, str]:

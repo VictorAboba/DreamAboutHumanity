@@ -106,8 +106,16 @@ def _probe(url: str, key: str) -> None:
         capital = next(p["id"] for p in state["provinces"] if p["owner"] == "A" and p["type"] == "core:capital")
         orders = call("GET", "/v1/orders")
         call("POST", "/v1/orders/validate", {"orders": [{"kind": "fortify", "province": "P99"}]})
+        call("POST", "/v1/messages", {"to": "all", "text": "проба"})  # bots join after П1: someone must write
+        call("POST", "/v1/gifts", {"to": "B", "resources": {"alloy": 1}})  # replay must repeat the gift
+        call("POST", "/v1/pacts", {"to": "C", "turns": 2})  # never answered: lapses at the end of turn 1
         call("POST", "/v1/ready", {"confirm_hash": orders["orders_hash"]})
         call("POST", "/v1/unready")
+        call("POST", "/v1/ready", {"confirm_hash": orders["orders_hash"]})
+        locked = http.post("/v1/orders", json={"orders": [{"kind": "fortify", "province": capital}]}).json()
+        assert locked["error"]["code"] == "PHASE_LOCKED" and "validate_orders" in locked["error"]["message"]
+        while status["phase"] != "actions":  # orders are given in actions; П1 closes by its 5 s deadline
+            status = call("GET", f"/v1/wait_phase?after_seq={status['phase_seq']}&max_seconds=10")
         call("POST", "/v1/ready", {"confirm_hash": orders["orders_hash"]})
         call("POST", "/v1/orders", {"orders": [{"kind": "fortify", "province": capital}], "mode": "append"})
         call("POST", "/v1/orders", {"orders": [], "mode": "replace_all"})  # leave the passive seat empty again

@@ -10,6 +10,23 @@ from typing import Any, Mapping
 PHASES = ("negotiation_1", "actions", "negotiation_2", "resolution", "game_over")
 P2 = "negotiation_2"
 ACTIONS = "actions"
+HONOR = "honor"
+BREAK = "break"
+
+
+INT_BOUND = 2 ** 31
+
+
+def as_int(value: Any) -> Any:
+    """"2" and 2.0 count as 2 (ASCII digits, integral floats, below 2**31); anything else is returned as is
+    for the caller to refuse."""
+    if isinstance(value, str):
+        text = value.strip()
+        if text.isascii() and text.isdigit() and len(text) <= 10 and int(text) < INT_BOUND:
+            return int(text)
+    elif isinstance(value, float) and value.is_integer() and abs(value) < INT_BOUND:
+        return int(value)
+    return value
 
 
 def canonical_json(data: Any) -> str:
@@ -62,6 +79,9 @@ class GameState:
     pending_builds: list[PendingBuild] = field(default_factory=list)
     seq: dict[str, int] = field(default_factory=dict)   # per-seat order id counters (excluded from state_hash)
     result: dict[str, Any] | None = None   # {"winners": [...], "reason": ..., "scores": {...}} at game over
+    # Pacts and pact proposals, oldest first (engine/diplomacy.py); excluded from state_hash while empty, so states
+    # of games without diplomacy hash as they did before pacts existed.
+    pacts: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -76,6 +96,7 @@ class GameState:
             pending_builds=[PendingBuild(**b) for b in data.get("pending_builds", [])],
             seq=dict(data.get("seq") or {}),
             result=data.get("result"),
+            pacts=[dict(p) for p in data.get("pacts") or []],
         )
 
     def owned(self, seat: str) -> list[Province]:
@@ -85,6 +106,8 @@ class GameState:
 def state_hash(state: GameState) -> str:
     data = state.to_dict()
     data.pop("seq")
+    if not data.get("pacts"):
+        data.pop("pacts", None)
     return sha256_json(data)
 
 
@@ -106,6 +129,7 @@ class Order:
     unit: str | None = None
     count: int | None = None
     building: str | None = None
+    pact: str = HONOR                # move: "honor" (keep pacts) | "break" (fight a pact partner, ending the pact)
 
     @property
     def hasty(self) -> bool:
@@ -114,7 +138,7 @@ class Order:
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"id": self.id, "kind": self.kind, "phase_added": self.phase_added}
         if self.kind == "move":
-            out.update({"from": self.src, "to": self.dst, "units": dict(self.units or {})})
+            out.update({"from": self.src, "to": self.dst, "units": dict(self.units or {}), "pact": self.pact})
         elif self.kind == "recruit":
             out.update({"province": self.province, "unit": self.unit, "count": self.count})
         elif self.kind == "build":
@@ -130,7 +154,7 @@ class Order:
             src=data.get("from"), dst=data.get("to"),
             units=dict(data["units"]) if data.get("units") is not None else None,
             province=data.get("province"), unit=data.get("unit"), count=data.get("count"),
-            building=data.get("building"),
+            building=data.get("building"), pact=data.get("pact") or HONOR,
         )
 
 

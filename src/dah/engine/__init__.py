@@ -15,13 +15,16 @@ Content
 
 State (model)
     new_game_state(ruleset, seats=[{seat, nick, faction?}], seed) -> GameState   # turn 1, phase "negotiation_1"
-    GameState{turn, phase, provinces, players, pending_builds, seq, result}; .to_dict() / GameState.from_dict()
-    state_hash(state) -> str          # sha256 of canonical JSON, `seq` excluded
+    GameState{turn, phase, provinces, players, pending_builds, seq, result, pacts}; .to_dict() / .from_dict()
+    state_hash(state) -> str          # sha256 of canonical JSON, `seq` excluded (and `pacts` while empty)
     issue_order_id(state, seat) -> "o<N>"   # bumps state.seq[seat]
-    Order (.to_dict()/from_dict(); JSON keys: id, kind, phase_added, from, to, units | province, unit, count, building)
+    Order (.to_dict()/from_dict(); JSON keys: id, kind, phase_added, from, to, units, pact | province, unit, count,
+           building); a move's `pact` is "honor" (default) or "break"
     SeatOrders{orders, cp_spent, forfeit}: one seat's book for the current turn; persist it per turn for replay.
 
-Orders (phase = "negotiation_1" | "actions" are free, "negotiation_2" is priced in CP, anything else PHASE_LOCKED)
+Orders (phase "actions" is free, "negotiation_2" is priced in CP, anything else PHASE_LOCKED: in "negotiation_1"
+        orders are only validated, as for "actions"; Check/EditResult carry a `warning` for a move into a pact
+        partner's province)
     submit_orders(state, ruleset, seat, book, items, phase, mode="append"|"replace_all", id_factory=None)
         -> SubmitResult{book (new), results: list[Check], accepted, rejected}   # dry-run validate = ignore .book
     check_order(state, ruleset, seat, book, item, phase) -> Check{ok, reason, message, cp_cost, order}.to_dict()
@@ -32,11 +35,16 @@ Orders (phase = "negotiation_1" | "actions" are free, "negotiation_2" is priced 
              PHASE_LOCKED NOT_ENOUGH_CP UNKNOWN_ID INVALID (malformed input)
 
 Resolution
-    resolve(state, orders_by_seat{seat: SeatOrders | list[Order]}, ruleset, seed) -> (new_state, TurnReport)
+    resolve(state, orders_by_seat{seat: SeatOrders | list[Order]}, ruleset, seed, diplomacy=()) -> (new_state,
+            TurnReport)          # diplomacy: the turn's ops (already applied to state), for the report only
         new_state.turn is incremented and phase set to "negotiation_1", or phase "game_over" with
         new_state.result = {winners, reason: last_standing|turn_limit, scores}.
     TurnReport{turn, events, by_seat{seat: [visible events]}, public{ownership_changes, eliminated, scores,
-               result}, idle{seat: {resources, units}}}.to_dict() / from_dict()
+               result, diplomacy}, idle{seat: {resources, units}}}.to_dict() / from_dict()
+
+Diplomacy (engine/diplomacy.py: gifts and pacts)
+    make_gift / make_proposal / make_response / make_leave(state, ...) -> op   # DiplomacyError on refusal
+    apply_op(state, op) / apply_ops(state, ops)   # the live game and replay apply the same ops in the same order
     scores(state, ruleset) -> {seat: points};  visible_provinces(state, ruleset, seat) -> set[str]
 
 Views (Russian text)

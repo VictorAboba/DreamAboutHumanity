@@ -1,22 +1,30 @@
+# Balance of the core pack (version 0.2.0): fortify gives +15% (engine default +25%); see docs/SLICE.md section 3.
 - id: slice3
   name: Срез на троих
   map: mirror3
   factions: [covenant]
   turn_limit: 10
-  phase_limits: {negotiation_1: 20m, actions: 20m, negotiation_2: 10m}
+  phase_limits: {negotiation_1: 12m, actions: 5m, negotiation_2: 5m}
   message_limits:
     negotiation_1: {per_recipient: 6, private: 20, public: 2}
     negotiation_2: {private: 10, public: 1}
     max_chars: 800
+  diplomacy_limits: {gifts_per_phase: 3, pact_proposals_per_phase: 3}
+  overrides:
+    - {type: modify, target: combat.fortify_bonus, op: set, value: 0.15}
 - id: slice2
   name: Дуэль
   map: mirror2
   factions: [covenant]
   turn_limit: 10
-  phase_limits: {negotiation_1: 20m, actions: 20m, negotiation_2: 10m}
+  phase_limits: {negotiation_1: 12m, actions: 5m, negotiation_2: 5m}
+  overrides:
+    - {type: modify, target: combat.fortify_bonus, op: set, value: 0.15}
 - id: blitz_test
   name: Блиц для тестов
   map: mirror3
   factions: [covenant]
   turn_limit: 6
   phase_limits: {negotiation_1: 5s, actions: 5s, negotiation_2: 5s}
+  overrides:
+    - {type: modify, target: combat.fortify_bonus, op: set, value: 0.15}

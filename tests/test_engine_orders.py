@@ -45,7 +45,7 @@ def test_valid_orders_accepted(st, rs):
     assert [c.ok for c in res.results] == [True] * 4
     assert all(c.cp_cost == 0 for c in res.results)
     assert res.book.orders[0].units == {"core:assault": 2}          # short ids normalized
-    assert reserved_resources(rs, "core:covenant", res.book) == {"core:alloy": 32}
+    assert reserved_resources(rs, "core:covenant", res.book) == {"core:alloy": 22}   # assault 12 + mine 10 (core 0.2)
 
 
 def test_reasons(st, rs):
@@ -66,6 +66,7 @@ def test_reasons(st, rs):
 
 
 def test_reservations_between_orders(st, rs):
+    st.players["A"].resources["core:alloy"] = 40   # 3 assault (36) fit, then nothing else does
     res = submit(st, rs, [mv("P01", "P02", 2), mv("P01", "P03", 2),
                           {"kind": "recruit", "province": "P01", "unit": "assault", "count": 3},
                           {"kind": "build", "province": "P02", "building": "mine"},
@@ -141,11 +142,12 @@ def test_p2_cancel_refund(st, rs):
     res = cancel_order(st, rs, "A", book, book.orders[0].id, P2)
     assert res.ok and res.cp_cost == 1
     assert res.book.forfeit == {"core:alloy": 3}               # 12 - floor(12 * 0.75)
-    assert reserved_resources(rs, "core:covenant", res.book) == {"core:alloy": 23}
+    assert reserved_resources(rs, "core:covenant", res.book) == {"core:alloy": 13}   # mine 10 + forfeit 3
     new, _ = resolve(st, {"A": res.book}, rs, 1)
-    # 40 - 20 (mine) - 3 (forfeit) + income 3 (capital) + 4 (forge) + 1 (waste)
+    # 30 - 10 (mine) - 3 (forfeit) + income 3 (capital) + 4 (forge) + 1 (waste)
     assert new.players["A"].resources["core:alloy"] == 25
     assert "core:mine" in new.provinces["P02"].buildings
+    st.players["A"].resources["core:alloy"] = 40   # room for 3 assault (core 0.2 starts with 30)
     reduce = amend_order(st, rs, "A", submit(st, rs, [{"kind": "recruit", "province": "P01", "unit": "assault",
                                                        "count": 3}]).book, "tmp1", {"count": 1}, P2)
     assert reduce.ok and reduce.cp_cost == 1 and reduce.book.forfeit == {"core:alloy": 6}   # 24 - 18

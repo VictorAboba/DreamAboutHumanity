@@ -131,7 +131,7 @@ def test_admin_sees_everything_live(env):
     now = env.watch("admin", "turn/1")
     assert now["in_progress"] is True and now["full"] is True and now["events"] == []
     assert [m["text"] for m in now["messages"]] == [PRIVATE_TEXT] and now["messages"][0]["to_nicks"] == ["Соло"]
-    assert {p["id"]: p for p in now["provinces"]}[cap]["units"] == {"core:assault": 3}
+    assert {p["id"]: p for p in now["provinces"]}[cap]["units"] == {"core:assault": 4}   # core 0.2 start
     assert all("resources" in p for p in now["players"])
     assert "orders" not in now  # orders of the turn in progress stay hidden until it resolves
 

@@ -6,6 +6,6 @@ lore: >-
 bonuses: []
 penalties: []
 starting:
-  resources: {alloy: 40, provisions: 30}
-  units: {assault: 3}
+  resources: {alloy: 30, provisions: 15}
+  units: {assault: 4}
   buildings: [barracks]

@@ -27,7 +27,9 @@ def _seat_total() -> dict[str, Any]:
             "idle_units": 0, "no_orders_turns": [], "not_ready_phases": [], "spent_usd": None,
             "budget_exhausted_turn": None, "telemetry": {}, "spent_in_game_usd": None,
             "spent_after_game_usd": None, "in_game_s": None, "after_game_s": None, "post_game_watch_s": None,
-            "wakes_sent": 0, "wakes_answered": 0, "wakes_unanswered": 0, "wake_answer_median_s": None}
+            "wakes_sent": 0, "wakes_answered": 0, "wakes_unanswered": 0, "wake_answer_median_s": None,
+            "pacts_signed": 0, "pacts_kept": 0, "pacts_broken": 0, "gifts_sent": 0, "gifts_received": 0,
+            "gifted_resources": {}, "received_resources": {}}
 
 
 def _phase_wake(kind: str, detail: Any) -> bool:
@@ -64,6 +66,9 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
     journal clock: `in_game_s` from the first phase to game_over, `after_game_s` from game_over to the waker's
     `post_game_finished` (else to its last after-game figure); `post_game_watch_s` is the waker's own measure of
     its watch (`duration_s`).
+    Diplomacy: `pacts_signed` pacts the seat was a side of (accepted), `pacts_broken` those it broke with a "break"
+    order, `pacts_kept` the rest (signed and not broken by the seat); `gifts_sent` / `gifts_received` counts and
+    `gifted_resources` / `received_resources` summed amounts.
     Wakes (dah-waker): `wakes_sent` phase wakes delivered (the wrap-up not counted), `wakes_answered` /
     `wakes_unanswered` from its `wake_answered` / `wake_unanswered`, `wake_answer_median_s` the median seconds from a
     wake to the player's first game call after it.
@@ -214,6 +219,21 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
                 post_game[seat] = (ev["detail"], ev["ts"])
             if ev["kind"] == "budget_exhausted" and totals["budget_exhausted_turn"] is None:
                 totals["budget_exhausted_turn"] = ev.get("turn", current_turn)
+        elif kind == "gift" and totals is not None:
+            totals["gifts_sent"] += 1
+            _add(totals["gifted_resources"], ev.get("resources") or {})
+            other = report["totals"].get(ev.get("to"))
+            if other is not None:
+                other["gifts_received"] += 1
+                _add(other["received_resources"], ev.get("resources") or {})
+        elif kind == "pact_accepted":
+            for s in ev.get("seats", []):
+                if s in report["totals"]:
+                    report["totals"][s]["pacts_signed"] += 1
+        elif kind == "pact_broken":
+            for s in ev.get("broken_by", []):
+                if s in report["totals"]:
+                    report["totals"][s]["pacts_broken"] += 1
         elif kind == "game_over":
             over_ts = ev["ts"]
             report["result"] = {"winners": ev.get("winners", []), "reason": ev.get("reason"),
@@ -222,6 +242,7 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
     in_game_s = round(over_ts - first_open_ts, 3) if over_ts is not None and first_open_ts is not None else None
     report["in_game_s"] = in_game_s
     for seat, totals in report["totals"].items():
+        totals["pacts_kept"] = max(0, totals["pacts_signed"] - totals["pacts_broken"])
         totals["in_game_s"] = in_game_s
         if answer_s.get(seat):
             totals["wake_answer_median_s"] = round(median(answer_s[seat]), 1)
@@ -244,6 +265,25 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
         if isinstance(detail.get("duration_s"), (int, float)):
             totals["post_game_watch_s"] = float(detail["duration_s"])
     return report
+
+
+def _add(acc: dict[str, int], amounts: dict[str, Any]) -> None:
+    for r, n in amounts.items():
+        if isinstance(n, int) and not isinstance(n, bool):
+            acc[r] = acc.get(r, 0) + n
+
+
+def _diplomacy(t: dict[str, Any]) -> str:
+    """`; пакты: заключено 2, соблюдено 1, нарушено 1; подношения: отдано 1 (alloy 10), получено 0` when there were any."""
+    if not (t.get("pacts_signed") or t.get("pacts_broken") or t.get("gifts_sent") or t.get("gifts_received")):
+        return ""
+
+    def amounts(a: dict[str, int]) -> str:
+        return f" ({' '.join(f'{r.rsplit(chr(58), 1)[-1]} {n}' for r, n in sorted(a.items()))})" if a else ""
+
+    return (f"; пакты: заключено {t['pacts_signed']}, соблюдено {t['pacts_kept']}, нарушено {t['pacts_broken']}; "
+            f"подношения: отдано {t['gifts_sent']}{amounts(t['gifted_resources'])}, получено "
+            f"{t['gifts_received']}{amounts(t['received_resources'])}")
 
 
 def _secs(value: float | None) -> str:
@@ -300,7 +340,7 @@ def render_report(report: dict[str, Any]) -> str:
             f"{t['idle_units']}; не подал приказов в ходах {t['no_orders_turns'] or '—'}; не нажал готово "
             f"(закрыто по таймеру): {not_ready}; деньги {money}{_money_split(t)}"
             + (f", кончились на ходу {t['budget_exhausted_turn']}" if t["budget_exhausted_turn"] else "")
-            + _wakes(t) + f"; телеметрия: {telemetry}")
+            + _wakes(t) + _diplomacy(t) + f"; телеметрия: {telemetry}")
     lines.append("")
     lines.append("ФАЗЫ (до первого вызова / первой принятой подачи / ready; вызовы; правки):")
     for ph in report["phases"]:

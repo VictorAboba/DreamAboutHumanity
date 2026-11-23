@@ -40,6 +40,14 @@
         "max_chars": {"type": "integer", "minimum": 1, "maximum": 4000}
       }
     },
+    "diplomacy_limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "gifts_per_phase": {"type": "integer", "minimum": 0, "maximum": 50},
+        "pact_proposals_per_phase": {"type": "integer", "minimum": 0, "maximum": 50}
+      }
+    },
     "overrides": {"$ref": "common.schema.json#/$defs/effects"}
   }
 }

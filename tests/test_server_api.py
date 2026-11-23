@@ -78,8 +78,9 @@ def test_rules_and_phase(env):
     units = env.ok("A", "GET", "/v1/rules", params={"topic": "units"})["text"]
     assert units.startswith("ЮНИТЫ") and "ПРИКАЗЫ" not in units
     phase = env.ok("A", "GET", "/v1/phase")
-    assert phase["phase"] == "negotiation_1" and phase["ready"] == "0/2" and phase["seconds_left"] == 1200
+    assert phase["phase"] == "negotiation_1" and phase["ready"] == "0/2" and phase["seconds_left"] == 720
     assert phase["deadline"].endswith("Z") and phase["phase_seq"] == 1 and "send_message" in phase["allowed"]
+    assert "submit_orders" not in phase["allowed"] and {"validate_orders", "send_gift", "propose_pact"} <= set(phase["allowed"])
     assert phase["you_ready"] is False and phase["game_over"] is False and phase["turn_limit"] == 10
 
 

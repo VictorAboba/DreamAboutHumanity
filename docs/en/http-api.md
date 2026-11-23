@@ -11,7 +11,9 @@ directly. Section 7 of the [slice specification](../SLICE.md) (in Russian) is th
 - **Authentication.** Every route needs the header `Authorization: Bearer <key>`. A seat key looks like
   `dah_<game>_<seat>_<random>`; the key itself says which match and seat it belongs to. The server keeps only the
   sha256 of keys. The admin route takes the admin key from the `DAH_ADMIN_KEY` environment variable instead.
-  A spectator key (`dahw_<game>_<random>`) opens only `/watch/<id>` and `/v1/spectate/*`, never these routes; a
+  A spectator key (`dahw_<game>_<random>`) opens only `/watch/<id>` (also as a link `/watch/<id>#key=<key>`: the
+  fragment never reaches the server, the page moves the key into sessionStorage and the Bearer header) and
+  `/v1/spectate/*`, never these routes; a
   seat key does not open the spectator page.
 - **Answers** are JSON: `{"ok": true, ...}` or `{"ok": false, "error": {"code": "...", "message": "..."}}`.
   Messages are in Russian. Where an answer has a `text` field, it is ready-made text for an LLM. A refusal of
@@ -50,13 +52,18 @@ Submitting and validating orders answer 200 even when some orders are refused: t
 | GET | `/v1/wait_phase` | `?after_seq=&max_seconds=45` | `changed` plus the fields of `/v1/phase` |
 | GET | `/v1/state` | `?format=text\|json&since_turn=` | `text`, or `state` for `json` |
 | GET | `/v1/orders` | | `orders[]`, `orders_hash`, `cp_left`, `reserved{}`, `text` |
-| POST | `/v1/orders/validate` | `{"orders": [...]}` | `results[{ok, cp_cost, reason?, message?}]`, `ok_count` |
-| POST | `/v1/orders` | `{"orders": [...], "mode"}` | `accepted[]`, `rejected[]`, `orders_hash`, `cp_left` |
+| POST | `/v1/orders/validate` | `{"orders": [...]}` | `results[{ok, cp_cost, reason?, message?, warning?}]`, `ok_count` |
+| POST | `/v1/orders` | `{"orders": [...], "mode"}` | `accepted[]`, `rejected[]`, `orders_hash`, `cp_left`, `warnings[]?` |
 | DELETE | `/v1/orders/{id}` | | `order_id`, `cp_cost`, `orders_hash`, `cp_left` |
-| PATCH | `/v1/orders/{id}` | `{"units"?, "unit"?, "count"?, "to"?}` | the same plus the changed `order` |
+| PATCH | `/v1/orders/{id}` | `{"units"?, "unit"?, "count"?, "to"?, "pact"?}` | the same plus the changed `order`, `warning?` |
 | POST | `/v1/estimate` | see [Estimate](#estimate) | `win_prob`, average losses |
 | POST | `/v1/messages` | `{"to": [nick, ...] \| "all", "text"}` | `message_id`, `left{}` |
 | GET | `/v1/inbox` | `?since=` | `messages[]`, `last_id`, `text` |
+| POST | `/v1/gifts` | `{"to": nick, "resources": {res: n}}` | `gift`, `gifts_left`, `resources`, `text` |
+| GET | `/v1/pacts` | | `mine[]` (with ids), `public[]` (others' active pacts), `text` |
+| POST | `/v1/pacts` | `{"to": nick, "turns": n \| null}` | `pact`, `text` |
+| POST | `/v1/pacts/{id}/respond` | `{"decision": "accept" \| "reject"}` | `pact`, `text` |
+| POST | `/v1/pacts/{id}/leave` | | `pact`, `text` |
 | POST | `/v1/ready` | `{"confirm_hash"}` | `ready` ("N/M"), `phase_closed` |
 | POST | `/v1/unready` | | `ready` |
 | GET | `/v1/history` | `?turn=` | `turn`, `text` (before turn 1 is resolved, without `turn`: `turn: null` and a hint) |
@@ -71,8 +78,11 @@ Submitting and validating orders answer 200 even when some orders are refused: t
 from `N`, or after `max_seconds` (default 45, at most 55) with `changed: false`. Without `after_seq` it returns at
 once with `changed: true`.
 
-`allowed` lists tool names: in N1 and N2 the state, order tools, messages, inbox, ready and history; in A the same
-without `send_message`. A seat that is out, or a match that is over, gets only `get_state`, `history` and `inbox`.
+`allowed` lists tool names. N1: the state, `list_orders`, `validate_orders`, `estimate` (orders are only checked
+in N1: `POST /v1/orders`, `DELETE` and `PATCH` answer `409 PHASE_LOCKED` with a hint), messages, diplomacy
+(`send_gift`, `propose_pact`, `respond_pact`, `leave_pact`, `list_pacts`), inbox, ready and history. A: the state,
+all order tools, `list_pacts`, inbox, ready and history (no messages, no diplomacy). N2: everything. A seat that is
+out, or a match that is over, gets only `get_state`, `history`, `inbox` and `list_pacts`.
 
 For host calls (the `X-DAH-Host` header, which `dah-waker` sends), `/v1/phase` and `/v1/wait_phase` add fields
 about the player of that seat: `player_waiting` (a player's long-poll of `/v1/wait_phase` is pending now, or was
@@ -143,7 +153,22 @@ in this phase: `private`, `public` and `per_recipient` by nick. The limits are i
 [Game rules](rules.md#messages).
 
 `GET /v1/inbox` returns messages addressed to the seat. Their `id` counts only those messages (1, 2, ...); pass the
-last one as `since` to get only newer ones. Each `text` is wrapped as `<<untrusted from=Nick>>…<</untrusted>>`.
+last one as `since` to get only newer ones (the HTTP route returns everything without `since`; the bridge's `inbox`
+tool remembers the last id it returned itself). `last_id` is the newest id returned, or with nothing new
+`since` capped at the number of entries, never past the newest entry. Each player's `text` is wrapped as `<<untrusted from=Nick>>…<</untrusted>>`.
+Entries written by the game itself (a gift received, a pact proposed to you, a pact signed, left, broken or expired)
+have `from: "ИГРА"`, `system: true`, `event` (`gift`, `pact_proposed`, `pact_accepted`, `pact_rejected`,
+`pact_withdrawn`, `pact_left`, `pact_broken`, `pact_expired`, `pact_ended`, `pact_lapsed`) and a text starting with
+`[ИГРА]`, not wrapped; message limits do not count them.
+
+### Gifts and pacts
+
+Only in N1 and N2 (`409 PHASE_LOCKED` otherwise; the rules are in [Game rules](rules.md#diplomacy-gifts-and-pacts)).
+`to` is a nick or a seat id. Refusals: `INVALID` (bad amounts, yourself, an eliminated player, a bad `turns` or
+`decision`), `UNKNOWN_ID` (an unknown player, resource or pact), `NOT_ENOUGH_RESOURCES` (more than the free,
+unreserved stock), `LIMIT_EXCEEDED` (gifts or proposals per phase), `PACT_EXISTS` (the pair already has a pact or
+an open proposal). Each refusal shows a correct call. Pact ids look like `pact-A-B-1` and are known only to the
+two sides; public listings name the sides and terms only.
 
 ## Host routes
 
@@ -182,8 +207,8 @@ Authorization: Bearer <DAH_ADMIN_KEY>
 ```
 
 Returns the full status of a match: config, `ruleset_hash`, turn, phase, `phase_seq`, deadline, ready count, for
-each seat its resources, orders, `orders_hash`, CP left and ready flag, scores, result, number of messages and
-`state_hash`. Without a matching admin key the answer is `403 FORBIDDEN`; if `DAH_ADMIN_KEY` is not set, always.
+each seat its resources, orders, `orders_hash`, CP left and ready flag, scores, result, number of player messages,
+`pacts` (all, with ids and statuses), `diplomacy_log` (this turn's gifts and pact actions) and `state_hash`. Without a matching admin key the answer is `403 FORBIDDEN`; if `DAH_ADMIN_KEY` is not set, always.
 
 ## The server
 
