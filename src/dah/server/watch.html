@@ -502,6 +502,16 @@ h4 { margin: 12px 0 6px; font-size: 14px; }
     box.appendChild(el("div", {cls: "tablebox"}, [tb]));
     box.appendChild(el("p", {cls: "note", text: "Очки: 1 за провинцию, +3 за каждую столицу."}));
   }
+  function fmtMoney(v) {
+    if (v.spent_usd == null) return "—";
+    var out = "$" + v.spent_usd.toFixed(2);
+    if (v.spent_after_game_usd != null || v.after_game_s != null) {
+      out += " (в партии " + (v.spent_in_game_usd == null ? "—" : "$" + v.spent_in_game_usd.toFixed(2)) +
+        ", после game_over " + (v.spent_after_game_usd == null ? "—" : "$" + v.spent_after_game_usd.toFixed(2)) +
+        (v.after_game_s != null ? " за " + fmtSecs(v.after_game_s) : "") + ")";
+    }
+    return out;
+  }
   function renderTimings() {
     var box = $("tab-timings"), t = S.timings;
     clear(box);
@@ -530,7 +540,7 @@ h4 { margin: 12px 0 6px; font-size: 14px; }
       if (!v) return;
       tt.appendChild(el("tr", {}, [s.nick, String(v.calls), v.req_chars + " / " + v.resp_chars, String(v.host_calls),
         v.host_req_chars + " / " + v.host_resp_chars, String(v.submits), String(v.edits),
-        String(v.validate_rejected + v.submit_rejected), v.spent_usd == null ? "—" : "$" + v.spent_usd.toFixed(2)]
+        String(v.validate_rejected + v.submit_rejected), fmtMoney(v)]
         .map(function (x) { return el("td", {text: x}); })));
     });
     box.appendChild(el("div", {cls: "tablebox"}, [tt]));

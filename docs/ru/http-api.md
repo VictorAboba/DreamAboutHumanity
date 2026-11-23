@@ -137,11 +137,15 @@
 | POST | `/v1/seat/dreamteam_session` | `{"dreamteam_session_id"}` |
 
 - `kind` телеметрии — `continue_sent`, `continue_skipped`, `session_restarted`, `goal_reopened`,
-  `budget_exhausted` или `wake_failed`; `detail` — JSON-объект до 2000 символов.
+  `budget_exhausted`, `wake_failed`, `session_stopped_by_waker` или `post_game_finished`; `detail` — JSON-объект до
+  2000 символов.
 - `spent_usd` — сколько место потратило всего к этому моменту. `turn` и `phase` называют фазу, за которую эта
   цифра (ту, что только что закрылась); без них цифра — отправная точка до закрытия первой фазы. В журнале у
   `spend_report` есть обе стороны: `for_turn`/`for_phase` (`null` у отправной точки) и `at_turn`/`at_phase` —
   фаза, текущая в момент приёма. Отчёт считает деньги по полям «за».
+- После game_over `phase` может быть `after_game_over` (`turn` необязателен, по умолчанию последний ход; до
+  game_over — 400 `INVALID`): расход сессии, пока она подводит итог. Пишется в журнал как обычно (`for_phase:
+  "after_game_over"`), не относится ни к ходу, ни к фазе, и отчёт показывает его отдельно (`spent_after_game_usd`).
 - `/v1/seat/dreamteam_session` записывает, какая сессия DreamTeam играет за место: пишет `dreamteam_session_id` в
   `config.json` партии и событие `seat_info` в журнал с `update: true`, `source: "waker"` и прежним ID в
   `previous`. Тот же ID повторно ничего не меняет (`changed: false`). Waker вызывает его один раз при старте.

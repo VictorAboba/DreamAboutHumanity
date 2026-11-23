@@ -148,6 +148,8 @@ uv run --project C:/path/to/DreamAboutHumanity dah-waker \
 | `--key KEY` | `DAH_KEY` | seat key |
 | `--dt-url URL` | `http://127.0.0.1:8765` | DreamTeam hub address |
 | `--dt-session ID` | required | id of the DreamTeam session created through `/api/v1` |
+| `--stop-on-game-over` | off | after game_over stop the session (`POST /api/v1/sessions/{id}/stop`) instead of the wrap-up `continue` |
+| `--post-game-minutes N` | 30 | how long after game_over to keep reading the session's spend at most |
 
 What the waker does:
 
@@ -171,9 +173,23 @@ What the waker does:
 - after each phase change reads the DreamTeam session summary and reports its cost to the game (`/v1/spend`,
   `source: participant_program`) as the figure of the phase that just closed;
 - on 429 and 5xx from DreamTeam retries after 10, 30 and 60 seconds, then records `wake_failed`;
+- at game_over reports the cost once more (the figure of the last phase), then sends the session ONE wrap-up
+  `continue` with the result, for example `[DAH] Партия окончена: ход 10, лимит ходов, победитель B; ты A, твоё
+  место 2 из 3; счёт: B 12, A 9, C 4. Заверши цель одним коротким итоговым сообщением, больше ничего не делай.`
+  (`continue_sent` with reason `game_over`). With `--stop-on-game-over` it stops the session instead
+  (`POST /api/v1/sessions/{id}/stop`, telemetry `session_stopped_by_waker`). A session that is already stopped
+  for good (`final: true`) is neither woken nor stopped (`continue_skipped`, reason `session_final`); with the
+  budget spent no wrap-up is sent. A waker whose first poll already sees game_over (started or restarted after the
+  match) sends neither the wrap-up nor the stop, since an earlier run did (`continue_skipped`, reason
+  `started_after_game_over`): it reports its first figure as `after_game_over` and only watches the spend;
+- after game_over reads the session summary every 30 seconds and reports each new cost with
+  `phase: "after_game_over"` (`/v1/spend`), until the session is stopped (`final: true`) or idle (state `done` or
+  `budget` with no new spend on two reads in a row; `waiting` and `paused` still run, so it keeps polling them), at
+  most `--post-game-minutes`. A spend post that failed is tried again on the next read and once more before the
+  watch ends. Then it records `post_game_finished` (reason `stopped`, `idle`, `timeout` or `interrupted` on Ctrl-C,
+  `duration_s`, `spent_delta_usd`, the cost at game_over and the last cost) and exits. `dah report` shows this money and time apart from the match's;
 - records the telemetry `continue_sent`, `continue_skipped`, `session_restarted`, `goal_reopened`,
-  `budget_exhausted`, `wake_failed`;
-- exits when the match is over.
+  `budget_exhausted`, `wake_failed`, `session_stopped_by_waker`, `post_game_finished`.
 
 The waker's calls carry the `X-DAH-Host` header, so the report counts them apart from the player's own calls. If
 `DREAMTEAM_API_TOKEN` is empty the waker exits with code 2; if the game server refuses the key, with code 1.

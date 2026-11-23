@@ -33,7 +33,9 @@ GAME_OVER = "game_over"
 NEXT_PHASE = {"negotiation_1": "actions", "actions": "negotiation_2"}
 SEAT_KINDS = ("swarm", "agent", "human", "bot")
 TELEMETRY_KINDS = ("continue_sent", "continue_skipped", "session_restarted", "goal_reopened", "budget_exhausted",
-                   "wake_failed")
+                   "wake_failed", "session_stopped_by_waker", "post_game_finished")
+# `for_phase` of a spend figure taken after game_over (dah-waker keeps reporting while the swarm wraps up).
+AFTER_GAME_OVER = "after_game_over"
 SPEND_SOURCES = ("participant_program", "host")
 MAX_TELEMETRY_DETAIL_CHARS = 2000
 DT_SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -840,6 +842,8 @@ class Game:
         the figure is a baseline taken before any phase closed. The journal keeps both sides: `for_turn`/
         `for_phase` (None for a baseline) and `at_turn`/`at_phase`, the phase current when it was received;
         `turn`/`phase` repeat the "for" pair, or the "at" pair for a baseline (older readers).
+        After game_over `phase` may be `after_game_over` (`turn` optional, the last turn by default): the spend of
+        the session while it wraps up, kept apart in the report.
         `source: host` is accepted only from the host (`host_allowed`)."""
         if isinstance(spent_usd, bool) or not isinstance(spent_usd, (int, float)) or spent_usd < 0:
             raise GameError("INVALID", "spent_usd — неотрицательное число")
@@ -852,6 +856,13 @@ class Game:
         at_turn, at_phase = self.state.turn, self.phase
         if turn is None and phase is None:
             for_turn = for_phase = None
+        elif phase == AFTER_GAME_OVER:
+            if not self.game_over:
+                raise GameError("INVALID", f"phase {AFTER_GAME_OVER} — только после конца партии (game_over)")
+            if turn is not None and (isinstance(turn, bool) or not isinstance(turn, int)
+                                     or not 1 <= turn <= self.state.turn):
+                raise GameError("INVALID", f"turn — номер хода 1..{self.state.turn} или не задан")
+            for_turn, for_phase = turn if turn is not None else self.state.turn, AFTER_GAME_OVER
         elif (isinstance(turn, bool) or not isinstance(turn, int) or not 1 <= turn <= self.state.turn
               or phase not in PLAYABLE_PHASES):
             raise GameError("INVALID", f"turn — номер хода 1..{self.state.turn}, phase — одна из "

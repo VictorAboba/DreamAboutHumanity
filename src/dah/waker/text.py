@@ -52,3 +52,36 @@ def wake_text(phase_info: dict[str, Any], *, reminder: bool = False) -> str:
     prefix = "[DAH] Напоминание: фаза скоро закроется, ты ещё не нажал ready. " if reminder else "[DAH] "
     ready = f" Готово {phase_info['ready']}." if phase_info.get("ready") else ""
     return f"{prefix}{head}.{ready} {_hint(phase, turn)}"
+
+
+
+RESULT_REASONS = {"turn_limit": "лимит ходов", "last_standing": "остался последний"}
+
+
+def wrap_up_text(phase_info: dict[str, Any], seat: str | None = None) -> str:
+    """The one `continue` after game_over, e.g. `[DAH] Партия окончена: ход 10, лимит ходов, победитель A; ты B,
+    твоё место 2 из 3; счёт: A 12, B 9, C 4. Заверши цель одним коротким итоговым сообщением, больше ничего не
+    делай.`"""
+    result = phase_info.get("result") if isinstance(phase_info.get("result"), dict) else {}
+    parts = []
+    turn = phase_info.get("turn")
+    if turn:
+        parts.append(f"ход {turn}")
+    reason = result.get("reason")
+    if reason:
+        parts.append(RESULT_REASONS.get(reason, str(reason)))
+    winners = [str(w) for w in result.get("winners") or []]
+    if winners:
+        parts.append(("победитель " if len(winners) == 1 else "победители ") + ", ".join(winners))
+    elif result:
+        parts.append("победителей нет")
+    scores = result.get("scores") if isinstance(result.get("scores"), dict) else {}
+    head = ", ".join(parts) or "итог в dah.phase()"
+    if seat and seat in scores:
+        better = sum(1 for s, n in scores.items() if s != seat and n > scores[seat])
+        head += f"; ты {seat}, твоё место {better + 1} из {len(scores)}"
+    if scores:
+        ranked = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
+        head += "; счёт: " + ", ".join(f"{s} {n}" for s, n in ranked)
+    return (f"[DAH] Партия окончена: {head}. Заверши цель одним коротким итоговым сообщением, "
+            "больше ничего не делай.")

@@ -394,7 +394,8 @@ def build_timings(path: Path) -> dict[str, Any]:
                     "edits", "p2_edits", "validate_rejected", "submit_rejected")
     total_fields = ("calls", "req_chars", "resp_chars", "host_calls", "host_req_chars", "host_resp_chars",
                     "submits", "edits", "p2_edits", "validate_rejected", "submit_rejected", "spent_usd",
-                    "submits_by_phase", "no_orders_turns", "not_ready_phases", "idle_units", "telemetry")
+                    "submits_by_phase", "no_orders_turns", "not_ready_phases", "idle_units", "telemetry",
+                    "spent_in_game_usd", "spent_after_game_usd", "in_game_s", "after_game_s")
     out = {
         "seats": rep["seats"], "rules_chars": rep["rules_chars"],
         "phases": [{"turn": ph["turn"], "phase": ph["phase"], "closed": ph["closed"], "duration_s": ph["duration_s"],

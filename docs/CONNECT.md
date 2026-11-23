@@ -152,9 +152,16 @@ uv run --project C:/path/to/DreamAboutHumanity dah-waker \
 - после каждой смены фазы читает сводку сессии DreamTeam и отправляет в игру её расход (`/v1/spend`,
   `source: participant_program`) как цифру только что закрытой фазы;
 - при 429 и 5xx от DreamTeam повторяет через 10, 30 и 60 с, затем пишет `wake_failed`;
+- на game_over шлёт сессии ОДИН итоговый `continue` с итогом (ход, победители, место, счёт): «Заверши цель одним
+  коротким итоговым сообщением, больше ничего не делай»; с `--stop-on-game-over` вместо этого останавливает сессию
+  (`POST /api/v1/sessions/{id}/stop`, телеметрия `session_stopped_by_waker`); запущенный уже после game_over
+  (в т. ч. перезапуск) не шлёт ни `continue`, ни stop (`continue_skipped`, `started_after_game_over`);
+- после game_over каждые 30 с читает сводку сессии и шлёт новый расход с `phase: after_game_over`, пока сессия не
+  остановится или не затихнет (`done`/`budget` без нового расхода два чтения подряд; `waiting`/`paused` опрашивает
+  дальше), но не дольше `--post-game-minutes` (30), затем пишет `post_game_finished` и
+  завершается; `dah report` показывает эти деньги и время отдельно («после game_over»);
 - пишет телеметрию `continue_sent`, `continue_skipped`, `session_restarted`, `goal_reopened`, `budget_exhausted`,
-  `wake_failed`;
-- завершается, когда партия окончена.
+  `wake_failed`, `session_stopped_by_waker`, `post_game_finished`.
 
 Когда партию создают, ID сессии обычно ещё неизвестен. Waker записывает его сам при старте; чтобы записать без
 waker'а, выполните `dah game set-session <GAME_ID> A 5f0c...` (можно и при работающем сервере). Если ID известен

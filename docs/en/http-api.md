@@ -137,11 +137,15 @@ last one as `since` to get only newer ones. Each `text` is wrapped as `<<untrust
 | POST | `/v1/seat/dreamteam_session` | `{"dreamteam_session_id"}` |
 
 - `kind` of telemetry is `continue_sent`, `continue_skipped`, `session_restarted`, `goal_reopened`,
-  `budget_exhausted` or `wake_failed`; `detail` is a JSON object of up to 2000 characters.
+  `budget_exhausted`, `wake_failed`, `session_stopped_by_waker` or `post_game_finished`; `detail` is a JSON object
+  of up to 2000 characters.
 - `spent_usd` is the seat's total spend so far. `turn` and `phase` name the phase the figure is for (the one that
   just closed); without them the figure is a baseline taken before any phase closed. The journal's `spend_report`
   keeps both sides: `for_turn`/`for_phase` (`null` for a baseline) and `at_turn`/`at_phase`, the phase current
   when the server received it. The report counts money by the "for" fields.
+- After game_over `phase` may be `after_game_over` (`turn` optional, the last turn by default; before game_over it
+  is 400 `INVALID`): the spend of the session while it wraps up. It is journaled like any figure (`for_phase:
+  "after_game_over"`), counts in no turn or phase, and the report shows it apart (`spent_after_game_usd`).
 - `/v1/seat/dreamteam_session` records which DreamTeam session plays the seat: it writes `dreamteam_session_id`
   into the match's `config.json` and journals a `seat_info` event with `update: true`, `source: "waker"` and the
   `previous` id. The same id again changes nothing (`changed: false`). The waker calls it once at start.

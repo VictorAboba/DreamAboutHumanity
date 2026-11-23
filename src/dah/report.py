@@ -7,6 +7,8 @@ from typing import Any
 PHASE_SHORT = {"negotiation_1": "П1", "actions": "Д", "negotiation_2": "П2"}
 PHASE_ORDER = ("negotiation_1", "actions", "negotiation_2")
 # Seat events counted in the phase open when they were written (a `call` names its own phase).
+# `for_phase` of a spend figure taken after game_over (dah-waker, while the session wraps up).
+AFTER_GAME_OVER = "after_game_over"
 _PHASE_SEAT_EVENTS = frozenset({"first_call_in_phase", "orders_validated", "orders_submitted", "order_edit",
                                 "order_edit_p2", "ready"})
 
@@ -22,7 +24,16 @@ def _seat_total() -> dict[str, Any]:
             "host_resp_chars": 0, "submits": 0, "edits": 0, "p2_edits": 0, "validate_rejected": 0,
             "submit_rejected": 0, "submits_by_phase": {p: 0 for p in PHASE_ORDER}, "idle_resources": {},
             "idle_units": 0, "no_orders_turns": [], "not_ready_phases": [], "spent_usd": None,
-            "budget_exhausted_turn": None, "telemetry": {}}
+            "budget_exhausted_turn": None, "telemetry": {}, "spent_in_game_usd": None,
+            "spent_after_game_usd": None, "in_game_s": None, "after_game_s": None, "post_game_watch_s": None}
+
+
+def _after_game_figure(ev: dict[str, Any]) -> bool:
+    """A spend figure of the session after game_over: `for_phase` `after_game_over`, or a baseline (no "for" phase)
+    taken when the game was already over (a waker started after the match, older versions)."""
+    if ev.get("for_phase") == AFTER_GAME_OVER:
+        return True
+    return "for_turn" in ev and ev.get("for_phase") is None and ev.get("at_phase") == "game_over"
 
 
 def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
@@ -34,7 +45,14 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
     `no_orders_turns`: turns the seat resolved with no orders at all (armies stood); `not_ready_phases`:
     [turn, phase] the deadline closed while the seat had not pressed ready. `submits_by_phase` counts submissions
     per phase kind. Money: a `spend_report` counts for the phase it names in `for_turn`/`for_phase` (older
-    journals: `turn`/`phase`); a baseline without one only sets the total.
+    journals: `turn`/`phase`); a baseline without one only sets the total. A figure for `after_game_over` (the
+    session's spend while it wraps up after game_over; a baseline taken after game_over too) counts in no turn or
+    phase: `spent_usd` is the last figure of all, `spent_in_game_usd` the last one before it (or the waker's
+    `cost_at_game_over_usd` when that is higher: its game_over post was lost), `spent_after_game_usd` their
+    difference (or the waker's `post_game_finished` delta when there is no such pair). Both times come from the
+    journal clock: `in_game_s` from the first phase to game_over, `after_game_s` from game_over to the waker's
+    `post_game_finished` (else to its last after-game figure); `post_game_watch_s` is the waker's own measure of
+    its watch (`duration_s`).
     """
     report: dict[str, Any] = {"game_id": None, "scenario": None, "rules_chars": None, "seats": {}, "phases": [],
                               "turns": [], "totals": {}, "result": None}
@@ -56,6 +74,10 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
                                        "no_orders": [], "spent_usd": {}})
 
     ready_now: set[str] = set()
+    first_open_ts: float | None = None
+    over_ts: float | None = None
+    after_spend: dict[str, tuple[float, float]] = {}  # seat -> (last after_game_over figure, its ts)
+    post_game: dict[str, tuple[dict[str, Any], float]] = {}  # seat -> (detail of its last `post_game_finished`, ts)
 
     for ev in events:
         kind = ev["type"]
@@ -71,6 +93,8 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
                 report["totals"][s["seat"]] = _seat_total()
         elif kind == "phase_open":
             current_turn = ev["turn"]
+            if first_open_ts is None:
+                first_open_ts = ev["ts"]
             phase = {"turn": ev["turn"], "phase": ev["phase"], "opened_ts": ev["ts"], "closed": None,
                      "duration_s": None, "not_ready": None, "spent_usd": {}, "seats": {}}
             ready_now = set()
@@ -145,7 +169,11 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
             for s in entry["no_orders"]:
                 if s in report["totals"]:
                     report["totals"][s]["no_orders_turns"].append(ev["turn"])
+        elif kind == "spend_report" and totals is not None and _after_game_figure(ev):
+            after_spend[seat] = (ev["spent_usd"], ev["ts"])
+            totals["spent_usd"] = ev["spent_usd"]
         elif kind == "spend_report" and totals is not None:
+            totals["spent_in_game_usd"] = ev["spent_usd"]
             if "for_turn" in ev:
                 for_turn, for_phase = ev["for_turn"], ev.get("for_phase")
             else:
@@ -158,17 +186,55 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
             totals["spent_usd"] = ev["spent_usd"]
         elif kind == "telemetry" and totals is not None:
             totals["telemetry"][ev["kind"]] = totals["telemetry"].get(ev["kind"], 0) + 1
+            if ev["kind"] == "post_game_finished" and isinstance(ev.get("detail"), dict):
+                post_game[seat] = (ev["detail"], ev["ts"])
             if ev["kind"] == "budget_exhausted" and totals["budget_exhausted_turn"] is None:
                 totals["budget_exhausted_turn"] = ev.get("turn", current_turn)
         elif kind == "game_over":
+            over_ts = ev["ts"]
             report["result"] = {"winners": ev.get("winners", []), "reason": ev.get("reason"),
                                 "scores": ev.get("scores", {}), "turn": ev.get("turn")}
     report["turns"] = [turns[t] for t in sorted(turns)]
+    in_game_s = round(over_ts - first_open_ts, 3) if over_ts is not None and first_open_ts is not None else None
+    report["in_game_s"] = in_game_s
+    for seat, totals in report["totals"].items():
+        totals["in_game_s"] = in_game_s
+        detail, finished_ts = post_game.get(seat, ({}, None))
+        at_over = detail.get("cost_at_game_over_usd")
+        if (isinstance(at_over, (int, float)) and not isinstance(at_over, bool)
+                and not detail.get("started_after_game_over")
+                and (totals["spent_in_game_usd"] is None or at_over > totals["spent_in_game_usd"])):
+            totals["spent_in_game_usd"] = float(at_over)
+        in_game = totals["spent_in_game_usd"]
+        delta = detail.get("spent_delta_usd")
+        if seat in after_spend and in_game is not None:
+            totals["spent_after_game_usd"] = round(max(0.0, after_spend[seat][0] - in_game), 6)
+        elif isinstance(delta, (int, float)) and not isinstance(delta, bool):
+            totals["spent_after_game_usd"] = round(float(delta), 6)
+        if over_ts is not None:
+            end_ts = finished_ts if finished_ts is not None else after_spend.get(seat, (None, None))[1]
+            if end_ts is not None:
+                totals["after_game_s"] = round(max(0.0, end_ts - over_ts), 3)
+        if isinstance(detail.get("duration_s"), (int, float)):
+            totals["post_game_watch_s"] = float(detail["duration_s"])
     return report
 
 
 def _secs(value: float | None) -> str:
     return "—" if value is None else f"{value:.1f}с"
+
+
+def _usd(value: float | None) -> str:
+    return "—" if value is None else f"${value:.2f}"
+
+
+def _money_split(t: dict[str, Any]) -> str:
+    """` (во время партии $0.67, 3600.0с; после game_over $0.28, 750.0с)` when the seat has after-game data (as
+    /watch shows it): human seats and seats without a waker get no split."""
+    if t.get("spent_after_game_usd") is None and t.get("after_game_s") is None:
+        return ""
+    return (f" (во время партии {_usd(t.get('spent_in_game_usd'))}, {_secs(t.get('in_game_s'))}; после game_over "
+            f"{_usd(t.get('spent_after_game_usd'))}, {_secs(t.get('after_game_s'))})")
 
 
 def render_report(report: dict[str, Any]) -> str:
@@ -198,7 +264,7 @@ def render_report(report: dict[str, Any]) -> str:
             f"{t['edits']}, изменений в П2 {t['p2_edits']}; отклонено: validate "
             f"{t['validate_rejected']}, submit {t['submit_rejected']}; простой: ресурсы {idle_res}, юниты-ходы "
             f"{t['idle_units']}; не подал приказов в ходах {t['no_orders_turns'] or '—'}; не нажал готово "
-            f"(закрыто по таймеру): {not_ready}; деньги {money}"
+            f"(закрыто по таймеру): {not_ready}; деньги {money}{_money_split(t)}"
             + (f", кончились на ходу {t['budget_exhausted_turn']}" if t["budget_exhausted_turn"] else "")
             + f"; телеметрия: {telemetry}")
     lines.append("")

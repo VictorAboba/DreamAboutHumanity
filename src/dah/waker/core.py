@@ -1,4 +1,5 @@
-"""The waker loop: follow the game's phases and wake a DreamTeam session when its seat has to act."""
+"""The waker loop: follow the game's phases and wake a DreamTeam session when its seat has to act; after game_over,
+ask the session to wrap up (or stop it) and keep reporting its spend until it is stopped or idle."""
 
 from __future__ import annotations
 
@@ -8,7 +9,7 @@ from typing import Any, Callable
 
 from dah.bridge.client import GameApiError, GameClient
 from dah.waker.dreamteam import DreamTeamClient, DtResponse
-from dah.waker.text import wake_text
+from dah.waker.text import wake_text, wrap_up_text
 
 ACTIVE_PHASES = frozenset({"negotiation_1", "actions", "negotiation_2"})
 POLL_SECONDS = 45
@@ -20,6 +21,15 @@ STOPPED_STATES = frozenset({"stopped", "failed", "done", "budget", "created"})
 SPEND_SOURCE = "participant_program"
 # A player call in the new phase at most this many seconds ago means the session is already at work.
 ACTIVE_SKIP_SECONDS = 30
+# After game_over: how often the session summary is read, and the default limit of that watch.
+POST_GAME_POLL_SECONDS = 30
+POST_GAME_MINUTES = 30.0
+AFTER_GAME_OVER = "after_game_over"
+# States of a session that is not working (DreamTeam http-api.md, "States"): with no new spend over IDLE_POLLS reads
+# in a row, the post-game watch ends as `idle`. `waiting` and `paused` are not here: the session still runs (blocked on
+# a review or an approval, or paused by the user) and may spend again once resumed, so the watch keeps polling it.
+IDLE_STATES = frozenset({"done", "budget"})
+IDLE_POLLS = 2
 
 
 def _stderr(message: str) -> None:
@@ -29,7 +39,8 @@ def _stderr(message: str) -> None:
 class Waker:
     def __init__(self, game: GameClient, dreamteam: DreamTeamClient, session_id: str, *,
                  clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
-                 log: Callable[[str], None] = _stderr):
+                 log: Callable[[str], None] = _stderr, stop_on_game_over: bool = False,
+                 post_game_minutes: float = POST_GAME_MINUTES):
         self._game = game
         self._dt = dreamteam
         self._session_id = session_id
@@ -44,6 +55,13 @@ class Waker:
         self._reminded = False
         self._link_pending = False  # True while run()'s link_session hit a transient error
         self._session_state: str | None = None  # from the last session summary that _report_spend read
+        self._session: dict[str, Any] | None = None  # that summary itself (None when the read failed)
+        self.stop_on_game_over = stop_on_game_over
+        self.post_game_minutes = max(0.0, post_game_minutes)
+        self._over_info: dict[str, Any] = {}  # the game's phase info at game_over
+        # True when the first poll of this process already saw game_over (a waker started or restarted after the
+        # match): the wrap-up was due to an earlier process, so it is not sent again.
+        self.started_after_game_over = False
 
     # --- loop ---------------------------------------------------------------------------------------------
 
@@ -51,6 +69,7 @@ class Waker:
         self.link_session()
         while not self.step():
             pass
+        self.after_game_over()
 
     def link_session(self) -> bool:
         """Tell the game server which DreamTeam session plays this seat (journaled as a `seat_info` update).
@@ -77,7 +96,12 @@ class Waker:
         if self._link_pending:  # the game server was not up when run() started
             self.link_session()
         if info.get("game_over"):
-            self._report_spend(self._phase_key)
+            self._over_info = info
+            if self._phase_key is None:  # no phase seen by this process: the figure is post-game spend
+                self.started_after_game_over = True
+                self._report_spend(None, after_game=True)
+            else:
+                self._report_spend(self._phase_key)
             self._log("партия окончена")
             return True
         key = (info.get("turn"), info.get("phase"))
@@ -197,19 +221,24 @@ class Waker:
 
     # --- reporting ----------------------------------------------------------------------------------------
 
-    def _report_spend(self, closed: tuple[Any, Any] | None) -> None:
-        """Post the session's spend so far as the figure of the phase that just closed (`closed` key)."""
+    def _report_spend(self, closed: tuple[Any, Any] | None, *, after_game: bool = False) -> None:
+        """Post the session's spend so far as the figure of the phase that just closed (`closed` key), or as an
+        `after_game_over` figure (`after_game`)."""
         resp = self._dt.get_session(self._session_id)
         if not resp.ok:
             self._session_state = None
+            self._session = None
             self._log(f"сводка сессии DreamTeam: {resp.status} {resp.code}")
             return
         session = resp.session
+        self._session = session
         self._session_state = session.get("state") if isinstance(session.get("state"), str) else None
         cost = session.get("cost_usd")
         if isinstance(cost, (int, float)):
             try:
                 turn, phase = closed if closed else (None, None)
+                if after_game:
+                    turn, phase = None, AFTER_GAME_OVER
                 self._game.spend(float(cost), SPEND_SOURCE, turn=turn, phase=phase)
             except GameApiError as exc:
                 self._log(f"не удалось отправить расход: {exc.code} {exc.message}")
@@ -218,8 +247,137 @@ class Waker:
             self._exhaust({"via": "session", "state": session.get("state"), "cost_usd": cost,
                            "max_cost_usd": session.get("max_cost_usd")})
 
+    # --- after game_over ------------------------------------------------------------------------------------
+
+    def after_game_over(self) -> None:
+        """The one wrap-up `continue` (or `stop` with --stop-on-game-over), then a read of the session summary every
+        POST_GAME_POLL_SECONDS, each new cost posted as `/v1/spend` with phase `after_game_over`, until the session is
+        stopped (`final`) or idle (`done`/`budget` and no new spend over IDLE_POLLS reads in a row), or
+        post_game_minutes have passed. A waker whose first poll already saw game_over sends neither the wrap-up nor
+        the stop (an earlier process did) and only watches the spend. Ends with `post_game_finished` telemetry
+        (reason, duration, spend delta), Ctrl-C included (reason `interrupted`)."""
+        started = self._clock()
+        cost_at_over = _cost(self._session)
+        reason = _stopped(self._session)  # already stopped at game_over: neither wake it nor stop it again
+        where = {"phase": "game_over", "turn": self._over_info.get("turn"), "session_state": self._session_state}
+        if reason:
+            self._telemetry("continue_skipped", {**where, "reason": "session_final"})
+        elif self.started_after_game_over:
+            self._telemetry("continue_skipped", {**where, "reason": "started_after_game_over"})
+        elif self.stop_on_game_over:
+            self._stop()
+        else:
+            self._wrap_up()
+        last_cost, posted, polls, idle_polls = cost_at_over, cost_at_over, 0, 0
+        state = self._session_state
+        deadline = started + self.post_game_minutes * 60
+        interrupted: KeyboardInterrupt | None = None
+        try:
+            while reason is None and self._clock() < deadline:
+                self._sleep(max(0.0, min(POST_GAME_POLL_SECONDS, deadline - self._clock())))
+                polls += 1
+                resp = self._dt.get_session(self._session_id)
+                if not resp.ok:
+                    self._log(f"сводка сессии DreamTeam: {resp.status} {resp.code}")
+                    idle_polls = 0
+                    continue
+                session = resp.session
+                state = session.get("state") if isinstance(session.get("state"), str) else None
+                cost = _cost(session)
+                if cost is not None and cost != posted and self._post_after(cost):
+                    posted = cost
+                reason = _stopped(session)
+                if state in IDLE_STATES and cost is not None and cost == last_cost:
+                    idle_polls += 1
+                else:
+                    idle_polls = 0
+                if reason is None and idle_polls >= IDLE_POLLS:
+                    reason = "idle"
+                if cost is not None:
+                    last_cost = cost
+        except KeyboardInterrupt as exc:
+            interrupted, reason = exc, "interrupted"
+        if last_cost is not None and last_cost != posted and self._post_after(last_cost):  # one last try
+            posted = last_cost
+        delta = (round(last_cost - cost_at_over, 6) if last_cost is not None and cost_at_over is not None
+                 else None)
+        detail = {"reason": reason or "timeout", "duration_s": round(self._clock() - started, 1),
+                  "spent_delta_usd": delta, "cost_at_game_over_usd": cost_at_over, "cost_usd": last_cost,
+                  "state": state, "polls": polls}
+        if self.started_after_game_over:
+            detail["started_after_game_over"] = True
+        self._telemetry("post_game_finished", detail)
+        self._log(f"после партии: {reason or 'timeout'}, ещё потрачено "
+                  f"{'?' if delta is None else f'${delta:.2f}'}")
+        if interrupted is not None:
+            raise interrupted
+
+    def _post_after(self, cost: float) -> bool:
+        """Post `cost` as an `after_game_over` figure; True once the server took it."""
+        try:
+            self._game.spend(cost, SPEND_SOURCE, phase=AFTER_GAME_OVER)
+        except GameApiError as exc:
+            self._log(f"не удалось отправить расход: {exc.code} {exc.message}")
+            return False
+        return True
+
+    def _wrap_up(self) -> None:
+        where = {"reason": "game_over", "turn": self._over_info.get("turn"), "phase": "game_over"}
+        if self.budget_exhausted:
+            self._telemetry("continue_skipped", {**where, "reason": "budget_exhausted"})
+            return
+        seat = None
+        try:
+            seat = self._game.whoami().get("seat")
+        except GameApiError as exc:
+            if exc.status in (401, 403):
+                raise
+            self._log(f"whoami: {exc.code} {exc.message}")
+        resp, attempts = self._continue(wrap_up_text(self._over_info, seat if isinstance(seat, str) else None))
+        if resp.ok:
+            self._telemetry("continue_sent", {**where, "state": resp.session.get("state")})
+        elif resp.code == "budget_exhausted":
+            self._exhaust({**where, "via": "continue"})
+        else:
+            self._telemetry("wake_failed", {**where, "status": resp.status, "code": resp.code, "attempts": attempts})
+
+    def _stop(self) -> None:
+        attempts = 1
+        resp = self._dt.stop_session(self._session_id)
+        for delay in RETRY_DELAYS:
+            if not resp.retryable:
+                break
+            self._log(f"DreamTeam ответил {resp.status} {resp.code}, повтор stop через {delay} с")
+            self._sleep(delay)
+            attempts += 1
+            resp = self._dt.stop_session(self._session_id)
+        if resp.ok:
+            self._telemetry("session_stopped_by_waker", {"turn": self._over_info.get("turn"),
+                                                         "state_before": self._session_state,
+                                                         "state": resp.session.get("state"),
+                                                         "cost_usd": _cost(resp.session)})
+        else:
+            self._telemetry("wake_failed", {"reason": "stop", "phase": "game_over", "status": resp.status,
+                                            "code": resp.code, "attempts": attempts})
+
     def _telemetry(self, kind: str, detail: dict[str, Any]) -> None:
         try:
             self._game.telemetry(kind, detail)
         except GameApiError as exc:
             self._log(f"не удалось отправить телеметрию {kind}: {exc.code} {exc.message}")
+
+
+def _cost(session: dict[str, Any] | None) -> float | None:
+    cost = (session or {}).get("cost_usd")
+    return float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None
+
+
+def _stopped(session: dict[str, Any] | None) -> str | None:
+    """`stopped` once the session is stopped for good (`final`; a summary without `final`: a stopped or failed
+    state), else None."""
+    if not session:
+        return None
+    final = session.get("final")
+    if final is True or (final is None and session.get("state") in ("stopped", "failed")):
+        return "stopped"
+    return None

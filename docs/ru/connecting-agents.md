@@ -146,6 +146,8 @@ uv run --project C:/path/to/DreamAboutHumanity dah-waker \
 | `--key KEY` | `DAH_KEY` | ключ места |
 | `--dt-url URL` | `http://127.0.0.1:8765` | адрес хаба DreamTeam |
 | `--dt-session ID` | обязательный | ID сессии DreamTeam, созданной через `/api/v1` |
+| `--stop-on-game-over` | выключен | после game_over остановить сессию (`POST /api/v1/sessions/{id}/stop`) вместо итогового `continue` |
+| `--post-game-minutes N` | 30 | сколько минут после game_over следить за расходом сессии (не дольше) |
 
 Что делает waker:
 
@@ -167,9 +169,25 @@ uv run --project C:/path/to/DreamAboutHumanity dah-waker \
 - после каждой смены фазы читает сводку сессии DreamTeam и отправляет в игру её расход (`/v1/spend`,
   `source: participant_program`) как цифру только что закрытой фазы;
 - при 429 и 5xx от DreamTeam повторяет через 10, 30 и 60 секунд, затем пишет `wake_failed`;
+- на game_over ещё раз отправляет расход (цифра последней фазы), затем шлёт сессии ОДИН итоговый `continue` с
+  итогом партии, например `[DAH] Партия окончена: ход 10, лимит ходов, победитель B; ты A, твоё место 2 из 3;
+  счёт: B 12, A 9, C 4. Заверши цель одним коротким итоговым сообщением, больше ничего не делай.`
+  (`continue_sent` с причиной `game_over`). С `--stop-on-game-over` вместо этого останавливает сессию
+  (`POST /api/v1/sessions/{id}/stop`, телеметрия `session_stopped_by_waker`). Сессию, уже остановленную насовсем
+  (`final: true`), не будит и не останавливает (`continue_skipped` с причиной `session_final`); при исчерпанном
+  бюджете итоговый `continue` не шлёт. Если уже первый опрос видит game_over (waker запущен или перезапущен после
+  партии), не шлёт ни итоговый `continue`, ни stop — это сделал прежний запуск (`continue_skipped` с причиной
+  `started_after_game_over`): первую цифру отправляет как `after_game_over` и только следит за расходом;
+- после game_over каждые 30 секунд читает сводку сессии и отправляет каждый новый расход с
+  `phase: "after_game_over"` (`/v1/spend`), пока сессия не остановится (`final: true`) или не затихнет (состояние
+  `done` или `budget` и два чтения подряд ничего не потрачено; `waiting` и `paused` — сессия ещё работает, её
+  опрашивает дальше), но не дольше `--post-game-minutes`. Неудачную отправку расхода повторяет на следующем чтении и
+  ещё раз перед концом наблюдения. Затем пишет `post_game_finished` (причина `stopped`, `idle`, `timeout` или
+  `interrupted` при Ctrl-C, `duration_s`,
+  `spent_delta_usd`, расход на game_over и последний) и завершается. `dah report` показывает эти деньги и время
+  отдельно от партии;
 - пишет телеметрию `continue_sent`, `continue_skipped`, `session_restarted`, `goal_reopened`, `budget_exhausted`,
-  `wake_failed`;
-- завершается, когда партия окончена.
+  `wake_failed`, `session_stopped_by_waker`, `post_game_finished`.
 
 Вызовы waker идут с заголовком `X-DAH-Host`, поэтому отчёт считает их отдельно от вызовов самого игрока. Если
 `DREAMTEAM_API_TOKEN` пустой, waker завершается с кодом 2; если сервер игры не принял ключ — с кодом 1.

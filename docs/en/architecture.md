@@ -142,7 +142,8 @@ A mismatch means the rules or content changed, or resolution is not deterministi
 accepted submission, to ready), counts calls and characters (host traffic apart), submissions (also per phase kind:
 N1 / A / N2), edits and rejections, idle resources and units, turns a seat resolved with no orders, phases the
 deadline closed while a seat had not pressed ready, scores by turn, money by turn and by phase from `spend_report`
-(by its "for" fields), and waker telemetry. The aim of the slice is to measure exactly this: how much money and time a turn costs a DreamTeam
+(by its "for" fields), money and time during the match and after game_over apart (`spent_in_game_usd`,
+`spent_after_game_usd`, `in_game_s`, `after_game_s`), and waker telemetry. The aim of the slice is to measure exactly this: how much money and time a turn costs a DreamTeam
 swarm and a single agent.
 
 ## Server, bridge, waker, bots
@@ -152,5 +153,6 @@ swarm and a single agent.
 - `bridge/` is a stdio MCP server (`mcp` package). Each tool is one HTTP call; the answer is the server's `text` or
   compact JSON. The key is scrubbed from any text that leaves the process.
 - `waker/` long-polls `/v1/wait_phase` and calls DreamTeam's `/api/v1/sessions/{id}/continue` and
-  `/api/v1/sessions/{id}`.
+  `/api/v1/sessions/{id}` (after game_over also `/api/v1/sessions/{id}/stop` with `--stop-on-game-over`), and keeps
+  reporting the session's spend after game_over until it stops or goes idle.
 - `bots/` share one loop (`base.py`): wait for a phase, read the state as JSON, act, press ready.

@@ -159,8 +159,11 @@ accepted order submission and to ready; how the phase closed; number of calls an
 submissions (also counted per phase kind: «подач в П1 / Д / П2»), edits and rejections; idle resources and units;
 the turns a seat submitted no orders at all («не подал приказов в ходах») and the phases the deadline closed while
 it had not pressed ready («не нажал готово (закрыто по таймеру)»); scores by turn; money by turn and by phase (from
-`dah-waker`, counted for the phase each figure is for); waker telemetry and the turn where the money ran out.
-`--json` prints the same as JSON (`submits_by_phase`, `no_orders_turns`, `not_ready_phases`, ...).
+`dah-waker`, counted for the phase each figure is for); per seat money and time «во время партии» and «после
+game_over» apart (what the session spent while it wrapped up after the match; both times on the journal clock,
+shown only for seats with after-game data, as on /watch); waker telemetry and the turn where
+the money ran out. `--json` prints the same as JSON (`submits_by_phase`, `no_orders_turns`, `not_ready_phases`,
+`spent_in_game_usd`, `spent_after_game_usd`, `in_game_s`, `after_game_s`, `post_game_watch_s`, ...).
 
 ### `dah replay ID`
 

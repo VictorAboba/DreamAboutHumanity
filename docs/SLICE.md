@@ -224,8 +224,8 @@ P09 Пепельный Брод [нейтр.] пуст. ? | → P08 P10
 | `ready` / `unready` / `ready_cleared` | seat, turn, phase |
 | `message` | from, to, chars, phase (сам текст — в `private/messages.jsonl`) |
 | `turn_resolved` | turn, state_hash, scores, idle_resources{seat:{}}, idle_units{seat:n} |
-| `spend_report` | seat, spent_usd, tokens?, source: `participant_program` \| `host`, for_turn/for_phase (за какую фазу; null у отправной точки), at_turn/at_phase (когда получен), turn/phase (пара for, иначе at) |
-| `telemetry` | seat, kind: `continue_sent` \| `continue_skipped` \| `session_restarted` \| `goal_reopened` \| `budget_exhausted` \| `wake_failed`, detail |
+| `spend_report` | seat, spent_usd, tokens?, source: `participant_program` \| `host`, for_turn/for_phase (за какую фазу; null у отправной точки; после game_over — `after_game_over`), at_turn/at_phase (когда получен), turn/phase (пара for, иначе at) |
+| `telemetry` | seat, kind: `continue_sent` \| `continue_skipped` \| `session_restarted` \| `goal_reopened` \| `budget_exhausted` \| `wake_failed` \| `session_stopped_by_waker` \| `post_game_finished`, detail |
 | `game_over` | winner(s), scores, turn |
 
 Полные снапшоты состояния и приказов по ходам — в `games/<id>/private/` (сервер их никогда не отдаёт игрокам).
@@ -301,6 +301,22 @@ description = "Игра DreamAboutHumanity"
 дедлайном не пропускается. При старте waker записывает свой `--dt-session` в партию
 (`POST /v1/seat/dreamteam_session`), а если сервер игры ещё не поднят — после первого удачного опроса.
 
+После game_over waker отправляет расход последней фазы и шлёт ОДИН итоговый `continue`:
+`[DAH] Партия окончена: <ход, причина, победители; твоё место; счёт>. Заверши цель одним коротким итоговым сообщением, больше ничего не делай.`
+(`continue_sent` с причиной `game_over`; место — по `whoami`). С флагом `--stop-on-game-over` (по умолчанию выключен)
+вместо этого `POST {dt-url}/api/v1/sessions/{ID}/stop` (тело `{}`, DreamTeam требует JSON на любом POST) и телеметрия
+`session_stopped_by_waker`. Сессию с `final: true` не будит и не останавливает (`continue_skipped`, `session_final`).
+Если уже первый опрос этого процесса видит game_over (waker запущен или перезапущен после партии), итоговый `continue`
+и stop не шлёт — это сделал прежний процесс (`continue_skipped`, `started_after_game_over`); расход на старте
+отправляет как `after_game_over`, дальше только следит за расходом.
+Затем каждые 30 с читает сводку сессии и шлёт новый расход в `/v1/spend` с `phase: after_game_over` (сервер принимает
+это только после game_over, `turn` по умолчанию — последний ход), пока сессия не остановится (`final: true`) или не
+затихнет (`done` / `budget` и без нового расхода два чтения подряд; `waiting` и `paused` — сессия ещё работает, её
+опрашивают дальше), но не дольше `--post-game-minutes` (30). Неудачную отправку расхода повторяет на следующем
+чтении и ещё раз перед концом наблюдения. В конце — `post_game_finished` {reason: `stopped` \| `idle` \| `timeout` \|
+`interrupted` (Ctrl-C), duration_s, spent_delta_usd, cost_at_game_over_usd, cost_usd, state, polls,
+started_after_game_over?}, и waker завершается.
+
 ## 10. Боты (bots/)
 
 Каждый бот — HTTP-клиент того же API (никаких поблажек), запускается `dah bots run --game ID` для всех мест с
@@ -328,7 +344,13 @@ description = "Игра DreamAboutHumanity"
 приказов, до ready; чем закрылась фаза; число вызовов, суммарные `req_chars`/`resp_chars`; подачи и правки
 приказов; отклонения отдельно на validate и submit; idle-ресурсы и idle-юниты; счёт по ходам; деньги по ходам
 (из `spend_report`, по полям for_turn/for_phase; и по фазам); телеметрия waker; размер `rules` в символах; ход, где
-кончились деньги. По месту отдельно: «не подал приказов в ходах» (к расчёту приказов не было) и «не нажал готово
+кончились деньги. Деньги и время по месту — отдельно «во время партии» и «после game_over»: `spent_in_game_usd`
+(последняя цифра не `after_game_over`, либо `cost_at_game_over_usd` из `post_game_finished`, если он больше — отправка
+на game_over потерялась), `spent_after_game_usd` (последняя `after_game_over` минус она; без такой пары —
+`spent_delta_usd` из `post_game_finished`), `in_game_s` (от первой фазы до game_over), `after_game_s` (по часам
+журнала: от game_over до `post_game_finished`, иначе до последней цифры после game_over; `duration_s` самого waker —
+отдельно, `post_game_watch_s`); цифры `after_game_over` и отправная точка без for-фазы, полученная после game_over,
+не относятся ни к ходу, ни к фазе; разбивка в тексте отчёта — только у мест с данными после game_over (как на /watch); те же поля — в итогах `/v1/spectate/{id}/timings`. По месту отдельно: «не подал приказов в ходах» (к расчёту приказов не было) и «не нажал готово
 (закрыто по таймеру)» (фазы, закрытые дедлайном без ready места), число подач по видам фаз («подач в П1 / Д / П2»).
 Вывод — текст и `--json`.
 
