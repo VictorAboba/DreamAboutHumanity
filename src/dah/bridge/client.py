@@ -100,8 +100,9 @@ class GameClient:
     def amend_order(self, order_id: str, patch: dict[str, Any]) -> dict[str, Any]:
         return self.request("PATCH", f"/v1/orders/{order_id}", body=patch)
 
-    def estimate(self, attacker: dict[str, int], defender: dict[str, int], province_type: str,
-                 fortified: bool, hasty: bool) -> dict[str, Any]:
+    def estimate(self, attacker: Any, defender: Any, province_type: Any, fortified: Any = False,
+                 hasty: Any = False) -> dict[str, Any]:
+        """Arguments go as given: the server checks them and explains a refusal with a correct example."""
         return self.request("POST", "/v1/estimate", body={
             "attacker": attacker, "defender": defender, "province_type": province_type,
             "fortified": fortified, "hasty": hasty})
@@ -124,9 +125,14 @@ class GameClient:
     def telemetry(self, kind: str, detail: dict[str, Any]) -> dict[str, Any]:
         return self.request("POST", "/v1/telemetry", body={"kind": kind, "detail": detail})
 
+    def report_session(self, session_id: str) -> dict[str, Any]:
+        """Record the seat's DreamTeam session id in the game config and journal (host route)."""
+        return self.request("POST", "/v1/seat/dreamteam_session", body={"dreamteam_session_id": session_id})
+
     def spend(self, spent_usd: float, source: str, tokens: int | None = None, *, turn: int | None = None,
               phase: str | None = None) -> dict[str, Any]:
-        """`turn`/`phase`: the phase the figure closes (default: the server's current one)."""
+        """`turn`/`phase`: the phase the figure is for, i.e. the one that just closed (omit both for a baseline
+        taken before any phase closed)."""
         body: dict[str, Any] = {"spent_usd": spent_usd, "source": source}
         extra = {"tokens": tokens, "turn": turn, "phase": phase}
         body.update({k: v for k, v in extra.items() if v is not None})

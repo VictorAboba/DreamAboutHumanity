@@ -18,6 +18,8 @@ GAME_ERROR_DELAY = 5
 # States of a session that a `continue` has to start again (DreamTeam http-api.md, "States").
 STOPPED_STATES = frozenset({"stopped", "failed", "done", "budget", "created"})
 SPEND_SOURCE = "participant_program"
+# A player call in the new phase at most this many seconds ago means the session is already at work.
+ACTIVE_SKIP_SECONDS = 30
 
 
 def _stderr(message: str) -> None:
@@ -40,18 +42,40 @@ class Waker:
         self._info: dict[str, Any] = {}
         self._deadline_at: float | None = None
         self._reminded = False
+        self._link_pending = False  # True while run()'s link_session hit a transient error
+        self._session_state: str | None = None  # from the last session summary that _report_spend read
 
     # --- loop ---------------------------------------------------------------------------------------------
 
     def run(self) -> None:
+        self.link_session()
         while not self.step():
             pass
+
+    def link_session(self) -> bool:
+        """Tell the game server which DreamTeam session plays this seat (journaled as a `seat_info` update).
+        True once recorded. A network error or a 5xx (the server is not up yet) leaves it pending: `step()` tries
+        again after its next successful poll. Any other refusal is final (logged, not retried)."""
+        try:
+            self._game.report_session(self._session_id)
+        except GameApiError as exc:
+            if exc.status in (401, 403):
+                raise
+            transient = exc.code == "network" or (exc.status is not None and exc.status >= 500)
+            self._link_pending = transient
+            self._log(f"не удалось записать сессию DreamTeam в партию: {exc.code} {exc.message}"
+                      + (" (повторю после ответа сервера игры)" if transient else ""))
+            return False
+        self._link_pending = False
+        return True
 
     def step(self) -> bool:
         """One poll of the game; True once the game is over."""
         info = self._poll()
         if info is None:
             return False
+        if self._link_pending:  # the game server was not up when run() started
+            self.link_session()
         if info.get("game_over"):
             self._report_spend(self._phase_key)
             self._log("партия окончена")
@@ -63,7 +87,14 @@ class Waker:
             self._reminded = False
             self._report_spend(closed)
             if self._must_act():
-                self._wake("phase_open")
+                skip = self._skip_reason()
+                if skip:
+                    self._telemetry("continue_skipped", {"reason": skip, "turn": info.get("turn"),
+                                                         "phase": info.get("phase"),
+                                                         "player_active_s_ago": info.get("player_active_s_ago"),
+                                                         "session_state": self._session_state})
+                else:
+                    self._wake("phase_open")
                 self._reminded = self._reminder_due()  # opened less than a minute before its deadline
         elif self._reminder_due():
             self._reminded = True
@@ -86,6 +117,21 @@ class Waker:
             self._seq = info["phase_seq"]
         seconds_left = info.get("seconds_left")
         self._deadline_at = self._clock() + seconds_left if isinstance(seconds_left, (int, float)) else None
+
+    def _skip_reason(self) -> str | None:
+        """Why a phase-open `continue` is not needed: the player is already in wait_phase (the poll wakes it with
+        the new phase) or has called the game in this phase moments ago. Never skipped when the DreamTeam session
+        is stopped (a poll can outlive the agent that made it: the server keeps it pending after the client is
+        gone), and the deadline reminder is never skipped."""
+        info = self._info
+        if self._session_state in STOPPED_STATES:
+            return None
+        if info.get("player_waiting"):
+            return "player_waiting"
+        ago = info.get("player_active_s_ago")
+        if isinstance(ago, (int, float)) and ago <= ACTIVE_SKIP_SECONDS:
+            return "player_active"
+        return None
 
     def _must_act(self) -> bool:
         info = self._info
@@ -155,9 +201,11 @@ class Waker:
         """Post the session's spend so far as the figure of the phase that just closed (`closed` key)."""
         resp = self._dt.get_session(self._session_id)
         if not resp.ok:
+            self._session_state = None
             self._log(f"сводка сессии DreamTeam: {resp.status} {resp.code}")
             return
         session = resp.session
+        self._session_state = session.get("state") if isinstance(session.get("state"), str) else None
         cost = session.get("cost_usd")
         if isinstance(cost, (int, float)):
             try:

@@ -194,7 +194,9 @@ After a battle:
 
 `estimate(attacker, defender, province_type, fortified, hasty)` forecasts one attack. It runs the same battle
 formula 200 times with a fixed seed and returns `win_prob`, `attacker_losses_avg` and `defender_losses_avg`. The
-same inputs always give the same answer. It knows nothing about the real map: you pass the armies yourself.
+same inputs always give the same answer. It knows nothing about the real map: you pass the armies yourself. The
+only map lookup is `province_type`, which may also be a province id (`P07`): it stands for that province's type.
+Unit and type ids may be full, short or the labels from the state text (`штурм`, `агро`).
 
 ```json
 {"attacker": {"assault": 4}, "defender": {"assault": 3}, "province_type": "waste", "fortified": false, "hasty": false}

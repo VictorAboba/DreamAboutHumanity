@@ -32,7 +32,7 @@ DEFAULT_WAIT_SECONDS = 45
 MAX_BODY_BYTES = 64_000
 # Routes only a host program (dah-waker) calls; with the `X-DAH-Host` header any call is host traffic. Host calls
 # do not count as the player's first call and are kept apart from the player's calls in the report.
-HOST_ROUTES = frozenset({"/v1/telemetry", "/v1/spend"})
+HOST_ROUTES = frozenset({"/v1/telemetry", "/v1/spend", "/v1/seat/dreamteam_session"})
 HOST_HEADER = "x-dah-host"
 ADMIN_HEADER = "x-dah-admin-key"
 STATUS = {"UNAUTHORIZED": 401, "FORBIDDEN": 403, "NOT_FOUND": 404, "INVALID": 400, "UNKNOWN_ID": 400,
@@ -60,14 +60,19 @@ def _key_matches(given: str, expected: str | None) -> bool:
     return bool(expected) and hmac.compare_digest(given.encode("utf-8"), expected.encode("utf-8"))
 
 
-def _int_param(request: Request, name: str, default: int | None = None) -> int | None:
+def _int_param(request: Request, name: str, default: int | None = None, example: str = "") -> int | None:
     raw = request.query_params.get(name)
     if raw is None or raw == "":
         return default
     try:
         return int(raw)
     except ValueError:
-        raise GameError("INVALID", f"параметр {name} должен быть целым числом") from None
+        hint = f". Пример: {example}" if example else ""
+        raise GameError("INVALID", f"параметр {name} должен быть целым числом, а не {raw[:20]!r}{hint}") from None
+
+
+def _is_host(request: Request) -> bool:
+    return bool(getattr(request.state, "dah_host", False))
 
 
 async def _read_body(request: Request) -> bytes:
@@ -104,14 +109,16 @@ def rules(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict
 
 
 def phase(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
-    return game.phase_info(seat)
+    return game.phase_info(seat, host=_is_host(request))
 
 
 async def wait_phase(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    """A player's pending poll is visible to the host (`player_waiting` in the host's phase info)."""
+    host = _is_host(request)
     after_seq = _int_param(request, "after_seq")
     max_seconds = max(0, min(MAX_WAIT_SECONDS, _int_param(request, "max_seconds", DEFAULT_WAIT_SECONDS) or 0))
-    changed = await game.wait_phase(after_seq, max_seconds)
-    return {"changed": changed, **game.phase_info(seat)}
+    changed = await game.wait_phase(after_seq, max_seconds, player_seat=None if host else seat)
+    return {"changed": changed, **game.phase_info(seat, host=host)}
 
 
 def state(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
@@ -119,8 +126,10 @@ def state(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict
     if fmt == "json":
         return {"state": game.state_json(seat)}
     if fmt != "text":
-        raise GameError("INVALID", "format: text или json")
-    return {"text": game.state_text(seat, _int_param(request, "since_turn"))}
+        raise GameError("INVALID", f"format {fmt[:20]!r} не бывает: text (по умолчанию) или json. "
+                                   "Пример: get_state(since_turn=1) или get_state(format=\"json\")")
+    example = "get_state(since_turn=1) или get_state()"
+    return {"text": game.state_text(seat, _int_param(request, "since_turn", example=example))}
 
 
 def list_orders(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
@@ -164,7 +173,7 @@ def unready(game: Game, seat: str, request: Request, body: dict[str, Any]) -> di
 
 
 def history(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
-    return game.history(seat, _int_param(request, "turn"))
+    return game.history(seat, _int_param(request, "turn", example="history(turn=1) или history()"))
 
 
 def telemetry(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
@@ -178,6 +187,11 @@ def spend(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict
     game.spend(seat, body.get("spent_usd"), body.get("source"), body.get("tokens"), turn=body.get("turn"),
                phase=body.get("phase"), host_allowed=host_allowed)
     return {}
+
+
+def dreamteam_session(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    """dah-waker reports its `--dt-session` so the seat's link to the DreamTeam session is journaled."""
+    return game.set_dreamteam_session(seat, body.get("dreamteam_session_id"), source="waker")
 
 
 SEAT_ROUTES: list[tuple[str, str, Handler]] = [
@@ -199,6 +213,7 @@ SEAT_ROUTES: list[tuple[str, str, Handler]] = [
     ("GET", "/v1/history", history),
     ("POST", "/v1/telemetry", telemetry),
     ("POST", "/v1/spend", spend),
+    ("POST", "/v1/seat/dreamteam_session", dreamteam_session),
 ]
 
 
@@ -256,11 +271,16 @@ def create_app(games_dir: str, *, admin_key: str | None = None, clock: Clock = t
             if auth is None:
                 return _json_response(401, _error("UNAUTHORIZED", "нужен заголовок Authorization: Bearer <ключ>"))[0]
             game, seat = auth
+            # The phase the call started in: a phase that the deadline (tick) or this very call (its `ready`)
+            # closes is not the phase the player has seen, so the call is not activity in the new one.
+            seq_at_arrival = game.phase_seq
             game.tick()
             turn, phase_now = game.state.turn, game.phase
             host = HOST_HEADER in request.headers or route.split(" ", 1)[1] in HOST_ROUTES
+            request.state.dah_host = host
             if not host:
                 game.note_first_call(seat)
+                game.note_player_activity(seat, seq_at_arrival)
             raw = b""
             try:
                 raw = await _read_body(request)
@@ -269,6 +289,8 @@ def create_app(games_dir: str, *, admin_key: str | None = None, clock: Clock = t
                 status, content = STATUS.get(exc.code, 400), _error(exc.code, exc.message)
             else:
                 status, content = await _run(handler, game, seat, request, body)
+            if not host:
+                game.note_player_activity(seat, seq_at_arrival)
             response, resp_chars = _json_response(status, content)
             req_chars = len(raw.decode("utf-8", errors="replace")) + len(request.url.query)
             game.record_call(seat, route, req_chars, resp_chars, (time.perf_counter() - started) * 1000, status,

@@ -32,9 +32,11 @@ P2 = "negotiation_2"
 GAME_OVER = "game_over"
 NEXT_PHASE = {"negotiation_1": "actions", "actions": "negotiation_2"}
 SEAT_KINDS = ("swarm", "agent", "human", "bot")
-TELEMETRY_KINDS = ("continue_sent", "session_restarted", "goal_reopened", "budget_exhausted", "wake_failed")
+TELEMETRY_KINDS = ("continue_sent", "continue_skipped", "session_restarted", "goal_reopened", "budget_exhausted",
+                   "wake_failed")
 SPEND_SOURCES = ("participant_program", "host")
 MAX_TELEMETRY_DETAIL_CHARS = 2000
+DT_SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 READ_TOOLS = ["get_state", "history", "inbox"]
 ORDER_TOOLS = ["list_orders", "validate_orders", "submit_orders", "cancel_order", "amend_order", "estimate"]
@@ -174,6 +176,12 @@ class Game:
         self.nick_to_seat = {s["nick"]: s["seat"] for s in config["seats"]}
         self._waiters: list[tuple[asyncio.AbstractEventLoop, asyncio.Future]] = []
         self._waiters_lock = threading.Lock()
+        # Player (non-host) presence, for the host's phase info (dah-waker skips a `continue` the player does
+        # not need): long-polls of wait_phase pending now, seats whose poll was pending when the current phase
+        # opened (that poll returns with the new phase), and the clock time of each seat's last player call.
+        self.player_polls: dict[str, int] = {}
+        self.polled_at_open: set[str] = set()
+        self.player_seen_at: dict[str, tuple[int, float]] = {}  # seat -> (phase_seq, clock time)
 
     # --- lifecycle ------------------------------------------------------------------------------------
 
@@ -260,6 +268,7 @@ class Game:
 
     def _open_phase(self) -> None:
         now = self.clock()
+        self.polled_at_open = {s for s, n in self.player_polls.items() if n > 0}
         self.phase_seq += 1
         self.ready_seats.clear()
         self.first_called.clear()
@@ -272,7 +281,8 @@ class Game:
 
     def _close_phase(self, reason: str) -> None:
         phase = self.phase
-        self.journal.append("phase_close", turn=self.state.turn, phase=phase, reason=reason)
+        not_ready = sorted(set(self.alive_seats()) - self.ready_seats)
+        self.journal.append("phase_close", turn=self.state.turn, phase=phase, reason=reason, not_ready=not_ready)
         if phase == "actions":
             self.journal.append("recon", turn=self.state.turn)  # scouting step: empty in the slice
         if phase == P2:
@@ -299,6 +309,7 @@ class Game:
             result = new_state.result or {}
             self.journal.append("game_over", winners=result.get("winners", []), reason=result.get("reason"),
                                 scores=result.get("scores", {}), turn=turn)
+            self.polled_at_open = {s for s, n in self.player_polls.items() if n > 0}
             self.phase_seq += 1
             self.ready_seats.clear()
             self.deadline = None
@@ -316,14 +327,19 @@ class Game:
             if not loop.is_closed():
                 loop.call_soon_threadsafe(_resolve_future, fut)
 
-    async def wait_phase(self, after_seq: int | None, max_seconds: float) -> bool:
-        """Wait until `phase_seq` differs from `after_seq` (or the timeout). True if it changed."""
+    async def wait_phase(self, after_seq: int | None, max_seconds: float, *, player_seat: str | None = None) -> bool:
+        """Wait until `phase_seq` differs from `after_seq` (or the timeout). True if it changed.
+
+        `player_seat`: a player's (not the host's) long-poll; while it waits, the host's phase info says
+        `player_waiting` for that seat."""
         if after_seq is None or after_seq != self.phase_seq:
             return True
         loop = asyncio.get_running_loop()
         entry = (loop, loop.create_future())
         with self._waiters_lock:
             self._waiters.append(entry)
+            if player_seat is not None:
+                self.player_polls[player_seat] = self.player_polls.get(player_seat, 0) + 1
         try:
             await asyncio.wait_for(entry[1], timeout=max_seconds)
         except TimeoutError:
@@ -332,9 +348,29 @@ class Game:
             with self._waiters_lock:
                 if entry in self._waiters:
                     self._waiters.remove(entry)
+                if player_seat is not None:
+                    self.player_polls[player_seat] = max(0, self.player_polls.get(player_seat, 0) - 1)
         return self.phase_seq != after_seq
 
-    def phase_info(self, seat: str) -> dict[str, Any]:
+    def note_player_activity(self, seat: str, phase_seq: int | None = None) -> None:
+        """A player's own (non-host) call arrived or finished now. `phase_seq`: the phase the call started in
+        (the server passes the seq it saw before `tick()`); a call that started in an earlier phase (its own
+        `ready` or a deadline closed that phase while it ran) is not activity in the current one, since the player
+        has not seen the new phase yet. A wait_phase poll that returns with the new phase is `polled_at_open`."""
+        if phase_seq is not None and phase_seq != self.phase_seq:
+            return
+        self.player_seen_at[seat] = (self.phase_seq, self.clock())
+
+    def player_presence(self, seat: str) -> dict[str, Any]:
+        """For the host only: is the player waiting in wait_phase (now, or its poll was pending when this phase
+        opened and returns with it), and how many seconds ago its last call was, if it started in this phase."""
+        seen = self.player_seen_at.get(seat)
+        active = (round(max(0.0, self.clock() - seen[1]), 1)
+                  if seen is not None and seen[0] == self.phase_seq else None)
+        return {"player_waiting": self.player_polls.get(seat, 0) > 0 or seat in self.polled_at_open,
+                "player_active_s_ago": active}
+
+    def phase_info(self, seat: str, *, host: bool = False) -> dict[str, Any]:
         alive = self.alive_seats()
         ready = f"{len(self.ready_seats & set(alive))}/{len(alive)}"
         seat_alive = self.state.players[seat].alive
@@ -348,6 +384,8 @@ class Game:
         }
         if self.game_over:
             info["result"] = self.state.result
+        if host:
+            info.update(self.player_presence(seat))
         info["text"] = self._phase_text(info)
         return info
 
@@ -398,9 +436,13 @@ class Game:
             hhmm = f"{datetime.fromtimestamp(self.deadline, timezone.utc):%H:%MZ}"
             info = DeadlineInfo(hhmm, self.seconds_left() or 0)
         since_state, reports = None, []
+        if since_turn is not None and since_turn <= 0:
+            since_turn = None  # "changes since turn 0" is the whole state
+        if since_turn is not None and since_turn > self.state.turn:
+            example = f"get_state(since_turn={self.state.turn - 1})" if self.state.turn > 1 else "get_state()"
+            raise GameError("INVALID", f"since_turn={since_turn} больше текущего хода {self.state.turn}: можно "
+                                       f"1..{self.state.turn} или без since_turn (всё состояние). Пример: {example}")
         if since_turn is not None:
-            if not 1 <= since_turn <= self.state.turn:
-                raise GameError("INVALID", f"since_turn должен быть от 1 до {self.state.turn}")
             snapshot = self.gdir.load_turn("states", since_turn)
             since_state = GameState.from_dict(snapshot) if snapshot else None
             reports = [TurnReport.from_dict(r) for t in range(since_turn, self.state.turn + 1)
@@ -413,11 +455,17 @@ class Game:
 
     def history(self, seat: str, turn: int | None = None) -> dict[str, Any]:
         last = self.state.turn if self.game_over else self.state.turn - 1
+        if turn is None and last < 1:
+            return {"turn": None, "text": "Ещё ни один ход не рассчитан: отчёт хода 1 появится после его П2. "
+                                          "Сейчас смотри get_state()."}
         turn = last if turn is None else turn
         raw = self.gdir.load_turn("reports", turn) if 1 <= turn <= last else None
         if raw is None:
-            raise GameError("NOT_FOUND", f"отчёта хода {turn} нет (рассчитаны ходы 1..{last})"
-                            if last >= 1 else "ещё ни один ход не рассчитан")
+            if last < 1:
+                raise GameError("NOT_FOUND", f"отчёта хода {turn} нет: ещё ни один ход не рассчитан. Пример: "
+                                             "history() после расчёта хода 1, а пока get_state()")
+            raise GameError("NOT_FOUND", f"отчёта хода {turn} нет: рассчитаны ходы 1..{last}. "
+                                         f"Пример: history(turn={last}) или history() (последний)")
         report = TurnReport.from_dict(raw)
         return {"turn": turn, "text": render_report_text(report, self.ruleset, self.state, seat)}
 
@@ -518,19 +566,107 @@ class Game:
             out["order"] = res.order.to_dict()
         return out
 
+    # --- estimate -------------------------------------------------------------------------------------
+
+    def estimate_example(self) -> str:
+        units = self.ruleset.units  # the cheapest unit makes the most typical example
+        unit = min(units, key=lambda u: (sum(units[u].cost.values()), u)) if units else "core:assault"
+        ptype = next(iter(self.ruleset.province_types), "core:forge")
+        return f'estimate(attacker={{"{unit}": 4}}, defender={{"{unit}": 2}}, province_type="{ptype}")'
+
+    def _estimate_error(self, code: str, what: str) -> GameError:
+        return GameError(code, f"{what}. Пример: {self.estimate_example()}")
+
+    @staticmethod
+    def _label(text: str) -> str:
+        return text.strip().lower().rstrip(".")
+
+    def resolve_unit(self, ref: Any) -> str | None:
+        """Full unit id for a full or short id, a state label (штурм) or a name (Штурмовики), any case."""
+        if not isinstance(ref, str) or not ref.strip():
+            return None
+        ref = ref.strip()
+        full = self.ruleset.resolve("unit", ref) or self.ruleset.resolve("unit", ref.lower())
+        if full:
+            return full
+        label = self._label(ref.split(":", 1)[-1])
+        hits = [uid for uid, u in self.ruleset.units.items() if label in (self._label(u.short), self._label(u.name))]
+        return hits[0] if len(hits) == 1 else None
+
+    def resolve_province_type(self, ref: Any) -> str | None:
+        """Full province type id for a full or short type id, a state label (агро, кузн.), a type name (Агромир),
+        or a province id (P07) or name: a province stands for its type (the political map is public)."""
+        if not isinstance(ref, str) or not ref.strip():
+            return None
+        ref = ref.strip()
+        full = self.ruleset.resolve("province_type", ref) or self.ruleset.resolve("province_type", ref.lower())
+        if full:
+            return full
+        province = self.state.provinces.get(ref.upper()) or next(
+            (p for p in self.state.provinces.values() if self._label(p.name) == self._label(ref)), None)
+        if province is not None:
+            return province.type
+        label = self._label(ref.split(":", 1)[-1])
+        hits = [pid for pid, t in self.ruleset.province_types.items()
+                if label in (self._label(t.short), self._label(t.name))]
+        return hits[0] if len(hits) == 1 else None
+
+    def _estimate_side(self, side: str, raw: Any) -> dict[str, int]:
+        if raw is None:
+            raise self._estimate_error("INVALID", f"не указан {side}: объект {{юнит: число}}")
+        if isinstance(raw, list):  # [{"unit": "assault", "count": 3}] or [["assault", 3]]
+            converted: dict[Any, Any] | None = {}
+            for item in raw:
+                if isinstance(item, dict) and "unit" in item and isinstance(item["unit"], str):
+                    converted[item["unit"]] = item.get("count", item.get("n"))
+                elif isinstance(item, (list, tuple)) and len(item) == 2 and isinstance(item[0], str):
+                    converted[item[0]] = item[1]
+                else:
+                    converted = None
+                    break
+            raw = converted
+        if not isinstance(raw, dict):
+            raise self._estimate_error("INVALID", f"{side} должен быть объектом {{юнит: число}}")
+        known = ", ".join(f"{uid} ({u.short})" for uid, u in self.ruleset.units.items())
+        units: dict[str, int] = {}
+        for ref, n in raw.items():
+            full = self.resolve_unit(ref)
+            if full is None:
+                raise self._estimate_error("UNKNOWN_ID", f"{side}: нет юнита {str(ref)[:40]!r}; юниты: {known}")
+            count = n
+            if isinstance(n, str) and n.strip().isdigit():
+                count = int(n)
+            elif isinstance(n, float) and n.is_integer():
+                count = int(n)
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                raise self._estimate_error("INVALID", f"{side}: число юнитов {full} — целое ≥ 0, а не "
+                                                      f"{str(n)[:20]!r}")
+            units[full] = units.get(full, 0) + count
+        return units
+
     def estimate(self, body: dict[str, Any]) -> dict[str, Any]:
-        attacker, defender = body.get("attacker"), body.get("defender")
-        ptype = body.get("province_type")
-        if not isinstance(attacker, dict) or not isinstance(defender, dict) or not isinstance(ptype, str):
-            raise GameError("INVALID", "нужно {attacker:{юнит:n}, defender:{юнит:n}, province_type, fortified, hasty}")
-        try:
-            out = estimate(self.ruleset, attacker, defender, ptype, bool(body.get("fortified", False)),
-                           bool(body.get("hasty", False)))
-        except KeyError as exc:
-            raise GameError("UNKNOWN_ID", str(exc.args[0]) if exc.args else "неизвестный id") from None
-        except (TypeError, ValueError):
-            raise GameError("INVALID", "число юнитов должно быть целым") from None
+        """Battle forecast. Lenient on ids (resolve_unit, resolve_province_type); every refusal says what was
+        wrong and shows a correct call."""
+        attacker = self._estimate_side("attacker", body.get("attacker"))
+        defender = self._estimate_side("defender", body.get("defender"))
+        raw_type = body.get("province_type")
+        ptype = self.resolve_province_type(raw_type)
+        if ptype is None:
+            known = ", ".join(f"{pid} ({t.short})" for pid, t in self.ruleset.province_types.items())
+            what = "не указан province_type" if raw_type is None else f"province_type {str(raw_type)[:40]!r} не найден"
+            raise self._estimate_error("INVALID" if raw_type is None else "UNKNOWN_ID",
+                                       f"{what}; можно тип ({known}) или ID провинции (P07)")
+        flags = {}
+        for name in ("fortified", "hasty"):
+            value = body.get(name)
+            if isinstance(value, str) and value.strip().lower() in ("true", "false", "1", "0", ""):
+                value = value.strip().lower() in ("true", "1")
+            if value is not None and not isinstance(value, (bool, int)):
+                raise self._estimate_error("INVALID", f"{name} — true или false, а не {str(value)[:20]!r}")
+            flags[name] = bool(value)
+        out = estimate(self.ruleset, attacker, defender, ptype, flags["fortified"], flags["hasty"])
         out["losses"] = {"attacker": out["attacker_losses_avg"], "defender": out["defender_losses_avg"]}
+        out["province_type"] = ptype
         return out
 
     # --- ready ----------------------------------------------------------------------------------------
@@ -590,7 +726,26 @@ class Game:
                                      for s in self.state.players if s != seat}
         return left
 
+    def message_example(self, seat: str) -> str:
+        other = next((p.nick for s, p in self.state.players.items() if s != seat), "Ник")
+        return f'send_message(to=["{other}"], text="Предлагаю мир") или send_message(to="all", text="...")'
+
     def send_message(self, seat: str, to: Any, text: Any) -> dict[str, Any]:
+        """Every refusal says what was wrong and, where the call itself was wrong, shows a correct one."""
+        try:
+            return self._send_message(seat, to, text)
+        except GameError as exc:
+            if self.game_over:
+                raise GameError(exc.code, "игра окончена (game_over): сообщения больше не отправляются, "
+                                          "заверши цель коротким итогом") from None
+            if exc.code == "PHASE_LOCKED" and self.phase == "actions":
+                raise GameError(exc.code, "в фазе Д переписка закрыта: сообщения — только в П1 и П2. Пример (в "
+                                          f"П1/П2): {self.message_example(seat)}") from None
+            if exc.code in ("INVALID", "UNKNOWN_ID", "TOO_LONG"):
+                raise GameError(exc.code, f"{exc.message}. Пример: {self.message_example(seat)}") from None
+            raise
+
+    def _send_message(self, seat: str, to: Any, text: Any) -> dict[str, Any]:
         self._require_active(seat)
         if self.phase not in NEGOTIATION_PHASES:
             raise GameError("PHASE_LOCKED", "сообщения — только в фазах переговоров (П1, П2)")
@@ -630,17 +785,20 @@ class Game:
         return {"message_id": sent, "left": self.messages_left(seat)}
 
     def _recipients(self, seat: str, to: Any) -> list[str] | None:
-        if to == "all":
+        if to == "all" or to == ["all"]:
             return None
         if isinstance(to, str):
             to = [to]
+        if to is None:
+            raise GameError("INVALID", "не указан to: список ников или \"all\"")
         if not isinstance(to, list) or not to or not all(isinstance(n, str) for n in to):
             raise GameError("INVALID", "to — список ников или \"all\"")
         out: list[str] = []
         for nick in to:
             target = self.nick_to_seat.get(nick) or (nick if nick in self.seats else None)
             if target is None:
-                raise GameError("UNKNOWN_ID", f"нет игрока с ником {nick!r}")
+                others = ", ".join(p.nick for s, p in self.state.players.items() if s != seat)
+                raise GameError("UNKNOWN_ID", f"нет игрока с ником {nick[:40]!r} (игроки: {others})")
             if target == seat:
                 raise GameError("INVALID", "нельзя писать самому себе")
             if target not in out:
@@ -678,7 +836,10 @@ class Game:
 
     def spend(self, seat: str, spent_usd: Any, source: Any, tokens: Any = None, *, turn: Any = None,
               phase: Any = None, host_allowed: bool = False) -> None:
-        """Spend so far. `turn`/`phase` name the phase the figure closes (default: the current one);
+        """Spend so far. `turn`/`phase` name the phase the figure is for (the one that just closed); without them
+        the figure is a baseline taken before any phase closed. The journal keeps both sides: `for_turn`/
+        `for_phase` (None for a baseline) and `at_turn`/`at_phase`, the phase current when it was received;
+        `turn`/`phase` repeat the "for" pair, or the "at" pair for a baseline (older readers).
         `source: host` is accepted only from the host (`host_allowed`)."""
         if isinstance(spent_usd, bool) or not isinstance(spent_usd, (int, float)) or spent_usd < 0:
             raise GameError("INVALID", "spent_usd — неотрицательное число")
@@ -688,17 +849,30 @@ class Game:
             raise GameError("FORBIDDEN", "source host — только с админ-ключом")
         if tokens is not None and (isinstance(tokens, bool) or not isinstance(tokens, int) or tokens < 0):
             raise GameError("INVALID", "tokens — неотрицательное целое")
+        at_turn, at_phase = self.state.turn, self.phase
         if turn is None and phase is None:
-            turn, phase = self.state.turn, self.phase
+            for_turn = for_phase = None
         elif (isinstance(turn, bool) or not isinstance(turn, int) or not 1 <= turn <= self.state.turn
               or phase not in PLAYABLE_PHASES):
             raise GameError("INVALID", f"turn — номер хода 1..{self.state.turn}, phase — одна из "
                                        f"{', '.join(PLAYABLE_PHASES)}")
+        else:
+            for_turn, for_phase = turn, phase
         fields: dict[str, Any] = {"seat": seat, "spent_usd": float(spent_usd), "source": source,
-                                  "turn": turn, "phase": phase}
+                                  "turn": for_turn if for_turn is not None else at_turn,
+                                  "phase": for_phase if for_phase is not None else at_phase,
+                                  "for_turn": for_turn, "for_phase": for_phase,
+                                  "at_turn": at_turn, "at_phase": at_phase}
         if tokens is not None:
             fields["tokens"] = tokens
         self.journal.append("spend_report", **fields)
+
+    def set_dreamteam_session(self, seat: str, session_id: Any, source: str = "waker") -> dict[str, Any]:
+        """Record the seat's DreamTeam session id (config.json + a `seat_info` journal update)."""
+        config, changed = link_dreamteam_session(self.gdir, self.journal, seat, session_id, source)
+        self.config = config
+        self.seats = {s["seat"]: s for s in config["seats"]}
+        return {"dreamteam_session_id": session_id, "changed": changed}
 
     def note_first_call(self, seat: str) -> None:
         if seat not in self.first_called and self.phase in PLAYABLE_PHASES:
@@ -728,6 +902,35 @@ class Game:
                 "seconds_left": self.seconds_left(), "ready": self.ready_text(), "seats": seats,
                 "scores": scores(self.state, self.ruleset), "result": self.state.result,
                 "messages": len(self.messages), "state_hash": state_hash(self.state)}
+
+
+# ---------------------------------------------------------------- DreamTeam session link
+
+def link_dreamteam_session(gdir: GameDir, journal: Journal, seat: str, session_id: Any,
+                           source: str) -> tuple[dict[str, Any], bool]:
+    """Write the seat's `dreamteam_session_id` into config.json (re-read from disk, so a concurrent change of
+    another seat survives) and journal a `seat_info` update (`update: true`, `source`: cli | waker). Unchanged id:
+    nothing is written. Returns (config, changed)."""
+    if not isinstance(session_id, str) or not DT_SESSION_RE.match(session_id):
+        raise GameError("INVALID", "dreamteam_session_id — ID сессии DreamTeam (буквы, цифры, . _ : -, до 128 "
+                                   "символов). Пример: {\"dreamteam_session_id\": \"5f0c2a\"}")
+    config = gdir.load_config()
+    entry = next((s for s in config["seats"] if s["seat"] == seat), None)
+    if entry is None:
+        raise GameError("NOT_FOUND", f"нет места {seat!r}")
+    if entry.get("dreamteam_session_id") == session_id:
+        return config, False
+    previous = entry.get("dreamteam_session_id")
+    entry["dreamteam_session_id"] = session_id
+    write_json(gdir.config_path, config)
+    journal.append("seat_info", seat=seat, kind=entry["kind"], declared=entry.get("declared") or {},
+                   dreamteam_session_id=session_id, update=True, previous=previous, source=source)
+    return config, True
+
+
+def set_dreamteam_session(gdir: GameDir, seat: str, session_id: str) -> bool:
+    """`dah game set-session`: record the link from the command line. True if it changed."""
+    return link_dreamteam_session(gdir, Journal(gdir.journal_path), seat, session_id, "cli")[1]
 
 
 # ---------------------------------------------------------------- replay

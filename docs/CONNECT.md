@@ -10,6 +10,16 @@ stdio MCP-сервер `dah`, который переводит вызовы и�
 - ключ места `dah_<game>_<seat>_<...>` — его один раз печатает `dah game create` (храните его как пароль);
 - текст цели для места: `uv run dah goal-text <GAME_ID> <SEAT>` (в нём нет ключа).
 
+Ключей два вида, путать их нельзя:
+
+| Ключ | Вид | Куда идёт |
+|---|---|---|
+| ключ места | `dah_<game>_<seat>_...` | `DAH_KEY` моста `dah-bridge`, `--key`/`DAH_KEY` у `dah-waker`, свои программы и боты: маршруты игрока `/v1/*` |
+| ключ зрителя | `dahw_<game>_...` | только браузер: страница `http://127.0.0.1:8800/watch/<id>` (и `/v1/spectate/*`); агентам его не давать |
+
+Ключ зрителя печатается вместе с ключами мест, новый выдаёт `dah game spectator-key <id>`. Ключ места на странице
+наблюдения не принимается, ключ зрителя не работает в API игрока.
+
 ## Инструменты `dah`
 
 `whoami`, `rules(topic?)`, `phase`, `wait_phase(max_seconds=45)`, `get_state(since_turn?, format?)`, `list_orders`,
@@ -19,6 +29,14 @@ stdio MCP-сервер `dah`, который переводит вызовы и�
 
 - `orders` — JSON-массив приказов, например
   `[{"kind": "move", "from": "P01", "to": "P02", "units": {"core:assault": 2}}]`.
+- `estimate` — прогноз боя, например
+  `estimate(attacker={"core:assault": 4}, defender={"core:assault": 2}, province_type="P07")`. Юнит — полный ID,
+  короткий (`assault`) или метка из текста состояния (`штурм`); `province_type` — ID типа (`core:agri`), его метка
+  из текста состояния (`агро`, `кузн.`, `пуст.`, `столица`) или ID провинции (`P07`) — тогда берётся её тип.
+- `get_state()` — всё состояние, `get_state(since_turn=N)` — изменения с хода N (`since_turn=0` — тоже всё);
+  `history()` — отчёт последнего рассчитанного хода (до расчёта хода 1 — подсказка вместо отчёта).
+- На неверные аргументы `estimate`, `get_state`, `history` и `send_message` ответ называет ошибку и показывает верный
+  вызов (`… Пример: estimate(attacker={"core:assault": 4}, …)`).
 - `wait_phase` сам помнит последний виденный `phase_seq`: первый вызов сразу возвращает текущую фазу, следующие ждут
   её смены (до 55 с).
 - Мост берёт адрес и ключ из переменных `DAH_SERVER` и `DAH_KEY`. Ключ уходит только в заголовок
@@ -43,6 +61,20 @@ description = "Игра DreamAboutHumanity"
 Ключ передавайте только через таблицу `env`: переменные с секретными именами из окружения хаба DreamTeam не отдаёт
 ни агентам, ни внешним MCP-серверам, а `env` внешнего сервера получает только он сам.
 
+**Windows.** Запущенный `dah-bridge` держит открытым свой файл `.venv\Scripts\dah-bridge.exe`, а открытый exe
+Windows перезаписать не даёт. Обычный `uv run` сначала синхронизирует окружение; если ему надо перезаписать этот
+файл (второй мост для другого места, waker, `dah` после смены зависимостей), он падает с `os error 32` («процесс не
+может получить доступ к файлу, так как этот файл занят другим процессом»). Поэтому в Windows запускайте мост (и
+waker) без синхронизации:
+
+```toml
+command = ["uv", "run", "--no-sync", "--project", "C:/path/to/DreamAboutHumanity", "dah-bridge"]
+# или сам файл:
+command = ["C:/path/to/DreamAboutHumanity/.venv/Scripts/dah-bridge.exe"]
+```
+
+`uv sync` выполните один раз заранее, пока не запущены ни мост, ни waker.
+
 ### 2. Хаб DreamTeam с HTTP API
 
 Для первых замеров запускайте обычный `dreamteam serve`, **без песочницы** (`dreamteam sandbox` добавляет свои
@@ -61,6 +93,13 @@ $env:DREAMTEAM_API_TOKEN = python -c "import secrets; print(secrets.token_urlsaf
 $env:DREAMTEAM_HUB_TOKEN = python -c "import secrets; print(secrets.token_urlsafe(32))"
 dreamteam serve --no-browser
 ```
+
+**Доска, если у хаба есть токен.** С `DREAMTEAM_HUB_TOKEN` доска отвечает браузеру без токена 401. Откройте адрес
+доски один раз с токеном хаба в запросе: `http://127.0.0.1:8765/?token=<DREAMTEAM_HUB_TOKEN>`. Хаб превращает его в
+cookie (HttpOnly, SameSite=Strict) и открывает адрес уже без токена; дальше доска работает в этом браузере, в том
+числе доска самой сессии (`board_url` в сводке `GET /api/v1/sessions/{id}`). Нужен именно токен хаба, а не токен
+API; на `/api/v1` действует только заголовок `Authorization`, cookie и `?token=` там ничего не дают (документация
+DreamTeam: `docs/ru/sandbox.md`, «Токен доступа»; `docs/en/http-api.md`).
 
 ### 3. Сессия с целью из `dah goal-text`
 
@@ -99,11 +138,28 @@ uv run --project C:/path/to/DreamAboutHumanity dah-waker \
   `continue` с самодостаточным текстом вида
   `[DAH] Ход 3/10, фаза ДЕЙСТВИЯ, до 14:30Z (ещё 20 мин). Готово 1/3. Посмотри dah.get_state(since_turn=2), подай приказы, нажми dah.ready.`;
 - за 60 секунд до дедлайна, если место ещё не нажало ready, шлёт напоминание;
-- после каждой смены фазы читает сводку сессии DreamTeam и отправляет в игру расход (`/v1/spend`,
-  `source: participant_program`);
+- не шлёт этот `continue` при открытии фазы, если игрок уже работает: сервер сообщает waker'у (только ему, по
+  заголовку `X-DAH-Host`), ждёт ли сейчас long-poll `dah.wait_phase` самого места или ждал в момент открытия фазы
+  (`player_waiting`; такой вызов сам принесёт игроку новую фазу), и сколько секунд назад игрок обращался к игре в
+  этой фазе (`player_active_s_ago`; до 30 секунд — значит, работает; вызов, начатый ещё в прошлой фазе, например
+  `ready`, который сам закрыл фазу, не считается). Вместо `continue` пишет `continue_skipped` с причиной
+  (`player_waiting` или `player_active`) и состоянием сессии. Если сессия DreamTeam остановлена (`stopped`,
+  `failed`, `done`, `budget`, `created`), `continue` шлётся всё равно: long-poll может пережить агента, который его
+  начал. Напоминание перед дедлайном не пропускается никогда;
+- при старте записывает свой `--dt-session` в партию (`/v1/seat/dreamteam_session`: `config.json` и событие
+  `seat_info` в журнале), так что связь места с сессией DreamTeam сохраняется без ручных шагов; если сервер игры
+  ещё не поднят, повторяет запись после первого удачного опроса;
+- после каждой смены фазы читает сводку сессии DreamTeam и отправляет в игру её расход (`/v1/spend`,
+  `source: participant_program`) как цифру только что закрытой фазы;
 - при 429 и 5xx от DreamTeam повторяет через 10, 30 и 60 с, затем пишет `wake_failed`;
-- пишет телеметрию `continue_sent`, `session_restarted`, `goal_reopened`, `budget_exhausted`, `wake_failed`;
+- пишет телеметрию `continue_sent`, `continue_skipped`, `session_restarted`, `goal_reopened`, `budget_exhausted`,
+  `wake_failed`;
 - завершается, когда партия окончена.
+
+Когда партию создают, ID сессии обычно ещё неизвестен. Waker записывает его сам при старте; чтобы записать без
+waker'а, выполните `dah game set-session <GAME_ID> A 5f0c...` (можно и при работающем сервере). Если ID известен
+заранее, `dah game create ... --dt-session A=5f0c...` запишет его при создании. Ни то, ни другое не заменяет
+`--dt-session` самого waker'а.
 
 ## Любой другой MCP-клиент
 

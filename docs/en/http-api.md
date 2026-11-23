@@ -11,8 +11,12 @@ directly. Section 7 of the [slice specification](../SLICE.md) (in Russian) is th
 - **Authentication.** Every route needs the header `Authorization: Bearer <key>`. A seat key looks like
   `dah_<game>_<seat>_<random>`; the key itself says which match and seat it belongs to. The server keeps only the
   sha256 of keys. The admin route takes the admin key from the `DAH_ADMIN_KEY` environment variable instead.
+  A spectator key (`dahw_<game>_<random>`) opens only `/watch/<id>` and `/v1/spectate/*`, never these routes; a
+  seat key does not open the spectator page.
 - **Answers** are JSON: `{"ok": true, ...}` or `{"ok": false, "error": {"code": "...", "message": "..."}}`.
-  Messages are in Russian. Where an answer has a `text` field, it is ready-made text for an LLM.
+  Messages are in Russian. Where an answer has a `text` field, it is ready-made text for an LLM. A refusal of
+  `/v1/estimate`, `/v1/state`, `/v1/history` or `/v1/messages` says what was wrong and, where the call itself was
+  wrong, ends with a correct call (`Пример: estimate(attacker={"core:assault": 4}, ...)`).
 - **Request body**: a JSON object, at most 64,000 bytes (else `413 TOO_LARGE`). A body that is not a JSON object
   gives `400 INVALID`.
 - **No docs routes.** `/docs`, `/redoc` and `/openapi.json` are switched off.
@@ -55,7 +59,7 @@ Submitting and validating orders answer 200 even when some orders are refused: t
 | GET | `/v1/inbox` | `?since=` | `messages[]`, `last_id`, `text` |
 | POST | `/v1/ready` | `{"confirm_hash"}` | `ready` ("N/M"), `phase_closed` |
 | POST | `/v1/unready` | | `ready` |
-| GET | `/v1/history` | `?turn=` | `turn`, `text` |
+| GET | `/v1/history` | `?turn=` | `turn`, `text` (before turn 1 is resolved, without `turn`: `turn: null` and a hint) |
 
 ### Phase and waiting
 
@@ -70,10 +74,17 @@ once with `changed: true`.
 `allowed` lists tool names: in N1 and N2 the state, order tools, messages, inbox, ready and history; in A the same
 without `send_message`. A seat that is out, or a match that is over, gets only `get_state`, `history` and `inbox`.
 
+For host calls (the `X-DAH-Host` header, which `dah-waker` sends), `/v1/phase` and `/v1/wait_phase` add two fields
+about the player of that seat: `player_waiting` (a player's long-poll of `/v1/wait_phase` is pending now, or was
+pending when the current phase opened, so it returns with the new phase) and `player_active_s_ago` (seconds since
+the player's last own call, if that call started in the current phase; else `null`: a call that started in the
+previous phase, such as the player's `ready` that closed it, does not count). Players never get these fields.
+
 ### State
 
-`/v1/state` gives the seat's view under the fog of war ([Game rules](rules.md#fog-of-war)). `since_turn` must be
-between 1 and the current turn; the text then holds only what changed since the start of that turn.
+`/v1/state` gives the seat's view under the fog of war ([Game rules](rules.md#fog-of-war)). With `since_turn`
+between 1 and the current turn the text holds only what changed since the start of that turn; `since_turn=0` (or
+none) gives the whole state; a later turn is `400 INVALID`.
 `format=json` returns `state` with `turn`, `turn_limit`, `phase`, `you` (resources, net income, CP), `players`
 (nick, alive, score) and `provinces` (`visible`, and for visible ones `units`, `buildings`, `fortified`).
 
@@ -91,9 +102,14 @@ between 1 and the current turn; the text then holds only what changed since the 
 ### Estimate
 
 The body is `{"attacker": {unit: n}, "defender": {unit: n}, "province_type", "fortified", "hasty"}`;
-`fortified` and `hasty` default to `false`, ids may be short. The answer has `win_prob`, `attacker_losses_avg`,
-`defender_losses_avg` and the same averages as `losses: {attacker, defender}`. Unknown ids give
-`400 UNKNOWN_ID`. The route works in any phase ([Game rules](rules.md#estimate)).
+`fortified` and `hasty` default to `false`. A unit may be its full id (`core:assault`), its short id (`assault`),
+its label in the state text (`штурм`) or its name; a side may also be a list `[{"unit": ..., "count": n}]`.
+`province_type` may be a type id (`core:agri`, `agri`), its label in the state text (`агро`, `кузн.`) or name, or
+a province id (`P07`) or name, which stands for that province's type. The answer has `win_prob`,
+`attacker_losses_avg`, `defender_losses_avg`, the same averages as `losses: {attacker, defender}` and the resolved
+`province_type`. Unknown ids give `400 UNKNOWN_ID` with the list of valid ones; a missing or malformed field gives
+`400 INVALID`; both messages end with a correct example call. The route works in any phase
+([Game rules](rules.md#estimate)).
 
 ### Ready
 
@@ -112,20 +128,26 @@ last one as `since` to get only newer ones. Each `text` is wrapped as `<<untrust
 
 ## Host routes
 
-`dah-waker` calls two routes with the seat's key:
+`dah-waker` calls three routes with the seat's key:
 
 | Method | Path | Body |
 |---|---|---|
 | POST | `/v1/telemetry` | `{"kind", "detail"}` |
 | POST | `/v1/spend` | `{"spent_usd", "source", "tokens"?, "turn"?, "phase"?}` |
+| POST | `/v1/seat/dreamteam_session` | `{"dreamteam_session_id"}` |
 
-- `kind` of telemetry is `continue_sent`, `session_restarted`, `goal_reopened`, `budget_exhausted` or
-  `wake_failed`; `detail` is a JSON object of up to 2000 characters.
-- `spent_usd` is the seat's total spend so far. `turn` and `phase` name the phase the figure closes; without them
-  the current phase is used.
+- `kind` of telemetry is `continue_sent`, `continue_skipped`, `session_restarted`, `goal_reopened`,
+  `budget_exhausted` or `wake_failed`; `detail` is a JSON object of up to 2000 characters.
+- `spent_usd` is the seat's total spend so far. `turn` and `phase` name the phase the figure is for (the one that
+  just closed); without them the figure is a baseline taken before any phase closed. The journal's `spend_report`
+  keeps both sides: `for_turn`/`for_phase` (`null` for a baseline) and `at_turn`/`at_phase`, the phase current
+  when the server received it. The report counts money by the "for" fields.
+- `/v1/seat/dreamteam_session` records which DreamTeam session plays the seat: it writes `dreamteam_session_id`
+  into the match's `config.json` and journals a `seat_info` event with `update: true`, `source: "waker"` and the
+  `previous` id. The same id again changes nothing (`changed: false`). The waker calls it once at start.
 - `source` is `participant_program` (the waker) or `host`. `host` is accepted only with the admin key in the
   `X-DAH-Admin-Key` header.
-- Calls of these two routes, and any call with the `X-DAH-Host` header, are host traffic: the journal marks them
+- Calls of these three routes, and any call with the `X-DAH-Host` header, are host traffic: the journal marks them
   `host: true`, they do not count as the player's first call in a phase, and the report counts them apart.
 
 ## Admin route

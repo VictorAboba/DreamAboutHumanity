@@ -95,8 +95,8 @@ The server never gives `private/` to players. The journal holds message sizes, n
 | Type | Main fields |
 |---|---|
 | `game_created` | config (no keys), `ruleset_hash`, `seed`, `rules_chars` |
-| `seat_info` | seat, kind, declared, `dreamteam_session_id` |
-| `phase_open` / `phase_close` | turn, phase, deadline / reason `all_ready` or `deadline` |
+| `seat_info` | seat, kind, declared, `dreamteam_session_id`; a later link adds `update: true`, `previous`, `source` (`cli` or `waker`) |
+| `phase_open` / `phase_close` | turn, phase, deadline / reason `all_ready` or `deadline`, `not_ready` (living seats that had not pressed ready) |
 | `recon` | turn (the empty intel slice) |
 | `call` | seat, route, `req_chars`, `resp_chars`, `ms`, status, turn, phase, `host` for host traffic |
 | `first_call_in_phase` | seat, turn, phase |
@@ -104,8 +104,8 @@ The server never gives `private/` to players. The journal holds message sizes, n
 | `order_edit` / `order_edit_p2` | seat, op, order id, CP cost (`order_edit_p2` also for orders added in N2) |
 | `ready` / `unready` / `ready_cleared` | seat, turn, phase |
 | `message` | from, to, chars, phase |
-| `turn_resolved` | turn, `state_hash`, scores, idle resources and units, seats on autopilot |
-| `spend_report` | seat, `spent_usd`, source, turn, phase, tokens |
+| `turn_resolved` | turn, `state_hash`, scores, idle resources and units, `autopilot` (seats that resolved with no orders) |
+| `spend_report` | seat, `spent_usd`, source, tokens, `for_turn`/`for_phase` (the phase the figure is for; `null` for a baseline), `at_turn`/`at_phase` (when it was received), `turn`/`phase` (the "for" pair, else the "at" pair) |
 | `telemetry` | seat, kind, detail |
 | `game_over` | winners, reason (`last_standing` or `turn_limit`), scores, turn |
 
@@ -139,9 +139,10 @@ A mismatch means the rules or content changed, or resolution is not deterministi
 ## The report
 
 `dah report <id>` reads only the journal. It splits time per seat and per phase (to the first call, to the first
-accepted submission, to ready), counts calls and characters (host traffic apart), submissions, edits and
-rejections, idle resources and units, autopilot turns, scores by turn, money by turn from `spend_report`, and
-waker telemetry. The aim of the slice is to measure exactly this: how much money and time a turn costs a DreamTeam
+accepted submission, to ready), counts calls and characters (host traffic apart), submissions (also per phase kind:
+N1 / A / N2), edits and rejections, idle resources and units, turns a seat resolved with no orders, phases the
+deadline closed while a seat had not pressed ready, scores by turn, money by turn and by phase from `spend_report`
+(by its "for" fields), and waker telemetry. The aim of the slice is to measure exactly this: how much money and time a turn costs a DreamTeam
 swarm and a single agent.
 
 ## Server, bridge, waker, bots

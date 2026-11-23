@@ -13,6 +13,11 @@ DEFAULT_WAIT_SECONDS = 45
 _ID = {"type": ["string", "integer"], "description": "ID приказа"}
 _UNITS = {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0},
           "description": "Юниты: {unit_id: число}"}
+_EST_UNITS = {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0},
+              "description": "Юниты стороны: {юнит: число}, например {\"core:assault\": 4, \"core:armor\": 1}; "
+                             "юнит — полный ID, короткий (assault) или метка из get_state (штурм)"}
+EST_EXAMPLE = ('estimate(attacker={"core:assault": 4}, defender={"core:assault": 2}, province_type="core:agri", '
+               'fortified=false)')
 _ORDERS = {"type": "array", "items": {"type": "object"},
            "description": "Список приказов, например [{\"kind\": \"move\", \"from\": \"P01\", \"to\": \"P02\", "
                           "\"units\": {\"core:assault\": 2}}]"}
@@ -39,9 +44,13 @@ TOOLS: tuple[ToolSpec, ...] = (
     ToolSpec("phase", "Текущая фаза: ход, дедлайн, готовность, разрешённые действия, game_over.", _schema()),
     ToolSpec("wait_phase", "Ждать смены фазы (до max_seconds, по умолчанию 45).",
              _schema({"max_seconds": {"type": "integer", "minimum": 1, "maximum": 55, "default": 45}})),
-    ToolSpec("get_state", "Состояние твоей державы и видимой карты; since_turn — только изменения с хода.",
-             _schema({"since_turn": {"type": "integer", "minimum": 0},
-                      "format": {"type": "string", "enum": ["text", "json"], "default": "text"}})),
+    ToolSpec("get_state", "Состояние твоей державы и видимой карты. Без аргументов — всё; since_turn=N — только "
+                          "изменения с хода N (обычно прошлый ход; 0 — всё). Пример: get_state(since_turn=2).",
+             _schema({"since_turn": {"type": "integer", "minimum": 0,
+                                     "description": "Ход 1..текущий: показать только изменения с него; 0 или без "
+                                                    "него — всё состояние"},
+                      "format": {"type": "string", "enum": ["text", "json"], "default": "text",
+                                 "description": "text (коротко, по умолчанию) или json"}})),
     ToolSpec("list_orders", "Твои поданные приказы, их хэш и остаток ОК.", _schema()),
     ToolSpec("validate_orders", "Проверить приказы без подачи: причина отказа и цена в ОК.",
              _schema({"orders": _ORDERS}, ["orders"])),
@@ -55,13 +64,20 @@ TOOLS: tuple[ToolSpec, ...] = (
                                            "properties": {"units": _UNITS, "count": {"type": "integer"},
                                                           "to": {"type": "string"}}}},
                      ["id", "patch"])),
-    ToolSpec("estimate", "Оценить исход боя: вероятность победы и средние потери.",
-             _schema({"attacker": _UNITS, "defender": _UNITS,
-                      "province_type": {"type": "string", "description": "Тип провинции, например core:forge"},
-                      "fortified": {"type": "boolean", "default": False},
-                      "hasty": {"type": "boolean", "default": False, "description": "Атака начата в П2"}},
+    ToolSpec("estimate", "Прогноз боя: вероятность победы атакующего и средние потери сторон (200 прогонов). "
+                         f"Пример: {EST_EXAMPLE}.",
+             _schema({"attacker": _EST_UNITS, "defender": _EST_UNITS,
+                      "province_type": {"type": "string",
+                                        "description": "Где бой: тип провинции (core:forge, core:agri, core:waste, "
+                                                       "core:capital или метка из get_state: кузн., агро, пуст., "
+                                                       "столица) либо ID провинции (P07)"},
+                      "fortified": {"type": "boolean", "default": False,
+                                    "description": "Защитник укрепился (fortify)"},
+                      "hasty": {"type": "boolean", "default": False,
+                                "description": "Атака подана в П2 (наспех, штраф)"}},
                      ["attacker", "defender", "province_type"])),
-    ToolSpec("send_message", "Отправить сообщение: to — список ников или \"all\".",
+    ToolSpec("send_message", "Отправить сообщение (только в П1 и П2): to — список ников или \"all\". "
+                             "Пример: send_message(to=[\"Ник\"], text=\"Предлагаю мир\").",
              _schema({"to": {"anyOf": [{"type": "array", "items": {"type": "string"}},
                                        {"type": "string", "enum": ["all"]}]},
                       "text": {"type": "string", "maxLength": 800}}, ["to", "text"])),
@@ -70,8 +86,10 @@ TOOLS: tuple[ToolSpec, ...] = (
     ToolSpec("ready", "Нажать «готово»; confirm_hash — orders_hash твоих текущих приказов.",
              _schema({"confirm_hash": {"type": "string"}}, ["confirm_hash"])),
     ToolSpec("unready", "Снять «готово».", _schema()),
-    ToolSpec("history", "Отчёт хода; без turn — последний.",
-             _schema({"turn": {"type": "integer", "minimum": 1}})),
+    ToolSpec("history", "Отчёт рассчитанного хода; без turn — последний. До расчёта хода 1 отчётов нет. "
+                        "Пример: history(turn=1).",
+             _schema({"turn": {"type": "integer", "minimum": 1,
+                               "description": "Номер уже рассчитанного хода (1..текущий-1)"}})),
 )
 
 
@@ -91,10 +109,34 @@ def _json_arg(value: Any, kind: type, name: str) -> Any:
     return value
 
 
+EXAMPLES = {
+    "send_message": 'send_message(to=["Ник"], text="Предлагаю мир") или send_message(to="all", text="...")',
+    "validate_orders": 'validate_orders(orders=[{"kind": "move", "from": "P01", "to": "P02", '
+                       '"units": {"core:assault": 2}}])',
+    "submit_orders": 'submit_orders(orders=[{"kind": "move", "from": "P01", "to": "P02", '
+                     '"units": {"core:assault": 2}}], mode="replace_all")',
+    "cancel_order": 'cancel_order(id="o3")',
+    "amend_order": 'amend_order(id="o3", patch={"to": "P03"})',
+    "ready": 'ready(confirm_hash="<orders_hash из list_orders>")',
+    "estimate": EST_EXAMPLE,
+}
+
+
 def _required(args: dict[str, Any], name: str) -> Any:
     if args.get(name) is None:
         raise ToolInputError(f"не указан аргумент {name}")
     return args[name]
+
+
+def _lenient_json(value: Any) -> Any:
+    """A JSON string becomes its value; anything else (an object, a list, a malformed string) goes to the server
+    as is, which accepts the forms it documents and explains the rest with a correct example."""
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return value
+    return value
 
 
 class Bridge:
@@ -116,10 +158,10 @@ class Bridge:
             "cancel_order": lambda a: client.cancel_order(str(_required(a, "id"))),
             "amend_order": lambda a: client.amend_order(str(_required(a, "id")),
                                                         _json_arg(_required(a, "patch"), dict, "patch")),
-            "estimate": lambda a: client.estimate(_json_arg(_required(a, "attacker"), dict, "attacker"),
-                                                  _json_arg(_required(a, "defender"), dict, "defender"),
-                                                  str(_required(a, "province_type")),
-                                                  bool(a.get("fortified", False)), bool(a.get("hasty", False))),
+            # estimate: the server checks the arguments and answers with what was wrong and a correct call.
+            "estimate": lambda a: client.estimate(_lenient_json(a.get("attacker")), _lenient_json(a.get("defender")),
+                                                  a.get("province_type"), a.get("fortified", False),
+                                                  a.get("hasty", False)),
             "send_message": lambda a: client.send_message(_required(a, "to"), str(_required(a, "text"))),
             "inbox": lambda a: client.inbox(a.get("since")),
             "ready": lambda a: client.ready(str(_required(a, "confirm_hash"))),
@@ -147,7 +189,8 @@ class Bridge:
         try:
             data = handler(dict(args or {}))
         except ToolInputError as exc:
-            return f"Ошибка аргументов: {exc}", True
+            example = f". Пример: {EXAMPLES[name]}" if name in EXAMPLES else ""
+            return f"Ошибка аргументов: {exc}{example}", True
         except GameApiError as exc:
             return self._client.scrub(f"Ошибка {exc.code}: {exc.message}".rstrip(": ")), True
         return self._client.scrub(render(data)), False

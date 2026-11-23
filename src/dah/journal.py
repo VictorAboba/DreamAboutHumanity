@@ -44,6 +44,10 @@ class Journal:
         self._lock = threading.Lock()
         self._seq = max((e.get("seq", 0) for e in _iter_events(self.path)), default=0)
         self._end_torn_line()
+        self._size = self._file_size()
+
+    def _file_size(self) -> int:
+        return self.path.stat().st_size if self.path.is_file() else 0
 
     def _end_torn_line(self) -> None:
         """After a crash mid-write, close the torn last line so the next event starts on a line of its own."""
@@ -60,10 +64,14 @@ class Journal:
         if type_ not in EVENT_TYPES:
             raise ValueError(f"unknown journal event type {type_!r}")
         with self._lock:
+            if self._file_size() != self._size:
+                # Another writer appended (`dah game set-session` next to a running server): continue its seq.
+                self._seq = max(self._seq, max((e.get("seq", 0) for e in _iter_events(self.path)), default=0))
             self._seq += 1
             event = {"seq": self._seq, "ts": round(self._clock(), 3), "type": type_, **fields}
             with self.path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
+            self._size = self._file_size()
         return event
 
     def events(self) -> list[dict[str, Any]]:

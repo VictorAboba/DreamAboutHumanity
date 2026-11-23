@@ -30,6 +30,19 @@ uv sync                     # поставить зависимости
 uv run pytest -q            # тесты (должны быть зелёными)
 ```
 
+В Windows, пока работает `dah-bridge` или `dah-waker`, их `.venv\Scripts\*.exe` заблокированы, и обычный `uv run`
+(он сначала синхронизирует окружение) может упасть с `os error 32`. Тогда запускайте `uv run --no-sync ...` или сам
+файл `.venv\Scripts\dah-bridge.exe` — подробнее в [docs/CONNECT.md](docs/CONNECT.md).
+
+### Два вида ключей
+
+| Ключ | Вид | Куда идёт |
+|---|---|---|
+| ключ места | `dah_<game>_<seat>_...` | игроку: `DAH_KEY` моста `dah-bridge`, `--key` у `dah-waker`, свои программы; открывает маршруты игрока `/v1/*` |
+| ключ зрителя | `dahw_<game>_...` | человеку в браузере: страница `/watch/<id>`; открывает только её и `/v1/spectate/*` |
+
+Оба печатает `dah game create`, один раз; на диске — только sha256. Один ключ вместо другого не работает.
+
 ### Партия из трёх ботов
 
 ```sh
@@ -64,7 +77,8 @@ uv run dah goal-text <id> A        # текст цели для роя или а
 
 - MCP-сервер `dah-bridge` настраивается переменными `DAH_SERVER` и `DAH_KEY`;
 - `dah-waker` будит сессию DreamTeam, когда открывается новая фаза;
-- сессию DreamTeam надо создать с текстом цели из `dah goal-text`.
+- сессию DreamTeam надо создать с текстом цели из `dah goal-text`; её ID waker сам запишет в партию при старте
+  (или вручную: `dah game set-session <id> A <ID сессии>`).
 
 ### Наблюдение за партией
 
@@ -107,9 +121,10 @@ API страницы (только ключ зрителя или админ-к�
 | `dah pack validate [PATH...]` | проверить паки контента; ошибки печатаются с файлом и путём к полю |
 | `dah game create --scenario ... --seat SEAT:KIND:NICK ...` | создать партию в `games/<id>/`; KIND — `swarm`, `agent`, `human` или `bot-<passive\|builder\|rush>` |
 | `dah game spectator-key ID [--server URL]` | выдать новый ключ зрителя (старый отзывается) и напечатать адрес `/watch/ID` |
+| `dah game set-session ID SEAT DT_SESSION_ID` | записать ID сессии DreamTeam места в `config.json` и журнал (`seat_info`) |
 | `dah serve [--games-dir games] [--port 8800]` | HTTP API (раздел 7 SLICE.md); админ-ключ берётся из `DAH_ADMIN_KEY` |
 | `dah bots run --game ID [--server URL]` | сыграть ботами |
-| `dah report ID [--json]` | отчёт: время до первого вызова, подачи и ready по местам и фазам, вызовы, символы, простой, счёт, деньги |
+| `dah report ID [--json]` | отчёт: время до первого вызова, подачи и ready по местам и фазам, вызовы, символы, подачи по фазам (П1 / Д / П2), ходы без приказов, фазы, закрытые по таймеру без ready, простой, счёт, деньги по ходам и фазам |
 | `dah replay ID` | повтор партии из начального состояния и сохранённых приказов |
 | `dah goal-text ID SEAT` | текст цели участника |
 
