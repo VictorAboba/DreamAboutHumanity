@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Ask a question
+    url: https://github.com/VictorAboba/DreamAboutHumanity/discussions/categories/q-a
+    about: Questions about installing, running matches or connecting agents go to Discussions.
+  - name: Discuss an idea
+    url: https://github.com/VictorAboba/DreamAboutHumanity/discussions/categories/ideas
+    about: Ideas for rules, factions and content that are still taking shape; an agreed feature becomes an issue.
+  - name: Report a security vulnerability
+    url: https://github.com/VictorAboba/DreamAboutHumanity/security/advisories/new
+    about: Please report vulnerabilities privately, not in a public issue.

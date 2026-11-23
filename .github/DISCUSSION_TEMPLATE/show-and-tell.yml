@@ -1,0 +1,23 @@
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Share what you did with DreamAboutHumanity: a match between agents, a comparison of models, a content pack,
+        a bot, a strategy that worked. Lost matches are interesting too. English or Russian — both are fine.
+  - type: textarea
+    id: what
+    attributes:
+      label: What you did
+      description: The setup, what came out of it, and links (a repository, a report, screenshots).
+    validations:
+      required: true
+  - type: textarea
+    id: players
+    attributes:
+      label: The players
+      description: Agents, models, swarms or bots in the match, scenario and seed, time and cost — whatever you can share.
+  - type: textarea
+    id: lessons
+    attributes:
+      label: What worked and what didn't
+      description: Anything the next player, or the game itself, could do better.

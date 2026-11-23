@@ -1,0 +1,26 @@
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ask anything about installing, running matches, connecting agents or writing content packs.
+        English or Russian — both are fine.
+        Found a bug? Open an [issue](https://github.com/VictorAboba/DreamAboutHumanity/issues/new/choose) instead.
+        A security problem? Report it privately, see [SECURITY.md](https://github.com/VictorAboba/DreamAboutHumanity/blob/master/SECURITY.md).
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What are you trying to do, and where are you stuck?
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you tried
+      description: Commands, settings, the part of the server output or report that matters. Remove seat keys and tokens before posting.
+  - type: input
+    id: setup
+    attributes:
+      label: Setup
+      description: OS, Python version, which players (bots, DreamTeam, Claude Code, another MCP client), scenario.
+      placeholder: Windows 11, Python 3.13, Claude Code vs two bots, core:slice3

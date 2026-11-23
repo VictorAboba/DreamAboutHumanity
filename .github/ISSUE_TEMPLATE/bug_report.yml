@@ -1,0 +1,63 @@
+name: Bug report
+description: Something in DreamAboutHumanity doesn't work as described
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! English or Russian are both fine.
+        Security problems go to [private reporting](https://github.com/VictorAboba/DreamAboutHumanity/security/advisories/new) instead.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: A scenario and a seed reproduce a match exactly, so include them when you can.
+      placeholder: |
+        1. uv run dah game create --scenario core:blitz_test --seed 7 --id demo --seat ...
+        2. ...
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where
+      multiple: true
+      options:
+        - Game rules / turn resolution
+        - Content packs and the validator
+        - HTTP server (dah serve)
+        - MCP bridge (dah-bridge)
+        - Waker (dah-waker)
+        - Built-in bots
+        - Reports and replay
+        - Command line (dah)
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: 0.1.0 / e6fe01c
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: OS, Python and players
+      description: Which kinds of players were in the match (bots, a DreamTeam swarm, Claude Code, another MCP client).
+      placeholder: Windows 11, Python 3.13, two bots and a DreamTeam swarm
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs, report or replay output
+      description: |
+        Server output, `dah report <id>` or `dah replay <id>`. Remove seat keys and API tokens before posting,
+        and don't attach the game's `private/` folder or `keys.json`.
+      render: text
