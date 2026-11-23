@@ -202,3 +202,7 @@ uv run dah pack validate content/packs/core path/to/mymod   # зависимос
 Можно и явно перечислить паки: `dah game create --packs content/packs/core --packs path/to/mymod`. Флаг
 повторяется для каждого пака, и с ним загружаются только перечисленные паки, поэтому `core` тоже надо указать. Сценарий
 задаётся полным ID: `--scenario mymod:snipers3`.
+
+## Лицензия
+
+[MIT](LICENSE)
