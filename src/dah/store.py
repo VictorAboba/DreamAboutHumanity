@@ -2,6 +2,7 @@
 
     games/<id>/config.json           game config without keys
     games/<id>/keys.json             {sha256(key): seat}
+    games/<id>/spectator.json        {"sha256": sha256(spectator key)} — the key for /v1/spectate and /watch
     games/<id>/journal.jsonl         public-ish journal (SLICE.md section 6)
     games/<id>/private/runtime.json  live snapshot: state, books, ready, phase timing (restore after restart)
     games/<id>/private/states/turn_<N>.json   state at the start of turn N
@@ -23,6 +24,7 @@ from typing import Any
 
 GAME_ID_RE = re.compile(r"^[A-Za-z0-9-]{1,64}$")
 SEAT_RE = re.compile(r"^[A-Za-z0-9]{1,16}$")
+SPECTATOR_KEY_PREFIX = "dahw_"
 
 
 def hash_key(key: str) -> str:
@@ -31,6 +33,11 @@ def hash_key(key: str) -> str:
 
 def make_key(game_id: str, seat: str) -> str:
     return f"dah_{game_id}_{seat}_{secrets.token_urlsafe(18).replace('_', 'x').replace('-', 'y')}"
+
+
+def make_spectator_key(game_id: str) -> str:
+    """A spectator key has its own prefix: it never authenticates on the player routes (/v1/*)."""
+    return f"{SPECTATOR_KEY_PREFIX}{game_id}_{secrets.token_urlsafe(18).replace('_', 'x').replace('-', 'y')}"
 
 
 def write_json(path: Path, data: Any) -> None:
@@ -64,6 +71,10 @@ class GameDir:
     @property
     def journal_path(self) -> Path:
         return self.path / "journal.jsonl"
+
+    @property
+    def spectator_path(self) -> Path:
+        return self.path / "spectator.json"
 
     @property
     def private(self) -> Path:
@@ -100,6 +111,17 @@ class GameDir:
 
     def load_key_hashes(self) -> dict[str, str]:
         return read_json(self.keys_path) if self.keys_path.is_file() else {}
+
+    def load_spectator_hash(self) -> str | None:
+        if not self.spectator_path.is_file():
+            return None
+        return read_json(self.spectator_path).get("sha256") or None
+
+    def issue_spectator_key(self) -> str:
+        """Create (or replace, revoking the old one) the game's spectator key; only its sha256 is stored."""
+        key = make_spectator_key(self.game_id)
+        write_json(self.spectator_path, {"sha256": hash_key(key)})
+        return key
 
     def append_message(self, message: dict[str, Any]) -> None:
         self.messages_path.parent.mkdir(parents=True, exist_ok=True)

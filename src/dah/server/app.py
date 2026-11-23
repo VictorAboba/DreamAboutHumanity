@@ -23,6 +23,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from dah.game import Clock, Game, GameError
 from dah.server.registry import GameRegistry
+from dah.server.spectate import build_router as build_spectate_router
 
 log = logging.getLogger(__name__)
 
@@ -217,10 +218,13 @@ async def _run(handler: Callable[..., Any], *args: Any) -> tuple[int, dict[str, 
 
 
 def create_app(games_dir: str, *, admin_key: str | None = None, clock: Clock = time.time,
-               tick_interval: float | None = 1.0) -> FastAPI:
-    """`admin_key` defaults to $DAH_ADMIN_KEY; `tick_interval=None` disables the background clock (tests)."""
+               tick_interval: float | None = 1.0, watch_key: str | None = None) -> FastAPI:
+    """`admin_key` defaults to $DAH_ADMIN_KEY; `tick_interval=None` disables the background clock (tests).
+    `watch_key` ($DAH_WATCH_KEY) is a read-only key for /v1/spectate and /watch at the live level: it opens no other
+    route, so the operator need not type the master admin key into a browser."""
     registry = GameRegistry(games_dir, clock)
     admin_key = admin_key if admin_key is not None else os.environ.get("DAH_ADMIN_KEY") or None
+    watch_key = watch_key if watch_key is not None else os.environ.get("DAH_WATCH_KEY") or None
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -231,10 +235,14 @@ def create_app(games_dir: str, *, admin_key: str | None = None, clock: Clock = t
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
-    # No /docs, /redoc or /openapi.json: every route needs a key.
+    # No /docs, /redoc or /openapi.json: every route but the /watch page shell needs a key.
     app = FastAPI(title="DreamAboutHumanity", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.registry = registry
     app.state.admin_key = admin_key
+    app.state.spectate_cache = {}
+    app.state.watch_key = watch_key
+    # Spectator API (/v1/spectate/*) and the /watch page: admin or spectator key only, never a seat key.
+    app.include_router(build_spectate_router())
 
     @app.exception_handler(StarletteHTTPException)
     async def http_error(request: Request, exc: StarletteHTTPException) -> Response:

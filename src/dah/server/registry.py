@@ -49,6 +49,12 @@ class GameRegistry:
         found = self._keys.get(digest)
         return (self.games[found[0]], found[1]) if found else None
 
+    def get(self, game_id: str) -> Game | None:
+        """A loaded game by id; an unknown id rescans the disk at most once per interval."""
+        if game_id not in self.games and time.monotonic() - self._refreshed_at >= self.refresh_interval:
+            self.refresh()
+        return self.games.get(game_id)
+
     def tick_all(self) -> None:
         for game in list(self.games.values()):
             try:

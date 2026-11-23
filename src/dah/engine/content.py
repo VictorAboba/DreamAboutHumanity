@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections import Counter, deque
 from dataclasses import asdict, dataclass, field
@@ -138,6 +139,10 @@ class MapDef:
     provinces: dict[str, MapProvince]
     adjacency: dict[str, tuple[str, ...]]
     starts: tuple[StartDef, ...]
+    # Display layout {province: (x, y)} in 0..100, from `pos` in the map file or computed (`layout_computed`).
+    # Cosmetic only: left out of the ruleset hash, so moving a province on screen never changes a game.
+    layout: dict[str, tuple[float, float]] = field(default_factory=dict)
+    layout_computed: bool = False
 
     @property
     def capitals(self) -> frozenset[str]:
@@ -218,6 +223,8 @@ class Ruleset:
         data = asdict(self)
         data.pop("warnings")
         data.pop("hash")
+        data["map"].pop("layout", None)
+        data["map"].pop("layout_computed", None)
         return data
 
 
@@ -514,14 +521,29 @@ class _Builder:
             starts.append(StartDef(s["capital"], tuple(s.get("provinces", []))))
         if len(starts) != d["max_players"]:
             self.err(raw, ["starts"], f"{len(starts)} starts for max_players {d['max_players']}")
+        with_pos = [i for i, p in enumerate(d["provinces"]) if "pos" in p]
+        if with_pos and len(with_pos) != len(d["provinces"]):
+            missing = next(i for i, p in enumerate(d["provinces"]) if "pos" not in p)
+            self.err(raw, ["provinces", missing], "pos must be given for every province of the map or for none")
         if len(self.errors) > before:
             return None
         adjacency = {pid: tuple(sorted(n)) for pid, n in sorted(adj.items())}
+        if with_pos:
+            layout = {p["id"]: (float(p["pos"][0]), float(p["pos"][1])) for p in d["provinces"]}
+            seen_pos: dict[tuple[float, float], str] = {}
+            for i, p in enumerate(d["provinces"]):
+                xy = layout[p["id"]]
+                if xy in seen_pos:
+                    self.warn(raw, ["provinces", i, "pos"], f"same pos as {seen_pos[xy]!r}")
+                seen_pos.setdefault(xy, p["id"])
+        else:
+            layout = circular_layout(sorted(provinces), [(s.capital, *s.provinces) for s in starts])
         profiles = [Counter(provinces[p].type for p in _reachable(adj, s.capital, 2)) for s in starts]
         if any(p != profiles[0] for p in profiles):
             self.err(raw, ["starts"], "starts are not symmetric: province types within radius 2 differ")
             return None
-        return MapDef(raw.id, d["name"], d["max_players"], dict(sorted(provinces.items())), adjacency, tuple(starts))
+        return MapDef(raw.id, d["name"], d["max_players"], dict(sorted(provinces.items())), adjacency, tuple(starts),
+                      dict(sorted(layout.items())), not with_pos)
 
     def scenarios(self) -> dict[str, tuple[_Raw, ScenarioDef]]:
         out = {}
@@ -602,6 +624,28 @@ def _duration(value: int | str) -> int:
     if isinstance(value, int):
         return value
     return int(value[:-1]) * _DURATION_UNITS[value[-1]]
+
+
+def circular_layout(province_ids: Iterable[str],
+                    groups: Iterable[Iterable[str]] = ()) -> dict[str, tuple[float, float]]:
+    """Deterministic fallback layout in 0..100 for a map without `pos`: provinces of the starts (capital first,
+    start by start) on an outer circle, the rest (contested land) on an inner circle around the centre."""
+    ids = sorted(province_ids)
+    outer: list[str] = []
+    for group in groups:
+        outer += [p for p in group if p in ids and p not in outer]
+    inner = [p for p in ids if p not in outer]
+    if not outer:
+        outer, inner = inner, []
+    out: dict[str, tuple[float, float]] = {}
+    for ring, radius in ((outer, 40.0), (inner, 18.0)):
+        if len(ring) == 1 and radius < 40:
+            out[ring[0]] = (50.0, 50.0)
+            continue
+        for i, pid in enumerate(ring):
+            angle = -math.pi / 2 + 2 * math.pi * i / len(ring)
+            out[pid] = (round(50 + radius * math.cos(angle), 1), round(50 + radius * math.sin(angle), 1))
+    return out
 
 
 def _reachable(adj: Mapping[str, Iterable[str]], start: str, radius: int) -> set[str]:

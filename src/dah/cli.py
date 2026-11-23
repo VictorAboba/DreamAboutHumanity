@@ -127,6 +127,20 @@ def cmd_game_create(args: argparse.Namespace) -> int:
     print("Ключи мест — показываются ОДИН раз, храните как пароль:")
     for s in config["seats"]:
         print(f"  {s['seat']} {s['nick']} ({s.get('bot') or s['kind']}): {keys[s['seat']]}")
+    _print_spectator_key(gdir.issue_spectator_key(), args.server, game_id)
+    return 0
+
+
+def _print_spectator_key(key: str, server: str, game_id: str) -> None:
+    print(f"Ключ зрителя (карта с задержкой в 1 ход, после конца партии — всё): {key}")
+    print(f"Смотреть партию: {server.rstrip('/')}/watch/{game_id} — страница спросит ключ зрителя "
+          "(или DAH_WATCH_KEY / DAH_ADMIN_KEY для просмотра вживую). Адрес — тот, где запущен dah serve.")
+
+
+def cmd_game_spectator_key(args: argparse.Namespace) -> int:
+    """Issue (or reissue, revoking the old one) a game's spectator key; a running server picks it up at once."""
+    gdir = _game_dir(args)
+    _print_spectator_key(gdir.issue_spectator_key(), args.server, args.game_id)
     return 0
 
 
@@ -198,7 +212,14 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--declared", action="append", help='SEAT={"system":..,"model":..,"agents":..,"version":..}')
     create.add_argument("--packs", action="append", help="каталог пака (по умолчанию все паки репозитория)")
     create.add_argument("--games-dir", default=DEFAULT_GAMES_DIR)
+    create.add_argument("--server", default=DEFAULT_SERVER, help="адрес dah serve для ссылки /watch")
     create.set_defaults(func=cmd_game_create)
+
+    spec = game.add_parser("spectator-key", help="выдать новый ключ зрителя (старый перестаёт действовать)")
+    spec.add_argument("game_id")
+    spec.add_argument("--games-dir", default=DEFAULT_GAMES_DIR)
+    spec.add_argument("--server", default=DEFAULT_SERVER, help="адрес dah serve для ссылки /watch")
+    spec.set_defaults(func=cmd_game_spectator_key)
 
     serve = sub.add_parser("serve", help="HTTP-сервер партий")
     serve.add_argument("--games-dir", default=DEFAULT_GAMES_DIR)

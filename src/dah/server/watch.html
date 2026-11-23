@@ -1,0 +1,636 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Наблюдение за партией</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #f6f7f9; --panel: #ffffff; --fg: #1c2026; --muted: #5d6673; --line: #d9dde3; --edge: #9aa3ae;
+  --accent: #1f5fbf; --accent-fg: #ffffff; --chip: #eef1f5; --private: #fff6e0; --private-line: #e3b341;
+  --public: #eef5ff; --public-line: #6c9be0; --danger: #b42318; --ok: #1a7f37;
+  --neutral: #b4bac3; --neutral-line: #8a929d;
+  --s0: #2563eb; --s1: #d1342b; --s2: #15803d; --s3: #b45309; --s4: #7e3fc4; --s5: #0e7490; --s6: #c0266d; --s7: #4d7c0f;
+  --badge-bg: #ffffff; --badge-fg: #1c2026;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111418; --panel: #1a1e24; --fg: #e6e9ed; --muted: #a0a8b3; --line: #2e343c; --edge: #5b6470;
+    --accent: #6aa3ff; --accent-fg: #0b1220; --chip: #252b33; --private: #2e2614; --private-line: #b8892a;
+    --public: #16233a; --public-line: #4f7fc9; --danger: #ff8a80; --ok: #6fd38a;
+    --neutral: #59616c; --neutral-line: #7c8591;
+    --s0: #5b9bff; --s1: #ff6b61; --s2: #45c26f; --s3: #f0a43a; --s4: #b98cf5; --s5: #3cc6dc; --s6: #f774b1; --s7: #a6d84a;
+    --badge-bg: #0f1216; --badge-fg: #e6e9ed;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--fg); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+       overflow-x: hidden; }
+button, input { font: inherit; color: inherit; }
+button { background: var(--chip); border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; cursor: pointer; }
+button:hover { border-color: var(--edge); }
+button:focus-visible, [tabindex]:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+button.on { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+button:disabled { opacity: .5; cursor: default; }
+.wrap { max-width: 1400px; margin: 0 auto; padding: 12px 16px 32px; }
+header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 10px 0 12px; border-bottom: 1px solid var(--line); }
+header h1 { font-size: 18px; margin: 0; font-weight: 650; overflow-wrap: anywhere; }
+.stats { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.chip { background: var(--chip); border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; font-size: 13px; white-space: nowrap; }
+.badge { border-radius: 999px; padding: 2px 10px; font-size: 13px; font-weight: 600; border: 1px solid var(--accent); color: var(--accent); }
+.spacer { flex: 1 1 auto; }
+.result { margin: 10px 0 0; padding: 8px 12px; border-radius: 8px; background: var(--chip); border: 1px solid var(--line); }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 12px 0; }
+.controls input[type=range] { flex: 1 1 180px; min-width: 120px; accent-color: var(--accent); }
+.turnlabel { font-weight: 600; min-width: 11em; }
+.grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 900px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; min-width: 0; }
+.mapbox svg { width: 100%; height: auto; display: block; max-height: 72vh; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px; font-size: 13px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 12px; height: 12px; border-radius: 50%; display: inline-block; border: 1px solid var(--neutral-line); flex: none; }
+.details { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
+.details h3 { margin: 0 0 4px; font-size: 16px; }
+.details dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 12px; margin: 6px 0; }
+.details dt { color: var(--muted); }
+.details dd { margin: 0; overflow-wrap: anywhere; }
+.muted { color: var(--muted); }
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.tabs button[aria-selected=true] { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+ul.feed { list-style: none; padding: 0; margin: 0; }
+ul.feed li { padding: 6px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.tag { display: inline-block; font-size: 11px; padding: 0 6px; border-radius: 6px; background: var(--chip); border: 1px solid var(--line); margin-right: 6px; color: var(--muted); }
+.tag.battle { color: var(--danger); border-color: var(--danger); }
+.tag.captured { color: var(--accent); border-color: var(--accent); }
+.msg { border-left: 4px solid var(--public-line); background: var(--public); border-radius: 6px; padding: 6px 10px; margin: 0 0 8px; }
+.msg.private { border-left-color: var(--private-line); background: var(--private); }
+.msg .head { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+.msg .text { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 2px; }
+.tablebox { overflow-x: auto; max-width: 100%; }
+table { border-collapse: collapse; font-size: 13px; width: 100%; }
+th, td { border-bottom: 1px solid var(--line); padding: 4px 6px; text-align: right; white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; }
+th { color: var(--muted); font-weight: 600; }
+tr.cur td { background: var(--chip); }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; margin-bottom: 12px; }
+.card { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; min-width: 0; }
+.card .name { display: flex; gap: 6px; align-items: center; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card svg { width: 100%; height: 36px; display: block; }
+h4 { margin: 12px 0 6px; font-size: 14px; }
+.overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 10; }
+.overlay[hidden] { display: none; }
+.dialog { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px; width: 100%; max-width: 420px; }
+.dialog h2 { margin: 0 0 8px; font-size: 18px; }
+.dialog input { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); margin: 8px 0; }
+.error { color: var(--danger); min-height: 1.4em; }
+.prov { cursor: pointer; }
+.prov text { pointer-events: none; }
+.note { font-size: 13px; color: var(--muted); margin: 6px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1 id="title">Партия</h1>
+    <div class="stats">
+      <span class="chip" id="scenario">—</span>
+      <span class="chip" id="turnchip">Ход —</span>
+      <span class="chip" id="phasechip">—</span>
+      <span class="chip" id="countdown" hidden>—</span>
+      <span class="chip" id="readychip" hidden>—</span>
+      <span class="badge" id="level">—</span>
+    </div>
+    <span class="spacer"></span>
+    <button type="button" id="changekey">Сменить ключ</button>
+  </header>
+  <div class="result" id="result" hidden></div>
+  <div class="controls" role="group" aria-label="Повтор">
+    <button type="button" id="prev" aria-label="Предыдущий ход">◀</button>
+    <button type="button" id="play" aria-label="Проиграть">▶ Повтор</button>
+    <button type="button" id="next" aria-label="Следующий ход">▶</button>
+    <input type="range" id="slider" min="0" max="0" value="0" aria-label="Ход">
+    <span class="turnlabel" id="turnlabel">—</span>
+    <button type="button" id="live">Вживую</button>
+  </div>
+  <div class="grid">
+    <section class="panel mapbox" aria-label="Карта">
+      <svg id="map" viewBox="-8 -8 116 116" role="img" aria-label="Граф карты"></svg>
+      <div class="legend" id="legend"></div>
+      <div class="details" id="details"><span class="muted">Нажмите на провинцию, чтобы увидеть подробности.</span></div>
+    </section>
+    <section class="panel" aria-label="Журнал">
+      <div class="tabs" role="tablist">
+        <button type="button" role="tab" data-tab="feed" aria-selected="true">Лента</button>
+        <button type="button" role="tab" data-tab="mail" aria-selected="false">Переписка</button>
+        <button type="button" role="tab" data-tab="score" aria-selected="false">Счёт</button>
+        <button type="button" role="tab" data-tab="timings" aria-selected="false" hidden id="timingstab">Тайминги</button>
+      </div>
+      <div id="tab-feed" role="tabpanel"></div>
+      <div id="tab-mail" role="tabpanel" hidden></div>
+      <div id="tab-score" role="tabpanel" hidden></div>
+      <div id="tab-timings" role="tabpanel" hidden></div>
+    </section>
+  </div>
+</div>
+<div class="overlay" id="keydlg" hidden>
+  <form class="dialog" id="keyform" autocomplete="off">
+    <h2>Ключ наблюдателя</h2>
+    <div class="muted">Введите ключ зрителя (печатается при <code>dah game create</code>) или админ-ключ.
+      Ключ хранится только в этой вкладке и отправляется заголовком.</div>
+    <input type="password" id="keyinput" autocomplete="off" spellcheck="false" aria-label="Ключ" required>
+    <div class="error" id="keyerror" role="alert"></div>
+    <button type="submit" class="primary">Смотреть</button>
+  </form>
+</div>
+<script>
+(function () {
+  "use strict";
+  var SVGNS = "http://www.w3.org/2000/svg";
+  var PHASES = {negotiation_1: "Переговоры (П1)", actions: "Действия (Д)", negotiation_2: "Переговоры (П2)",
+                resolution: "Расчёт", game_over: "Партия окончена"};
+  var PHASE_SHORT = {negotiation_1: "П1", actions: "Д", negotiation_2: "П2"};
+  var KIND_TAGS = {battle: "бой", edge_battle: "бой", captured: "захват", eliminated: "выбыл", retreat: "отход",
+                   retreat_lost: "гибель", destroyed: "уничтожены", recruited: "найм", build_started: "стройка",
+                   build_done: "построено", fortify_broken: "укрепление", starvation: "голод",
+                   order_rejected: "приказ", economy: "экономика"};
+  var REASONS = {last_standing: "остался последним", turn_limit: "по лимиту ходов"};
+  var parts = location.pathname.split("/").filter(Boolean);
+  var gameId = decodeURIComponent(parts[parts.length - 1] || "");
+  var api = "/v1/spectate/" + encodeURIComponent(gameId);
+  var storeKey = "dah_watch_key:" + gameId;
+
+  var S = {key: null, meta: null, live: null, turn: 0, snap: null, snapText: "", follow: true, playing: null,
+           tab: "feed", selected: null, timings: null, timingsAt: 0, pollTimer: null, liveAt: 0};
+
+  function $(id) { return document.getElementById(id); }
+  function el(tag, attrs, children) {
+    var node = document.createElement(tag);
+    if (attrs) for (var k in attrs) {
+      if (k === "text") node.textContent = attrs[k];
+      else if (k === "cls") node.className = attrs[k];
+      else node.setAttribute(k, attrs[k]);
+    }
+    (children || []).forEach(function (c) { if (c != null) node.appendChild(typeof c === "string" ? document.createTextNode(c) : c); });
+    return node;
+  }
+  function sv(tag, attrs) {
+    var node = document.createElementNS(SVGNS, tag);
+    for (var k in attrs) node.setAttribute(k, attrs[k]);
+    return node;
+  }
+  function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+  function loadKey() { try { return sessionStorage.getItem(storeKey); } catch (e) { return null; } }
+  function saveKey(k) { try { if (k) sessionStorage.setItem(storeKey, k); else sessionStorage.removeItem(storeKey); } catch (e) {} }
+
+  function ApiError(status, code, message) { this.status = status; this.code = code; this.message = message; }
+  function get(path) {
+    return fetch(api + path, {headers: {"Authorization": "Bearer " + S.key}, cache: "no-store", credentials: "omit"})
+      .then(function (r) {
+        return r.json().catch(function () { return {ok: false, error: {code: "HTTP_" + r.status, message: "ошибка " + r.status}}; })
+          .then(function (data) {
+            if (!data.ok) throw new ApiError(r.status, data.error && data.error.code, data.error && data.error.message);
+            return data;
+          });
+      });
+  }
+
+  // ---------------------------------------------------------------- seats and names
+  function seatIndex(seat) {
+    if (!S.meta) return -1;
+    for (var i = 0; i < S.meta.seats.length; i++) if (S.meta.seats[i].seat === seat) return i;
+    return -1;
+  }
+  function seatColor(seat) {
+    var i = seatIndex(seat);
+    return i < 0 ? "var(--neutral)" : "var(--s" + (i % 8) + ")";
+  }
+  function nick(seat) {
+    if (!seat) return "нейтральная";
+    var i = seatIndex(seat);
+    return i < 0 ? seat : S.meta.seats[i].nick;
+  }
+  function province(id) {
+    var ps = S.meta.map.provinces;
+    for (var i = 0; i < ps.length; i++) if (ps[i].id === id) return ps[i];
+    return null;
+  }
+  function snapProvince(id) {
+    if (!S.snap) return null;
+    for (var i = 0; i < S.snap.provinces.length; i++) if (S.snap.provinces[i].id === id) return S.snap.provinces[i];
+    return null;
+  }
+  function nameOf(table, id) { return (S.snap && S.snap[table] && S.snap[table][id]) || String(id).split(":").pop(); }
+  function unitsText(units) {
+    var out = [];
+    for (var u in units || {}) if (units[u]) out.push(nameOf("unit_names", u) + " ×" + units[u]);
+    return out.join(", ") || "нет";
+  }
+  function fmtSecs(v) { return v == null ? "—" : (v < 100 ? v.toFixed(1) : Math.round(v)) + " с"; }
+  function fmtLeft(s) {
+    if (s == null) return "—";
+    var m = Math.floor(s / 60), r = s % 60;
+    return (m > 0 ? m + " мин " : "") + r + " с";
+  }
+
+  // ---------------------------------------------------------------- header
+  function renderHeader() {
+    var m = S.meta, l = S.live;
+    $("title").textContent = "Партия " + m.game_id;
+    document.title = "Наблюдение: " + m.game_id;
+    $("scenario").textContent = m.scenario.name + " · " + m.map.name;
+    if (!l) return;
+    $("turnchip").textContent = "Ход " + l.turn + "/" + l.turn_limit;
+    $("phasechip").textContent = PHASES[l.phase] || l.phase;
+    $("level").textContent = l.level_label;
+    var running = !l.game_over;
+    $("countdown").hidden = !running || l.seconds_left == null;
+    $("readychip").hidden = !running;
+    $("readychip").textContent = "готово " + l.ready;
+    tickCountdown();
+    var res = $("result");
+    if (l.game_over && l.result) {
+      var winners = (l.result.winners || []).map(nick).join(", ") || "никто";
+      res.textContent = "Партия окончена: " + (REASONS[l.result.reason] || l.result.reason || "") + ". Победители: " + winners + ".";
+      res.hidden = false;
+    } else res.hidden = true;
+    $("timingstab").hidden = !l.timings_allowed;
+    if (!l.timings_allowed && S.tab === "timings") selectTab("feed");
+  }
+  function tickCountdown() {
+    var l = S.live;
+    if (!l || l.game_over || l.seconds_left == null) return;
+    var left = Math.max(0, Math.round(l.seconds_left - (Date.now() - S.liveAt) / 1000));
+    $("countdown").textContent = "осталось " + fmtLeft(left);
+  }
+
+  // ---------------------------------------------------------------- controls
+  function maxTurn() { return S.live ? S.live.last_viewable : 0; }
+  function renderControls() {
+    var max = maxTurn(), sl = $("slider");
+    sl.max = String(max);
+    sl.value = String(S.turn);
+    $("prev").disabled = S.turn <= 0;
+    $("next").disabled = S.turn >= max;
+    $("live").classList.toggle("on", S.follow);
+    $("play").textContent = S.playing ? "❚❚ Пауза" : "▶ Повтор";
+    var label;
+    if (S.turn === 0) label = "Начало партии";
+    else if (S.snap && S.snap.turn === S.turn && S.snap.in_progress) label = "Ход " + S.turn + " — идёт";
+    else label = "Ход " + S.turn + " — после расчёта";
+    $("turnlabel").textContent = label + " (из " + max + ")";
+  }
+  // Stepping onto the last viewable turn (▶, the slider or the end of a replay) resumes following new turns;
+  // stepping back stops it.
+  function goTo(turn, keepFollow) {
+    turn = Math.max(0, Math.min(maxTurn(), turn));
+    if (!keepFollow) S.follow = turn === maxTurn();
+    S.turn = turn;
+    renderControls();
+    return loadTurn();
+  }
+  function stopPlay() { if (S.playing) { clearInterval(S.playing); S.playing = null; renderControls(); } }
+
+  // ---------------------------------------------------------------- map
+  function renderMap() {
+    var svg = $("map"), m = S.meta;
+    var active = document.activeElement;
+    var focusedId = active && svg.contains(active) && active.getAttribute ? active.getAttribute("data-id") : null;
+    clear(svg);
+    var edges = sv("g", {});
+    m.map.edges.forEach(function (e) {
+      var a = province(e[0]), b = province(e[1]);
+      edges.appendChild(sv("line", {x1: a.pos[0], y1: a.pos[1], x2: b.pos[0], y2: b.pos[1], stroke: "var(--edge)",
+                                    "stroke-width": "0.5", "stroke-linecap": "round"}));
+    });
+    svg.appendChild(edges);
+    m.map.provinces.forEach(function (p) {
+      var sp = snapProvince(p.id) || {};
+      var owner = sp.owner || null;
+      var g = sv("g", {"class": "prov", tabindex: "0", role: "button", "data-id": p.id});
+      g.setAttribute("aria-label", p.id + " " + p.name + ", " + nick(owner));
+      var x = p.pos[0], y = p.pos[1];
+      if (p.capital) g.appendChild(sv("circle", {cx: x, cy: y, r: 6.2, fill: "none", stroke: "var(--fg)", "stroke-width": "0.5",
+                                                   "stroke-dasharray": "1.2 0.8"}));
+      var selected = S.selected === p.id;
+      g.appendChild(sv("circle", {cx: x, cy: y, r: 4.6, fill: owner ? seatColor(owner) : "var(--neutral)",
+                                  stroke: selected ? "var(--fg)" : "var(--panel)", "stroke-width": selected ? "1.1" : "0.6"}));
+      if (sp.fortified) g.appendChild(sv("circle", {cx: x, cy: y, r: 3.4, fill: "none", stroke: "var(--panel)", "stroke-width": "0.5"}));
+      var t = sv("text", {x: x, y: y + 1.1, "text-anchor": "middle", "font-size": "3", "font-weight": "700", fill: "#fff",
+                          stroke: "rgba(0,0,0,.55)", "stroke-width": "0.5", "paint-order": "stroke"});
+      t.textContent = p.id;
+      g.appendChild(t);
+      var n = sv("text", {x: x, y: y + 8.2, "text-anchor": "middle", "font-size": "2.6", fill: "var(--fg)",
+                          stroke: "var(--panel)", "stroke-width": "0.8", "stroke-linejoin": "round", "paint-order": "stroke"});
+      n.textContent = (p.capital ? "★ " : "") + p.short;
+      g.appendChild(n);
+      if (sp.unit_total != null && sp.unit_total > 0) {
+        var bx = x + 3.4, by = y - 6.4, w = String(sp.unit_total).length * 1.8 + 2.4;
+        g.appendChild(sv("rect", {x: bx, y: by, width: w, height: 3.8, rx: 1.4, fill: "var(--badge-bg)", stroke: "var(--fg)", "stroke-width": "0.3"}));
+        var c = sv("text", {x: bx + w / 2, y: by + 2.85, "text-anchor": "middle", "font-size": "2.7", "font-weight": "700", fill: "var(--badge-fg)"});
+        c.textContent = String(sp.unit_total);
+        g.appendChild(c);
+      }
+      var pick = function () { S.selected = p.id; renderMap(); renderDetails(); };
+      g.addEventListener("click", pick);
+      g.addEventListener("keydown", function (ev) { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); pick(); } });
+      svg.appendChild(g);
+      if (p.id === focusedId) g.focus();
+    });
+    renderLegend();
+  }
+  function renderLegend() {
+    var lg = $("legend");
+    clear(lg);
+    var players = {};
+    (S.snap ? S.snap.players : []).forEach(function (p) { players[p.seat] = p; });
+    S.meta.seats.forEach(function (s) {
+      var p = players[s.seat];
+      var label = s.nick + (p ? " — " + p.score + " оч." + (p.alive ? "" : ", выбыл") : "");
+      var sw = el("span", {cls: "sw"});
+      sw.style.background = seatColor(s.seat);
+      lg.appendChild(el("span", s.kind ? {title: s.kind + (s.bot ? " " + s.bot : "")} : {}, [sw, label]));
+    });
+    var nsw = el("span", {cls: "sw"});
+    nsw.style.background = "var(--neutral)";
+    lg.appendChild(el("span", {}, [nsw, "нейтральные / заброшенные"]));
+  }
+  function renderDetails() {
+    var box = $("details");
+    clear(box);
+    if (!S.selected) { box.appendChild(el("span", {cls: "muted", text: "Нажмите на провинцию, чтобы увидеть подробности."})); return; }
+    var p = province(S.selected), sp = snapProvince(S.selected) || {};
+    box.appendChild(el("h3", {text: p.id + " " + p.name}));
+    var dl = el("dl");
+    function row(k, v) { dl.appendChild(el("dt", {text: k})); dl.appendChild(el("dd", {text: v})); }
+    row("Тип", p.type_name + (p.capital ? " (столица)" : ""));
+    row("Владелец", nick(sp.owner));
+    row("Соседи", p.neighbors.join(", "));
+    if (S.snap && S.snap.full) {
+      row("Войска", unitsText(sp.units) + (sp.fortified ? " (укреплена)" : ""));
+      row("Здания", (sp.buildings || []).map(function (b) { return nameOf("building_names", b); }).join(", ") || "нет");
+      if (sp.building_now && sp.building_now.length) row("Строится", sp.building_now.map(function (b) {
+        return nameOf("building_names", b.building) + " (" + b.turns_left + ")"; }).join(", "));
+    } else row("Войска", "скрыты до конца партии");
+    box.appendChild(dl);
+    var evs = (S.snap ? S.snap.events : []).filter(function (e) {
+      return e.province === p.id || (e.edge && e.edge.indexOf(p.id) >= 0) || e.from === p.id; });
+    if (evs.length) {
+      box.appendChild(el("h4", {text: "События хода здесь"}));
+      var ul = el("ul", {cls: "feed"});
+      evs.forEach(function (e) { ul.appendChild(eventItem(e)); });
+      box.appendChild(ul);
+    }
+  }
+
+  // ---------------------------------------------------------------- tabs
+  function selectTab(name) {
+    S.tab = name;
+    Array.prototype.forEach.call(document.querySelectorAll("[data-tab]"), function (b) {
+      b.setAttribute("aria-selected", String(b.getAttribute("data-tab") === name)); });
+    ["feed", "mail", "score", "timings"].forEach(function (t) { $("tab-" + t).hidden = t !== name; });
+    if (name === "timings") loadTimings(false);
+  }
+  function eventItem(e) {
+    var tag = el("span", {cls: "tag " + (e.kind === "edge_battle" ? "battle" : e.kind), text: KIND_TAGS[e.kind] || e.kind});
+    return el("li", {}, [tag, e.text || e.kind]);
+  }
+  function orderText(o) {
+    var hasty = o.phase_added === "negotiation_2" ? " (П2" + (o.kind === "move" ? ", наспех" : "") + ")" : "";
+    if (o.kind === "move") return "движение " + o.from + " → " + o.to + ": " + unitsText(o.units) + hasty;
+    if (o.kind === "recruit") return "найм в " + o.province + ": " + nameOf("unit_names", o.unit) + " ×" + o.count + hasty;
+    if (o.kind === "build") return "стройка в " + o.province + ": " + nameOf("building_names", o.building) + hasty;
+    if (o.kind === "fortify") return "укрепить " + o.province + hasty;
+    return o.kind;
+  }
+  function renderFeed() {
+    var box = $("tab-feed"), s = S.snap;
+    clear(box);
+    if (!s) return;
+    if (s.turn === 0) box.appendChild(el("p", {cls: "note", text: "Стартовая карта. События появятся после расчёта первого хода."}));
+    else if (s.in_progress) box.appendChild(el("p", {cls: "note", text: "Ход идёт: события появятся после расчёта."}));
+    if (!s.full && s.turn > 0) box.appendChild(el("p", {cls: "note", text: "Зрителю видны только публичные события: смены владельцев и выбывания. Бои, войска и приказы откроются после конца партии."}));
+    if (s.events.length) {
+      var ul = el("ul", {cls: "feed"});
+      s.events.forEach(function (e) { ul.appendChild(eventItem(e)); });
+      box.appendChild(ul);
+    } else if (s.turn > 0 && !s.in_progress) box.appendChild(el("p", {cls: "muted", text: "Публичных событий нет."}));
+    if (s.full && s.players.some(function (p) { return p.resources; })) {
+      box.appendChild(el("h4", {text: s.in_progress ? "Казна сейчас" : "Казна после хода"}));
+      var tb = el("table");
+      var resIds = Object.keys(s.resource_names || {});
+      tb.appendChild(el("tr", {}, [el("th", {text: "Игрок"})].concat(resIds.map(function (r) { return el("th", {text: s.resource_names[r]}); }))
+        .concat([el("th", {text: "Войска"}), el("th", {text: "Провинции"})])));
+      s.players.forEach(function (p) {
+        tb.appendChild(el("tr", {}, [el("td", {text: p.nick})].concat(resIds.map(function (r) { return el("td", {text: String((p.resources || {})[r] || 0)}); }))
+          .concat([el("td", {text: String(p.units)}), el("td", {text: String(p.provinces)})])));
+      });
+      box.appendChild(el("div", {cls: "tablebox"}, [tb]));
+    }
+    if (s.orders) {
+      box.appendChild(el("h4", {text: "Приказы хода"}));
+      var any = false;
+      Object.keys(s.orders).sort().forEach(function (seat) {
+        var list = s.orders[seat] || [];
+        any = true;
+        box.appendChild(el("div", {cls: "muted", text: nick(seat) + (list.length ? "" : ": приказов нет (автопилот)")}));
+        if (list.length) {
+          var ul = el("ul", {cls: "feed"});
+          list.forEach(function (o) { ul.appendChild(el("li", {text: o.id + " " + orderText(o)})); });
+          box.appendChild(ul);
+        }
+      });
+      if (!any) box.appendChild(el("p", {cls: "muted", text: "Приказов нет."}));
+    }
+  }
+  function renderMail() {
+    var box = $("tab-mail"), s = S.snap;
+    clear(box);
+    if (!s) return;
+    if (!s.full) box.appendChild(el("p", {cls: "note", text: "Зрителю видны только публичные сообщения; личные откроются после конца партии."}));
+    if (!s.messages.length) { box.appendChild(el("p", {cls: "muted", text: s.turn === 0 ? "До первого хода переписки нет." : "Сообщений в этом ходу нет."})); return; }
+    s.messages.forEach(function (m) {
+      var to = m.public ? "всем" : (m.to_nicks || []).join(", ") + " (лично)";
+      var head = el("div", {cls: "head"});
+      var sw = el("span", {cls: "sw"});
+      sw.style.background = seatColor(m.from);
+      sw.style.marginRight = "6px";
+      head.appendChild(sw);
+      head.appendChild(document.createTextNode(m.from_nick + " → " + to + " · " + (PHASE_SHORT[m.phase] || m.phase)));
+      box.appendChild(el("div", {cls: "msg" + (m.public ? "" : " private")}, [head, el("div", {cls: "text", text: m.text})]));
+    });
+  }
+  function sparkline(values, color, maxV) {
+    var w = 120, h = 36, svg = sv("svg", {viewBox: "0 0 " + w + " " + h, preserveAspectRatio: "none", "aria-hidden": "true"});
+    if (!values.length) return svg;
+    var n = Math.max(1, values.length - 1), top = Math.max(1, maxV);
+    var pts = values.map(function (v, i) { return (i / n * (w - 4) + 2).toFixed(1) + "," + (h - 3 - v / top * (h - 6)).toFixed(1); });
+    svg.appendChild(sv("polyline", {points: pts.join(" "), fill: "none", stroke: color, "stroke-width": "2", "stroke-linejoin": "round",
+                                    "vector-effect": "non-scaling-stroke"}));
+    var last = pts[pts.length - 1].split(",");
+    svg.appendChild(sv("circle", {cx: last[0], cy: last[1], r: 2.5, fill: color}));
+    return svg;
+  }
+  function renderScore() {
+    var box = $("tab-score"), l = S.live;
+    clear(box);
+    if (!l) return;
+    var hist = l.scores_history || [], seats = S.meta.seats;
+    var maxV = 1;
+    hist.forEach(function (h) { for (var k in h.scores) maxV = Math.max(maxV, h.scores[k]); });
+    var cards = el("div", {cls: "cards"});
+    seats.forEach(function (s) {
+      var vals = hist.map(function (h) { return h.scores[s.seat] || 0; });
+      var sw = el("span", {cls: "sw"});
+      sw.style.background = seatColor(s.seat);
+      var cur = vals.length ? vals[vals.length - 1] : 0;
+      cards.appendChild(el("div", {cls: "card"}, [el("div", {cls: "name", title: s.nick}, [sw, s.nick + " · " + cur]),
+                                                  sparkline(vals, seatColor(s.seat), maxV)]));
+    });
+    box.appendChild(cards);
+    var tb = el("table");
+    tb.appendChild(el("tr", {}, [el("th", {text: "Ход"})].concat(seats.map(function (s) { return el("th", {text: s.nick}); }))));
+    hist.forEach(function (h) {
+      var tr = el("tr", {cls: h.turn === S.turn ? "cur" : ""}, [el("td", {text: h.turn === 0 ? "старт" : String(h.turn)})]
+        .concat(seats.map(function (s) { return el("td", {text: String(h.scores[s.seat] != null ? h.scores[s.seat] : "—")}); })));
+      tb.appendChild(tr);
+    });
+    box.appendChild(el("div", {cls: "tablebox"}, [tb]));
+    box.appendChild(el("p", {cls: "note", text: "Очки: 1 за провинцию, +3 за каждую столицу."}));
+  }
+  function renderTimings() {
+    var box = $("tab-timings"), t = S.timings;
+    clear(box);
+    if (!t) { box.appendChild(el("p", {cls: "muted", text: "Загрузка…"})); return; }
+    var seats = S.meta.seats;
+    var phases = t.phases.filter(function (p) { return S.turn === 0 || p.turn === S.turn; });
+    box.appendChild(el("p", {cls: "note", text: S.turn === 0 ? "Все фазы партии." : "Фазы хода " + S.turn + ". Время от открытия фазы."}));
+    phases.forEach(function (ph) {
+      box.appendChild(el("h4", {text: "Ход " + ph.turn + " · " + (PHASES[ph.phase] || ph.phase) + " · " +
+        (ph.closed === "all_ready" ? "все готовы" : ph.closed === "deadline" ? "по таймеру" : "идёт") +
+        (ph.duration_s != null ? ", " + fmtSecs(ph.duration_s) : "")}));
+      var tb = el("table");
+      tb.appendChild(el("tr", {}, ["Игрок", "до первого вызова", "до подачи", "до ready", "вызовы", "симв. запрос/ответ"].map(function (h) { return el("th", {text: h}); })));
+      seats.forEach(function (s) {
+        var v = ph.seats[s.seat];
+        tb.appendChild(el("tr", {}, [el("td", {text: s.nick})].concat(v ? [fmtSecs(v.first_call_s), fmtSecs(v.first_submit_s), fmtSecs(v.ready_s),
+          String(v.calls), v.req_chars + " / " + v.resp_chars] : ["—", "—", "—", "0", "—"]).map(function (x, i) { return i === 0 ? x : el("td", {text: x}); })));
+      });
+      box.appendChild(el("div", {cls: "tablebox"}, [tb]));
+    });
+    box.appendChild(el("h4", {text: "Итого за партию"}));
+    var tt = el("table");
+    tt.appendChild(el("tr", {}, ["Игрок", "вызовы", "симв. запрос/ответ", "служебные (waker)", "симв. служебные", "подачи", "правки", "отклонено", "деньги"].map(function (h) { return el("th", {text: h}); })));
+    seats.forEach(function (s) {
+      var v = t.totals[s.seat];
+      if (!v) return;
+      tt.appendChild(el("tr", {}, [s.nick, String(v.calls), v.req_chars + " / " + v.resp_chars, String(v.host_calls),
+        v.host_req_chars + " / " + v.host_resp_chars, String(v.submits), String(v.edits),
+        String(v.validate_rejected + v.submit_rejected), v.spent_usd == null ? "—" : "$" + v.spent_usd.toFixed(2)]
+        .map(function (x) { return el("td", {text: x}); })));
+    });
+    box.appendChild(el("div", {cls: "tablebox"}, [tt]));
+  }
+  function renderAll() {
+    renderHeader(); renderControls(); renderMap(); renderDetails(); renderFeed(); renderMail(); renderScore();
+    if (S.tab === "timings") renderTimings();
+  }
+
+  // ---------------------------------------------------------------- loading
+  function handleError(err) {
+    if (err && err.status === 401) { saveKey(null); S.key = null; askKey("Ключ не подошёл к этой партии."); return; }
+    console.warn(err);
+  }
+  function loadTurn() {
+    var want = S.turn;
+    return get("/turn/" + want).then(function (snap) {
+      if (want !== S.turn) return;
+      var text = JSON.stringify(snap);
+      if (text === S.snapText) return;
+      S.snap = snap; S.snapText = text;
+      renderAll();
+    }).catch(handleError);
+  }
+  function loadTimings(force) {
+    if (!S.live || !S.live.timings_allowed) return;
+    if (!force && S.timings && Date.now() - S.timingsAt < 10000) { renderTimings(); return; }
+    renderTimings();
+    get("/timings").then(function (t) { S.timings = t; S.timingsAt = Date.now(); if (S.tab === "timings") renderTimings(); }).catch(handleError);
+  }
+  function poll() {
+    if (!S.key) return Promise.resolve();
+    return get("/live").then(function (l) {
+      var prev = S.live;
+      S.live = l; S.liveAt = Date.now();
+      if (S.follow && !S.playing) S.turn = l.last_viewable;
+      if (S.turn > l.last_viewable) S.turn = l.last_viewable;
+      renderHeader(); renderControls(); renderScore();
+      var changed = !prev || prev.phase_seq !== l.phase_seq || prev.last_viewable !== l.last_viewable;
+      var liveTurn = S.snap && S.snap.in_progress && S.snap.turn === S.turn;
+      if (!S.snap || S.snap.turn !== S.turn || changed || liveTurn) loadTurn();
+      if (S.tab === "timings" && (changed || Date.now() - S.timingsAt > 10000)) loadTimings(true);
+      if (l.game_over && S.pollTimer) { clearInterval(S.pollTimer); S.pollTimer = null; }
+    }).catch(handleError);
+  }
+  function start() {
+    get("/meta").then(function (m) {
+      S.meta = m;
+      $("keydlg").hidden = true;
+      return poll();
+    }).then(function () {
+      if (S.key && $("keydlg").hidden && S.live && !S.live.game_over && !S.pollTimer) S.pollTimer = setInterval(poll, 2000);
+    }).catch(function (err) {
+      if (err && err.status === 401) { saveKey(null); S.key = null; askKey("Ключ не подошёл к этой партии."); }
+      else if (err && err.status === 404) askKey("Партия не найдена.");
+      else askKey("Не удалось загрузить партию: " + ((err && err.message) || "нет связи с сервером"));
+    });
+  }
+  function askKey(message) {
+    if (S.pollTimer) { clearInterval(S.pollTimer); S.pollTimer = null; }
+    $("keyerror").textContent = message || "";
+    if (!$("keydlg").hidden) { $("keyinput").focus(); return; }  // already open: keep what the user is typing
+    $("keydlg").hidden = false;
+    $("keyinput").value = "";
+    $("keyinput").focus();
+  }
+
+  // ---------------------------------------------------------------- events
+  $("keyform").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var k = $("keyinput").value.trim();
+    if (!k) return;
+    S.key = k; saveKey(k);
+    $("keyinput").value = "";
+    start();
+  });
+  $("changekey").addEventListener("click", function () { saveKey(null); S.key = null; askKey(""); });
+  $("prev").addEventListener("click", function () { stopPlay(); S.follow = false; goTo(S.turn - 1, true); });
+  $("next").addEventListener("click", function () { stopPlay(); goTo(S.turn + 1); });
+  $("slider").addEventListener("input", function () { stopPlay(); goTo(parseInt(this.value, 10) || 0); });
+  $("live").addEventListener("click", function () { stopPlay(); S.follow = true; goTo(maxTurn(), true); });
+  $("play").addEventListener("click", function () {
+    if (S.playing) { stopPlay(); return; }
+    S.follow = false;
+    if (S.turn >= maxTurn()) S.turn = 0;
+    goTo(S.turn, true);
+    S.playing = setInterval(function () {
+      if (S.turn >= maxTurn()) { stopPlay(); S.follow = true; renderControls(); return; }
+      goTo(S.turn + 1, true);
+    }, 1500);
+    renderControls();
+  });
+  Array.prototype.forEach.call(document.querySelectorAll("[data-tab]"), function (b) {
+    b.addEventListener("click", function () { selectTab(b.getAttribute("data-tab")); });
+  });
+  setInterval(tickCountdown, 1000);
+
+  S.key = loadKey();
+  if (S.key) start(); else askKey("");
+})();
+</script>
+</body>
+</html>
