@@ -323,15 +323,17 @@ def _research_order(ruleset: Ruleset, data: Mapping[str, Any], order_id: str, ad
 
 def order_cost(ruleset: Ruleset, faction: StatKey, order: Order, state: GameState | None = None) -> Counter[str]:
     """Resources an order holds. `faction` is the seat's stat key (techs.stat_key; a faction id is the slice's
-    case); with `state`, a recruit gets its province's `province.recruit_discount` (rounded in the seat's favour)."""
+    case); with `state`, a recruit gets its province's `province.recruit_discount`, applied per unit and rounded
+    in the seat's favour (the unit price is rounded down), so one order of N costs the same as N orders of one."""
     if order.kind == "recruit":
         assert order.unit is not None and order.count is not None
-        cost = {r: n * order.count for r, n in ruleset.unit_cost(order.unit, faction).items()}
+        unit = ruleset.unit_cost(order.unit, faction)
         if state is not None and order.province in state.provinces:
             discount = province_stat(state, ruleset, order.province, "province.recruit_discount")
             if discount > 0:
-                cost = {r: n - math.floor(n * discount) for r, n in cost.items()}
-        return Counter({r: n for r, n in cost.items() if n})
+                # Per unit, the discount is rounded up (the price down), so batching never changes the price.
+                unit = {r: n - math.ceil(n * discount - 1e-9) for r, n in unit.items()}
+        return Counter({r: n * order.count for r, n in unit.items() if n * order.count > 0})
     if order.kind == "build":
         assert order.building is not None
         return Counter(ruleset.building_cost(order.building, faction))
@@ -547,13 +549,17 @@ def _edit_phase_problem(state: GameState, seat: str, phase: str) -> tuple[str, s
 
 def cancel_order(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders, order_id: str,
                  phase: str) -> EditResult:
-    """Free outside P2; in P2 costs 1 CP and only ``p2.cancel_refund`` of the reserve comes back."""
+    """Free outside P2; in P2 costs 1 CP and only ``p2.cancel_refund`` of the reserve comes back. A research order
+    cannot be cancelled in P2 (PHASE_LOCKED): the research choice is made only in Д."""
     problem = _edit_phase_problem(state, seat, phase)
     if problem:
         return EditResult(False, book, *problem)
     order = book.find(order_id)
     if order is None:
         return EditResult(False, book, UNKNOWN_ID, f"нет приказа {order_id!r}")
+    if phase == P2 and order.kind == "research":
+        # The research choice is fixed after Д: cancelling it in П2 would switch back to the previous tech.
+        return EditResult(False, book, PHASE_LOCKED, "исследование выбирают только в фазе Д")
     rest = [o for o in book.orders if o.id != order_id]
     if phase != P2:
         return EditResult(True, replace(book, orders=rest))

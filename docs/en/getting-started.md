@@ -127,10 +127,17 @@ Creates `games/<id>/` and prints the seat keys once.
 | `--dt-session SEAT=ID` | DreamTeam session id of a seat, recorded in the config and journal (later: `dah game set-session`, or the waker records it itself) |
 | `--declared SEAT=JSON` | what the seat declares about itself: system, model, number of agents, version |
 | `--packs DIR` | pack folder, repeat for each pack; with it only the listed packs load (include `core`) |
+| `--artifacts draft\|points\|none` | artifact mode of the setup phase; default from the scenario. `draft` or `points` turns the setup phase on even for a scenario without one; `none` keeps the faction choice only |
+| `--artifact-offer N` | draft: artifacts offered to each seat (1..10; default from the scenario, 3 in `core`) |
+| `--artifact-points N` | points: each seat's budget (0..50; default from the scenario, 3 in `core`) |
+| `--setup-limit T` | length of the setup phase, e.g. `5m`; default from the scenario, else 5m |
 | `--games-dir DIR` | where to create the match (default `games`) |
 
 - `KIND` is `swarm`, `agent`, `human`, or a bot: `bot-passive`, `bot-builder`, `bot-rush`, `bot-diplomat`.
 - `--declared` example: `--declared 'B={"system":"...","model":"...","agents":1,"version":"..."}'`.
+
+`core:slice3`, `core:slice2` and `core:quad4` open with a setup phase (factions and an artifact draft) before turn
+1; `core:blitz_test` has none. See [Game rules](rules.md#the-setup-phase).
 
 Seat ids are letters and digits, up to 16 characters. Seat ids and nicks must be unique within a match. The
 number of seats is from 1 to the map's number of starts; unused starts stay neutral and empty.
@@ -178,11 +185,17 @@ wakes sent, answered and unanswered within `--ack-seconds`, the median seconds t
 `gifts_sent`, `gifts_received`, `gifted_resources`, `received_resources`, ...). Diplomacy per seat is in the text too
 («пакты: заключено / соблюдено / нарушено; подношения: отдано / получено»), for seats that had any.
 
-### `dah replay ID`
+### `dah replay ID [--packs DIR[,DIR...]]`
 
-Rebuilds the ruleset, re-runs every resolved turn from the initial state and the saved orders, and compares the
-ruleset hash, each turn's `state_hash` and the final result with the journal. Prints `OK` or the mismatch per turn.
-The exit code is 1 on any mismatch, for example when pack content changed after the match.
+Rebuilds the ruleset, re-runs every resolved turn from the initial state (for a match with a setup phase, turn 1 as
+the `setup_closed` event recorded it) and the saved orders, and compares the ruleset hash, each turn's `state_hash`
+and the final result with the journal. Prints `OK` or the mismatch per turn.
+
+Which packs: `--packs` if given (comma-separated or repeated); otherwise the match config's packs when their hash
+matches the journal; otherwise, for a match on the default packs, a frozen earlier version from `content/legacy`
+(now `core-0.2.0`) whose hash matches, so a match played before a content update still replays. The command says
+which version it took. The exit code is 1 on any mismatch, for example when the packs changed after the match and
+no frozen version matches.
 
 ### `dah goal-text ID SEAT`
 

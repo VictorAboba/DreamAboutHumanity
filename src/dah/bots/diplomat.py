@@ -65,13 +65,14 @@ class DiplomatBot(Bot):
         self.garrison = self.rng.choice(GARRISONS)
         self.build_until = self.rng.choice(BUILD_UNTILS)
 
-    def diplomacy(self, view: StateView, api: DiplomacyApi) -> None:
-        open_with: set[str] = set()
+    def answer_pacts(self, view: StateView, api: DiplomacyApi) -> None:
         for prop in view.pact_proposals:
-            mine_to = str(prop.get("to")) in view.me
-            open_with.add(str(prop.get("from") if mine_to else prop.get("to")))
-            if mine_to:
+            if str(prop.get("to")) in view.me:
                 api.respond_pact(str(prop["id"]), "accept")
+
+    def diplomacy(self, view: StateView, api: DiplomacyApi) -> None:
+        open_with = {str(p.get("from") if str(p.get("to")) in view.me else p.get("to")) for p in view.pact_proposals}
+        self.answer_pacts(view, api)
         alloy = view.resource(BUILD_RESOURCE)
         for other in neighbours(view):
             if view.is_partner(other) or other in open_with or self.proposed.get(other, 0) >= MAX_PROPOSALS:

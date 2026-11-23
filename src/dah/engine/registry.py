@@ -18,6 +18,14 @@ OPTIONAL_ROLES: tuple[str, ...] = ("research",)              # at most one resou
 ORDER_KINDS: tuple[str, ...] = ("move", "recruit", "build", "fortify", "research")
 
 DEFAULT_UNIT_MOVE = 2      # edges a unit may go through its owner's own land (onto foreign land: always one edge)
+# A ruleset without stage-2 content (no techs, branches or artifacts: the slice, core 0.2.0) keeps the slice's one
+# edge per move; the rule follows from hashed content, so such a pack still hashes as before (TECH_AND_SETUP.md 5).
+SLICE_UNIT_MOVE = 1
+MOVE_STAT = "unit.*.move"
+
+
+def default_unit_move(stage2: bool) -> int:
+    return DEFAULT_UNIT_MOVE if stage2 else SLICE_UNIT_MOVE
 
 # Unit abilities (TECH_AND_SETUP.md 1.2). Each is a flag stat `unit.<id>.ability.<name>.on` (0/1) plus parameter
 # stats `unit.<id>.ability.<name>.<param>`, so packs, techs and artifacts can grant or tune them with `modify`.
@@ -62,7 +70,7 @@ STATS: tuple[StatSpec, ...] = (
     StatSpec("combat.counter_mul", float, 1.0, 3.0, 1.5),
     StatSpec("starvation.loss_frac", float, 0.0, 1.0, 0.10),
     # stage 2 (TECH_AND_SETUP.md): movement, abilities, techs, province characteristics
-    StatSpec("unit.*.move", int, 1, 5, DEFAULT_UNIT_MOVE),
+    StatSpec(MOVE_STAT, int, 1, 5, DEFAULT_UNIT_MOVE),   # default: default_unit_move()
     StatSpec("tech.*.cost", int, 0, 1000),
     StatSpec("tech.branch.*.cost_mul", float, 0.1, 5.0, 1.0),
     StatSpec("province.defense_mul", float, 0.1, 5.0, 1.0, seeded=False),

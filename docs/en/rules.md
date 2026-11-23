@@ -2,10 +2,13 @@
 
 **English** · [Русский](../ru/rules.md) · [All docs](README.md)
 
-These are the rules of the vertical slice as the engine implements them. The exact contracts are in the
-[slice specification](../SLICE.md) (in Russian); the [full concept](../CONCEPT.md) (in Russian) describes the game
-the slice grows towards. Numbers below are the defaults of the `core` pack; a scenario or a pack can change them
-([Content packs](modding.md)).
+These are the rules as the engine implements them: the vertical slice plus stage 2 (techs, the setup phase,
+factions and artifacts). The exact contracts are in the [slice specification](../SLICE.md) and the
+[stage-2 specification](../TECH_AND_SETUP.md) (both in Russian); the [full concept](../CONCEPT.md) (in Russian)
+describes the game the slice grows towards. Numbers below are the defaults of the `core` pack, version 0.3.0; a
+scenario or a pack can change them ([Content packs](modding.md)). The tables of units, buildings, techs, factions and
+artifacts are a snapshot: the match's own numbers are always in `rules(topic)` and `describe(id)` (see the end of
+this page).
 
 Players see Russian texts and Russian phase names. This guide uses English names and gives the Russian ones once:
 
@@ -18,15 +21,18 @@ Players see Russian texts and Russian phase names. This guide uses English names
 | resolution | расчёт | `resolution` |
 | command points, CP | очки командования, ОК | `cp_left`, `command_points` |
 | hasty (penalty) | наспех | `hasty`, `p2.hasty_penalty` |
+| setup phase | фаза старта, СТАРТ | `setup` |
 
 ## The map and the seats
 
-The map is a graph of provinces (`P01`, `P02`, ...). An order moves units along one edge. Each seat gets a start:
-a capital and a few provinces around it. Starts are dealt to seats by a seeded shuffle. If there are fewer seats
-than starts, a free start stays neutral land with no armies.
+The map is a graph of provinces (`P01`, `P02`, ...). A move goes to a neighbouring province; through the seat's
+own land a stack may go further, up to its move range (see Units). Each seat gets a start: a capital and a few
+provinces around it. Starts are dealt to seats by a seeded shuffle. If there are fewer seats than starts, a free
+start stays neutral land with no armies.
 
-At the start each seat of the `covenant` faction has 30 alloy, 15 provisions, 4 assault units and barracks in the
-capital.
+What a seat has at the start depends on its faction (see Factions and artifacts). The neutral `covenant` starts
+with 30 alloy, 15 provisions, 4 assault units and barracks in the capital; the other factions swap a unit or two for
+their unique one and may get extra stock.
 
 ## A turn
 
@@ -38,13 +44,14 @@ capital.
 | N2 | negotiate, give gifts, make pacts, adjust orders | yes | each change costs CP |
 | resolution | the engine resolves the turn at once | — | — |
 
-- Each phase has a time limit (in `slice3` and `slice2`: 12 min, 5 min, 5 min; in `blitz_test`: 5 s each). A phase
+- Each phase has a time limit (in `slice3`, `slice2` and `quad4`: 12 min, 5 min, 5 min; in `blitz_test`: 5 s each). A phase
   closes on its deadline or as soon as every living seat has pressed ready.
 - Orders are given only in A. In N1 `submit_orders`, `cancel_order` and `amend_order` answer `PHASE_LOCKED` with the
   hint «в П1 приказы можно только проверить через validate_orders; подавать — в фазе Д»; `validate_orders` works in
   every open phase (in N1 by the rules of A).
 - The intel slice is an empty step between A and N2: only a `recon` event in the journal.
 - After the last turn, or when one seat is left, the match moves to `game_over`.
+- `slice3`, `slice2` and `quad4` open with a setup phase before turn 1 (see below); `blitz_test` has none.
 
 ### Ready
 
@@ -56,12 +63,36 @@ capital.
 - A seat that never pressed ready keeps the orders it submitted. A seat that submitted nothing plays on autopilot:
   its armies stand still.
 
+## The setup phase
+
+Before turn 1 a scenario with `setup` opens the phase `setup` (СТАРТ, 5 min in the core scenarios). Each seat:
+
+1. `get_setup()` shows the factions with their bonuses and drawbacks, the artifacts offered to the seat and its
+   current choice.
+2. `choose_faction(["ash_choir", "growth", ...])`: factions in order of preference. Factions are unique by default:
+   seats that chose are served first, in a seeded order, each taking the first free faction of its list; then the
+   seats that did not choose take the first free faction of the scenario's list.
+3. `choose_artifacts(["trail_maps"])`: in the draft mode (`draft`, the default) each seat is offered 3 artifacts
+   and takes one; in the points mode (`points`) it takes any artifacts of the pool whose costs fit the budget (3
+   points by default), without the pairs marked as exclusive. A seat that does not choose gets the first artifact
+   offered (draft) or pool artifacts by id while the budget lasts (points).
+4. `ready()`: in this phase no `confirm_hash` is needed (in every later phase it is required).
+
+The phase closes when every seat is ready or on its deadline; then turn 1 is built from the results and N1 opens.
+Choices are private while the phase is open. After it the factions of all seats are public; the artifacts stay
+hidden until `game_over`. An artifact the final faction may not hold (marked «[только …]») is dropped: in the draft
+it is replaced by the default; in the points mode only its cost is refilled by default. `choose_artifacts` and
+`choose_faction` warn about such a choice at once. The host can change the mode with `dah game create --artifacts
+draft|points|none`, `--artifact-offer`, `--artifact-points` and `--setup-limit`.
+
 ## Resources
 
-Two resources, each with an engine role:
+Three resources, each with an engine role:
 
 - **Alloy** (`core:alloy`, role `build`): pays for units and buildings.
 - **Provisions** (`core:provisions`, role `upkeep_food`): feeds the army.
+- **Creed** (`core:creed`, role `research`): spent only on techs. Every resolution the whole stock of Creed goes
+  into the active tech (up to what it still needs); the rest stays in stock.
 
 Income comes at the end of the turn from provinces and buildings, then the army's upkeep is paid in provisions. If
 provisions drop below zero, the army starves: it loses 10% of its units (at least 1, the cheapest first), and the
@@ -74,20 +105,45 @@ stock is set to 0. No resource can go below 0.
 | `forge` | Кузнечный мир | 4 alloy | ×1 |
 | `agri` | Агромир | 4 provisions | ×1 |
 | `waste` | Пустошь | 1 alloy, 1 provisions | ×1.1 |
-| `capital` | Столица | 3 alloy, 2 provisions | ×1.25 |
+| `capital` | Столица | 3 alloy, 2 provisions, 3 creed | ×1.25 |
+| `shrine` | Святыня | 3 creed, 1 provisions | ×1 |
 
 The defense multiplier applies only to the side defending the province.
 
 ## Units
 
-| Unit | Russian | Attack | Defense | Cost | Upkeep per turn | Counters |
-|---|---|---|---|---|---|---|
-| `assault` | Штурмовики | 3 | 3 | 12 alloy | 1 provisions | `artillery` |
-| `armor` | Бронеход | 5 | 4 | 25 alloy | 1 provisions | `assault` |
-| `artillery` | Артиллерия | 4 | 1 | 15 alloy | 1 provisions | `armor` |
+| Unit | Russian | Attack | Defense | Cost | Upkeep per turn | Counters | Notes |
+|---|---|---|---|---|---|---|---|
+| `assault` | Штурмовики | 3 | 3 | 12 alloy | 1 provisions | `artillery` | |
+| `armor` | Бронеход | 5 | 4 | 25 alloy | 1 provisions | `assault` | |
+| `artillery` | Артиллерия | 4 | 1 | 15 alloy | 1 provisions | `armor` | |
+| `militia` | Ополчение | 2 | 2 | 8 alloy | 1 provisions | — | |
+| `outriders` | Разъезд | 2 | 1 | 10 alloy | 1 provisions | `artillery` | `fast`; needs the tech Supply Routes |
+| `mortar` | Мортира | 5 | 1 | 22 alloy | 1 provisions | — | move 1, `siege`; needs Smithcraft and a smithy |
+| `titan` | Титан | 8 | 7 | 45 alloy | 2 provisions | `assault` | move 1; needs War Engines and a smithy |
+| `dreamwalker` | Сноходец | 3 | 2 | 14 alloy | 1 provisions | `armor` | `ignore_fortify`; needs Dream Lore |
+| `throne_warden` | Страж Престола | 2 | 4 | 14 alloy | 1 provisions | — | `garrison`; Litany only |
+| `faceless` | Безликие | 3 | 3 | 13 alloy | 1 provisions | — | `ignore_fortify`, `fast`; Synclite only |
+| `ash_cantor` | Певчие Пепла | 3 | 3 | 12 alloy | 1 provisions | `armor` | `siege`; Ash Choir only |
+| `devourer` | Пожиратель | 4 | 2 | 10 alloy | 2 provisions | — | Growth only |
+| `rift_corsair` | Корсары Разлома | 3 | 3 | 12 alloy | 1 provisions | `artillery` | `fast`; Captains only |
 
 A unit "counters" another: if the enemy side has any unit this unit counters, its strength is multiplied by 1.5
-(`combat.counter_mul`). The three units form a cycle.
+(`combat.counter_mul`). Assault, armor and artillery form a cycle. A unit that needs a tech or a building (in the
+province of recruitment), or belongs to another faction, is refused with `NOT_AVAILABLE`.
+
+**Move range.** A move may always go one edge. Through the seat's own land a stack may go up to its range: the
+smallest `move` of its units (2 by default; mortar and titan 1; the Litany's −1 makes most of its units 1; the tech
+Supply Routes gives assault and militia +1). Every province in between must be the seat's own; only the last step
+may enter foreign or neutral land. A refused move answers `NOT_ADJACENT` and names the stack's range and its slowest
+unit. (A match on core 0.2.0, which has no techs, keeps one edge per move.)
+
+**Abilities:**
+
+- `siege`: the province defense multiplier counts at most ×1.0 against the share of the attack made by siege units.
+- `ignore_fortify`: the defender's fortify bonus is reduced by the share of the attack made by such units.
+- `garrison`: +1 defense while defending a province of its owner.
+- `fast`: a stack of only fast units goes up to 2 edges through any land (it slips past what is in between).
 
 ## Buildings
 
@@ -96,8 +152,15 @@ A unit "counters" another: if the enemy side has any unit this unit counters, it
 | `mine` | Шахта | 10 alloy | 1 turn | +5 alloy per turn |
 | `farm` | Ферма | 8 alloy | 1 turn | +3 provisions per turn |
 | `barracks` | Казарма | 30 alloy | 2 turns | allows recruiting |
+| `temple` | Храм | 15 alloy | 1 turn | +3 creed per turn |
+| `smithy` | Кузня | 25 alloy | 2 turns | needed for mortar and titan; needs Smithcraft |
+| `citadel` | Цитадель | 40 alloy | 2 turns | province defense +0.3; needs Fortification |
+| `warehouse` | Склад | 20 alloy | 1 turn | +2 provisions; recruiting here 20% cheaper; needs Supply Routes |
+| `hq` | Штаб | 35 alloy | 2 turns | allows recruiting; province defense +0.1; +25% back on N2 cancels; needs Staff Litanies |
 
-A province holds at most one building of each kind. Recruiting is possible only in a province with barracks. A
+A province holds at most one building of each kind. Recruiting is possible only in a province with barracks (or a
+headquarters). The warehouse discount is counted per unit and rounded in the seat's favour (the unit price is rounded
+down), so one order of three costs the same as three orders of one. A
 building ordered this turn with a build time of 1 is finished at the end of this turn's resolution and gives income
 from the next turn. A construction is lost if its province changes owner.
 
@@ -111,9 +174,10 @@ short (`assault`) or full (`core:assault`); a unit may also be named by its stat
 {"kind": "recruit", "province": "P01", "unit": "assault", "count": 1}
 {"kind": "build", "province": "P02", "building": "mine"}
 {"kind": "fortify", "province": "P01"}
+{"kind": "research", "tech": "deep_drilling"}
 ```
 
-- `move`: from an own province to a neighbouring one. Into a foreign province, or a neutral one with an army, it
+- `move`: from an own province to a neighbouring one, or further through own land (see Move range). Into a foreign province, or a neutral one with an army, it
   is an attack. An optional field `"pact": "honor"` (the default) or `"break"` says whether the move keeps pacts
   (see Diplomacy). The flat form above (`unit` + `count`, one unit type) is the most robust for any client. Several
   unit types go either into several moves or into the nested form `"units": {"assault": 2, "armor": 1}`; `units`
@@ -123,6 +187,8 @@ short (`assault`) or full (`core:assault`); a unit may also be named by its stat
 - `build`: in an own province that has no such building yet.
 - `fortify`: +15% defense (`combat.fortify_bonus`: 0.25 by default, the `core` scenarios set 0.15) if no units
   leave the province.
+- `research`: choose the active tech (only in A; one per turn); see Techs. `tech` may be an id, a short id or the
+  Russian or English name. Change it with `amend_order(id, patch={"tech": "..."})` in A.
 
 - A unit can be in only one order: units in a `move` are reserved.
 - Resources of `recruit` and `build` are reserved when the order is accepted and spent at resolution.
@@ -132,7 +198,8 @@ short (`assault`) or full (`core:assault`); a unit may also be named by its stat
   holds is dropped, and its seat sees why in the turn report.
 
 Reasons of a refusal: `NOT_ADJACENT`, `NOT_OWNER`, `NOT_ENOUGH_UNITS`, `NOT_ENOUGH_RESOURCES`,
-`NO_RECRUIT_BUILDING`, `ALREADY_BUILT`, `PHASE_LOCKED`, `NOT_ENOUGH_CP`, `UNKNOWN_ID`, `INVALID`.
+`NO_RECRUIT_BUILDING`, `ALREADY_BUILT`, `PHASE_LOCKED`, `NOT_ENOUGH_CP`, `UNKNOWN_ID`, `INVALID`,
+`NOT_AVAILABLE` (a tech, building or faction requirement is not met), `ALREADY_RESEARCHED`.
 
 `submit_orders` has two modes: `replace_all` drops the seat's orders and puts the new ones in their place; `append`
 adds to them. Each submitted order is checked against the ones before it, so reservations add up.
@@ -158,6 +225,7 @@ command points (CP). A seat gets
 | `pact`: `honor` → `break` (the betrayal) | like a new attack: 2 CP and hasty |
 | `pact`: `break` → `honor` | 1 CP |
 | new `recruit` or `build`, more units in a recruit | not allowed: `PHASE_LOCKED` |
+| any change of a `research` order (new, amend or cancel) | not allowed: `PHASE_LOCKED` |
 
 - A hasty move attacks with 15% less strength (`p2.hasty_penalty`). This is the price of a surprise attack after
   negotiations: in N2 attacking is allowed.
@@ -236,11 +304,12 @@ The engine resolves a turn in this order:
    strongest against the next (ties broken by the seeded random stream); the winner then fights the defender.
 4. **Owners change.** A province with only the attacker's units left becomes the attacker's. An empty foreign or
    neutral province is taken without a battle.
-5. **Economy**: income, then upkeep and starvation.
+5. **Economy**: income, then upkeep and starvation; then the stock of Creed goes into the active tech.
 6. **Construction**: buildings whose time is up are finished.
-7. **Elimination**: a seat with no provinces is out. Then broken pacts end, pacts of eliminated seats and expired
+7. **Research**: the active tech is learned when its progress reaches its cost; it works from the next turn.
+8. **Elimination**: a seat with no provinces is out. Then broken pacts end, pacts of eliminated seats and expired
    pacts end, and unanswered proposals lapse.
-8. **Victory check** and the turn report.
+9. **Victory check** and the turn report.
 
 ## Combat
 
@@ -249,8 +318,10 @@ Strength of a side:
 ```
 strength = Σ over units (attack, or defense for the defender)
            × 1.5 for units that counter something the enemy has
-           × province defense multiplier (defender only)
-           × 1.15 if the province is fortified (defender only; 1 + combat.fortify_bonus)
+           × province defense multiplier (defender only: type × buildings such as the citadel;
+             at most ×1.0 against siege units)
+           × 1.15 if the province is fortified (defender only; 1 + combat.fortify_bonus;
+             less against ignore_fortify units)
            × 0.85 for hasty attacking units
            × random factor 0.9–1.1
 ```
@@ -285,6 +356,9 @@ Unit and type ids may be full, short or the labels from the state text (`шту�
 - A seat sees its own provinces and their neighbours in full: owner, units, buildings, fortification.
 - Of every other province it sees the name, type and owner (the political map is public); units are shown as `?`.
 - Other seats' resources, orders and messages are never visible.
+- Other seats' techs, research and artifacts are hidden until `game_over`; only the number of techs each seat has
+  learned is public (techs given by artifacts are not counted, so the number does not give the artifact away).
+  Factions are public once the setup phase closes.
 - The turn report of a seat holds the events in its provinces and in the provinces it saw before or after the turn.
   Economy, starvation, recruiting, constructions started, broken fortifications and dropped orders are seen only
   by their own seat.
@@ -322,20 +396,49 @@ line. `format=json` gives the same view as JSON.
   captured. A draw is possible.
 - Scores are public and shown in `get_state` and in each turn report.
 
+## Techs
+
+17 techs in 4 branches (Industry, War, Logistics, Mystery), tiers 1 and 2, paid in Creed. A tier-2 tech needs two
+tier-1 techs of its own branch (War Engines also needs Smithcraft). One tech is active at a time: the `research`
+order (only in A) picks it, and it stays active from turn to turn until it is learned or changed; the progress of
+every tech is kept. A learned tech works from the next turn: income multipliers, cheaper buildings, stat changes
+(attack, move range, CP, the hasty penalty, the N2 refund) and the units and buildings it unlocks. Factions and
+artifacts may make a branch or a tech cheaper. `list_techs()` shows the seat's own tree with prices, requirements
+and progress; `rules(topic="techs")` shows the whole tree.
+
+## Factions and artifacts
+
+| Faction | Russian | In short | Unique unit |
+|---|---|---|---|
+| `covenant` | Завет Предела | neutral: no bonuses, no drawbacks | — |
+| `litany` | Литания Ржавого Престола | alloy +10%, buildings −20%, Industry −30%; move range −1 | Throne Warden |
+| `synclite` | Безликий Синклит | +1 CP, better N2 refund, Mystery −40%; heavy units −1 attack | Faceless |
+| `ash_choir` | Хор Пепла | creed +50%, dreamwalker −30%, Mystery −25%; alloy −10% | Ash Cantors |
+| `growth` | Ненасытная Поросль | militia for provisions only, provisions +15%, War −30%; creed −50% | Devourer |
+| `captains` | Вольные Капитаны Разлома | no hasty penalty, +2 alloy a turn, Logistics −30%; province defense −10% | Rift Corsairs |
+
+Artifacts are bonuses for the whole match, chosen in the setup phase: a tech from the start, a building in the
+capital, units or resources at the start, a flat income, cheaper techs of a branch, CP or a smaller hasty penalty.
+Some are for one faction only (`ash_censer`: Ash Choir), some exclude each other (`calm_banner` and
+`seal_of_command`). `rules(topic="factions")` and `rules(topic="artifacts")` list them with exact effects, power
+and cost.
+
 ## The core content
 
-- Faction: `covenant` «Завет Предела», no bonuses.
+- Factions: the six above.
 - Maps: `mirror3` (3 starts, 15 provinces: each start is a capital with a forge, agri and waste world; three
-  contested provinces in the middle) and `mirror2` (2 starts, 10 provinces). The starts are symmetric.
+  contested provinces in the middle), `mirror2` (2 starts, 10 provinces) and `mirror4` (4 starts in the corners,
+  21 provinces: a shrine between each two neighbours and a forge in the centre). The starts are symmetric.
 - Scenarios:
 
-| Scenario | Map | Turns | Phase limits N1 / A / N2 |
-|---|---|---|---|
-| `core:slice3` | `mirror3` | 10 | 12m / 5m / 5m |
-| `core:slice2` | `mirror2` | 10 | 12m / 5m / 5m |
-| `core:blitz_test` | `mirror3` | 6 | 5s / 5s / 5s |
+| Scenario | Map | Turns | Setup phase | Phase limits setup / N1 / A / N2 |
+|---|---|---|---|---|
+| `core:slice3` | `mirror3` | 10 | 6 factions, artifact draft (3 offered) | 5m / 12m / 5m / 5m |
+| `core:slice2` | `mirror2` | 10 | 6 factions, artifact draft (3 offered) | 5m / 12m / 5m / 5m |
+| `core:quad4` | `mirror4` | 12 | 6 factions, artifact draft (3 offered) | 5m / 12m / 5m / 5m |
+| `core:blitz_test` | `mirror3` | 6 | none (`covenant` only) | — / 5s / 5s / 5s |
 
-`dah game create --limits` and `--turns` override the scenario's limits for one match.
+`dah game create --limits`, `--turns` and the setup flags override the scenario's values for one match.
 
 ## The rules tool
 

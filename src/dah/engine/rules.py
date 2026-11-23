@@ -88,7 +88,7 @@ def _ename(rs: Ruleset, fid: str) -> str:
 
 
 def _move_range(rs: Ruleset) -> str:
-    ranges = sorted({int(rs.stat(f"unit.{u}.move")) for u in rs.units}) or [registry.DEFAULT_UNIT_MOVE]
+    ranges = sorted({int(rs.stat(f"unit.{u}.move")) for u in rs.units}) or [rs.move_default]
     return str(ranges[0]) if len(ranges) == 1 else f"{ranges[0]}–{ranges[-1]}"
 
 
@@ -173,7 +173,7 @@ def _unit_line(rs: Ruleset, u: str, full: bool) -> str:
             f"содержание {_amounts(rs, rs.unit_upkeep(u))}/ход, бьёт: "
             f"{', '.join(_short(c) for c in d.counters) or '—'}")
     move = int(st(f"unit.{u}.move"))
-    if full and move != registry.DEFAULT_UNIT_MOVE:
+    if full and move != rs.move_default:
         line += f", ход {move}"
     abilities = _abilities_of(rs, u)
     if abilities:
@@ -191,8 +191,9 @@ def _units(rs: Ruleset) -> Section:
     head = f"ЮНИТЫ (контр: ×{st('combat.counter_mul'):g} к силе, если у врага есть юнит, которого бьёшь):"
     core = head + "\n" + "\n".join(_unit_line(rs, u, False) for u in rs.units)
     detail = (head + "\n" + "\n".join(_unit_line(rs, u, True) for u in rs.units)
-              + f"\nХод по своей земле — до {registry.DEFAULT_UNIT_MOVE} рёбер, если не сказано иное; в чужую "
-                "провинцию — 1 ребро. «нужно» — технология или здание в провинции найма; «только» — уникальный "
+              + (f"\nХод по своей земле — до {rs.move_default} рёбер, если не сказано иное; в чужую "
+                 "провинцию — 1 ребро." if rs.move_default > 1 else "\nХод — на соседнюю провинцию (1 ребро).")
+              + " «нужно» — технология или здание в провинции найма; «только» — уникальный "
                 "юнит фракции. Подробно о юните: describe(id).")
     short = ("ЮНИТЫ: " + ", ".join(f"{_short(u)} «{d.name}»" for u, d in rs.units.items())
              + " — характеристики и требования: rules(topic=\"units\") или describe(id).")
@@ -253,8 +254,10 @@ def _orders(rs: Ruleset) -> Section:
         errors.append("NOT_AVAILABLE")
     text = (
         "ПРИКАЗЫ (JSON, id выдаёт сервер; ид юнитов/зданий можно короткие):\n"
-        '- {"kind":"move","from":"P01","to":"P02","unit":"assault","count":2} — на соседнюю провинцию (по своей '
-        f"земле — до {_move_range(rs)} рёбер, если все промежуточные провинции твои); в чужую или нейтральную с "
+        '- {"kind":"move","from":"P01","to":"P02","unit":"assault","count":2} — на соседнюю провинцию'
+        + (f" (по своей земле — до {_move_range(rs)} рёбер, если все промежуточные провинции твои)"
+           if _move_range(rs) != "1" else "")
+        + "; в чужую или нейтральную с "
         'армией — атака. Один юнит — в одном приказе. Несколько типов: "units":{"assault":2,"armor":1} или '
         "несколько move. Если клиент теряет вложенные объекты — передай orders одной JSON-строкой. "
         'Поле "pact": "honor" (по умолчанию) или "break" — см. ДИПЛОМАТИЯ.\n'

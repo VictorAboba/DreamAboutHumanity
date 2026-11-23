@@ -2,7 +2,8 @@
 
 **English** · [Русский](../ru/modding.md) · [All docs](README.md)
 
-All game content lives in packs: resources, province types, units, buildings, factions, maps and scenarios. The
+All game content lives in packs: resources, province types, units, buildings, factions, maps, scenarios and,
+since stage 2, tech branches, techs and artifacts. The
 engine knows nothing about concrete units or resources, only about resource **roles** and addressable **stats**.
 The base pack is `content/packs/core/`; section 2 of the [slice specification](../SLICE.md) (in Russian) is the
 reference these rules come from.
@@ -15,6 +16,7 @@ A pack is a folder with `pack.yaml` and YAML files grouped by entity type:
 mymod/
   pack.yaml
   resources/  province_types/  units/  buildings/  factions/  maps/  scenarios/
+  branches/  techs/  artifacts/  lore/      # stage 2 (optional)
 ```
 
 - Every `*.yaml` file in a type folder is read. A file holds one entity or a list of entities.
@@ -47,7 +49,7 @@ Fields marked * are required. `name` is up to 48 characters, `short` (an abbrevi
 
 | Type | Fields |
 |---|---|
-| resource | `id`\*, `name`\*, `short`, `role`\* (`build` or `upkeep_food`) |
+| resource | `id`\*, `name`\*, `short`, `role`\* (`build`, `upkeep_food` or `research`) |
 | province type | `id`\*, `name`\*, `short`, `income`\* (`{resource: n}`), `defense_mul` (above 0, up to 5; default 1) |
 | unit | `id`\*, `name`\*, `short`, `attack`\*, `defense`\*, `cost`\*, `upkeep`\*, `counters` (list of units) |
 | building | `id`\*, `name`\*, `short`, `cost`\*, `build_turns`\* (1..10), `effects`, `recruit`, `max_per_province` |
@@ -72,11 +74,13 @@ Details:
   phase; default 3 and 3).
 - Phase and diplomacy limits are match settings: every match's config records them, and they are left out of the
   ruleset hash (changing a default does not make `dah replay` of an older match report changed content).
-- The first faction of a scenario's `factions` is the one seats get.
+- Without a setup phase (`setup: none`) a seat gets its configured faction, else the first faction of the
+  scenario's `factions`. With one, seats choose (see Stage-2 content below).
 
 ## Effects
 
-There are six effect types. Each one is allowed only in some places.
+There are eight effect types (the six below plus `unlock` and `grant_tech`, see Stage-2 content). Each one is
+allowed only in some places.
 
 | Effect | Parameters | Where |
 |---|---|---|
@@ -125,6 +129,65 @@ Modifiers of one stat are applied in this order:
 A value out of bounds written in the file itself (for example `attack: 99`) is an error. A value that leaves the
 bounds only after modifiers is clamped, and the validator gives a warning.
 
+## Stage-2 content: techs, artifacts, abilities, the setup phase
+
+The authoritative description is sections 1–2 and 6 of the [stage-2 specification](../TECH_AND_SETUP.md) (in
+Russian); `content/packs/core` uses every field below. A pack without techs, branches and artifacts keeps the
+slice's rules: it hashes as before stage 2, and `unit.<id>.move` defaults to 1 there (2 otherwise).
+
+Names may be a string or `{ru, en}` (Russian is shown to players). `lore` may be inline text or a path to a Markdown
+file of the pack (`lore/litany.md`); `description` (up to 1000 characters) is a short text for `describe`. Texts
+(`lore`, `description`, `name_en`, branch `color`) are left out of the ruleset hash. An effect's kind may be written
+as `type:` or `effect:`.
+
+| Type | Folder | Fields |
+|---|---|---|
+| branch | `branches/` | `id`\*, `name`\*, `order`, `color`, `description` |
+| tech | `techs/` | `id`\*, `name`\*, `branch`\*, `tier`\* (1..10), `cost`\* (in the `research` resource), `requires` (all of), `requires_any` (one of), `requires_tier {tier, count, same_branch=true}`, `factions`, `effects`, `unlocks` (informative), `description`, `lore` |
+| artifact | `artifacts/` | `id`\*, `name`\*, `power`\* (weight for a fair draft), `cost` (points mode, 0..10), `factions`, `exclusive_with`, `effects`\*, `description`, `lore` |
+
+New fields of existing types:
+
+- resource: `role` may also be `research` (at most one resource; it is spent only on techs, and the validator
+  warns about a unit or building priced in it). Without it the match has no techs.
+- unit: `move` (1..5, edges through own land), `requires {tech: [...], building: [...]}` (the building in the
+  province of recruitment), `factions` (a unique unit), `abilities` (`[siege]` or `[{id: siege, cap: 1.0}]`).
+  Abilities: `siege {cap}`, `ignore_fortify`, `garrison {defense}`, `fast {range}`.
+- building: `requires {tech: [...]}`, `factions`; `effects` may hold `modify` with `scope: province` (the
+  province's own stats) or `scope: owner` (the owner's stats while the building stands).
+- faction: `description`; `bonuses`/`penalties` may modify unit move, abilities and tech prices.
+- scenario: `setup: none` or `{unique_factions: true, artifacts: draft|points|none, artifact_offer: 3,
+  artifact_points: 3, artifact_pool: [...]}` (defaults shown) and `phase_limits.setup` (default 5m). With a setup
+  phase seats choose factions in order of preference; a seat that does not choose gets its configured faction, else
+  the first free faction of the scenario's list (see [Game rules](rules.md#the-setup-phase)). The host can
+  override the mode with `dah game create --artifacts ...`.
+
+Effects added in stage 2:
+
+| Effect | Parameters | Where |
+|---|---|---|
+| `unlock` | `kind` (`unit`, `building`, `order`), `id` | tech `effects`, artifact `effects` |
+| `grant_tech` | `tech` | faction `starting.effects`, artifact `effects` |
+
+Contexts: a tech's effects act like the owner's passive effects (`modify`, `income`, `unlock`, `set_flag`); an
+artifact's act for the whole match (`modify`, `income`, `unlock`) plus one-off start effects (`add_resource`,
+`grant_units`, `grant_building`, `set_flag`, `grant_tech`); a building allows `income` and scoped `modify`.
+
+Stats added in stage 2:
+
+| Path | Type, bounds | Default | Meaning |
+|---|---|---|---|
+| `unit.<id>.move` | int 1..5 | 2 (1 without stage-2 content) | edges through own land |
+| `unit.<id>.ability.<name>.on` | int 0..1 | 0 (1 if the unit has it) | the ability flag |
+| `unit.<id>.ability.siege.cap` | float 0.5..3 | 1.0 | province defense multiplier against siege, at most |
+| `unit.<id>.ability.garrison.defense` | int 0..20 | 1 | defense bonus at home |
+| `unit.<id>.ability.fast.range` | int 1..5 | 2 | edges through any land |
+| `tech.<id>.cost` | int 0..1000 | from content | tech price |
+| `tech.branch.<id>.cost_mul` | float 0.1..5 | 1.0 | price multiplier of a branch |
+| `province.defense_mul` | float 0.1..5 | 1.0 | extra multiplier of a province (buildings, scope province) |
+| `province.income_mul.<res>` | float 0..5 | 1.0 | income multiplier of a province |
+| `province.recruit_discount` | float 0..0.9 | 0 | recruit discount, per unit, rounded in the seat's favour |
+
 ## Validation
 
 ```sh
@@ -136,7 +199,7 @@ The validator checks:
 1. the JSON Schema of every file (the schemas are in `src/dah/engine/schemas/`);
 2. references: every id a pack mentions exists among the loaded packs, and every pack in `requires` is loaded;
 3. effects: known type, allowed in this place, correct parameters, a known stat path;
-4. resource roles: exactly one resource for each role (`build`, `upkeep_food`);
+4. resource roles: exactly one resource for each of `build` and `upkeep_food`, at most one for `research`;
 5. map graphs: the graph is connected, every start has the same number of provinces of each type within two edges
    of its capital, no province is in two starts;
 6. number bounds;

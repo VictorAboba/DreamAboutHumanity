@@ -431,6 +431,7 @@ h4 { margin: 12px 0 6px; font-size: 14px; }
     if (o.kind === "recruit") return "найм в " + o.province + ": " + nameOf("unit_names", o.unit) + " ×" + o.count + hasty;
     if (o.kind === "build") return "стройка в " + o.province + ": " + nameOf("building_names", o.building) + hasty;
     if (o.kind === "fortify") return "укрепить " + o.province + hasty;
+    if (o.kind === "research") return "исследование: " + nameOf("tech_names", o.tech) + hasty;
     return o.kind;
   }
   function renderFeed() {
@@ -550,7 +551,11 @@ h4 { margin: 12px 0 6px; font-size: 14px; }
     if (s.full) head = head.concat(["Исследуется", "Артефакты"]);
     tb.appendChild(el("tr", {}, head.map(function (h) { return el("th", {text: h}); })));
     s.players.forEach(function (p) {
-      var cells = [p.nick, p.faction_name || "—", String(p.techs_count != null ? p.techs_count : 0) + " из " + s.techs_total];
+      // full level: the whole list (artifact grants included); the public count leaves the grants out
+      var pub = p.techs_count != null ? p.techs_count : 0;
+      var learned = s.full && p.techs ? p.techs.length : pub;
+      var learnedText = String(learned) + " из " + s.techs_total + (learned > pub ? " (" + (learned - pub) + " от артефактов)" : "");
+      var cells = [p.nick, p.faction_name || "—", learnedText];
       if (s.full) {
         var r = p.researching;
         cells.push(r ? nameOf("tech_names", r.tech) + " " + r.progress + "/" + r.cost : "—");

@@ -972,6 +972,9 @@ class Game:
         else:
             self._require_active(seat)
             current = orders_hash(self._book(seat))
+            if confirm_hash in (None, ""):
+                raise GameError("STALE_HASH", "confirm_hash обязателен вне фазы старта: возьми orders_hash из "
+                                              f"list_orders (сейчас {current}) и вызови ready(confirm_hash=...)")
             if confirm_hash != current:
                 raise GameError("STALE_HASH", f"набор приказов не совпадает с confirm_hash; актуальный orders_hash: "
                                               f"{current}")
@@ -1494,7 +1497,12 @@ class Game:
             only = f" [только {self._artifact_factions(a['id'])}]" if a.get("factions") else ""
             lines.append(f"- {a['id'].split(':')[-1]} «{a['name']}» ({num}){only}: {'; '.join(a['effects'])}")
         choice = view["your_choice"]
-        lines.append(f"Твой выбор: фракции {choice['factions'] or '—'}, артефакты {choice['artifacts'] or '—'}")
+
+        def named(table: Any, ids: list[str] | None) -> str:
+            return ", ".join(f"{i.split(':')[-1]} «{table[i].name if i in table else i}»" for i in ids or []) or "—"
+
+        lines.append(f"Твой выбор: фракции {named(rs.factions, choice['factions'])}, "
+                     f"артефакты {named(rs.artifacts, choice['artifacts'])}")
         return "\n".join(lines)
 
     def _close_setup(self, reason: str) -> None:

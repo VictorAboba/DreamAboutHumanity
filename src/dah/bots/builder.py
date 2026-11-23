@@ -64,6 +64,9 @@ class BuilderBot(Bot):
 
     def diplomacy(self, view: StateView, api: DiplomacyApi) -> None:
         """Accept every pact offered (and keep it); propose none."""
+        self.answer_pacts(view, api)
+
+    def answer_pacts(self, view: StateView, api: DiplomacyApi) -> None:
         for prop in view.pact_proposals:
             if str(prop.get("to")) in view.me:
                 api.respond_pact(str(prop["id"]), "accept")

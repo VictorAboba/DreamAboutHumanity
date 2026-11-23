@@ -214,7 +214,12 @@ def move_problem(state: GameState, ruleset: Ruleset, seat: str, src: str, dst: s
         fast = min(int(ability_param(ruleset, u, "fast", "range", key)) for u in units)
         if fast > 1 and _distance(ruleset.map.adjacency, src, dst, lambda p: True, fast) is not None:
             return None
-    reach = f"; по своей земле — до {own_range} рёбер (промежуточные провинции твои)" if own_range > 1 else ""
+    slowest = min(units, key=lambda u: (int(ruleset.stat(f"unit.{u}.move", key)), u)) if units else None
+    who = f" (у {slowest.split(':')[-1]} move {own_range})" if slowest else ""
+    if own_range > 1:
+        reach = f"; дальность этого стека — до {own_range} рёбер по своей земле{who}, промежуточные провинции твои"
+    else:
+        reach = f"; дальность этого стека — 1 ребро{who}"
     return f"{dst} не соседствует с {src}{reach}"
 
 

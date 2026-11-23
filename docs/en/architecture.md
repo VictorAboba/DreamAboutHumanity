@@ -20,10 +20,12 @@
 ## Code map
 
 ```
-content/packs/core/        the base pack: resources, province types, units, buildings, faction, maps, scenarios
+content/packs/core/        the base pack: resources, province types, units, buildings, factions, maps, scenarios,
+                           tech branches, techs, artifacts, lore
+content/legacy/            frozen earlier pack versions (core-0.2.0), loaded only to replay or continue old matches
 src/dah/
   engine/                  pure rules library, no I/O
-    registry.py            stats with bounds, the 6 effect types, modifier arithmetic
+    registry.py            stats with bounds, the 8 effect types and their contexts, abilities, modifier arithmetic
     content.py             loading packs, JSON Schema validation, assembling a Ruleset
     schemas/               a JSON Schema for each content type
     model.py               game state (dataclasses), canonical JSON, state_hash
@@ -31,7 +33,11 @@ src/dah/
     diplomacy.py           gifts and pacts as ops on the state (shared by the live match and replay)
     combat.py              the battle formula and estimate
     resolve.py             game setup and turn resolution (a deterministic pure function)
-    view.py                fog of war, state text, turn reports, rules text
+    techs.py               stat keys per seat (faction + techs + artifacts + buildings), move range, research
+    setup.py               the setup phase: draft offers, choice checks, resolving factions and artifacts
+    catalog.py             describe/find: full descriptions of units, buildings, techs, factions, artifacts
+    rules.py               the rules text and its topics, built from the ruleset
+    view.py                fog of war, state text, turn reports
     rng.py                 random streams from seed|turn|system|entity
   game.py                  a match: phases, deadlines, ready, orders, messages, replay
   journal.py               the JSONL journal
@@ -50,7 +56,12 @@ docs/                      SLICE.md (spec), CONCEPT.md (concept), CONNECT.md (co
 
 - `build_ruleset(pack_dirs, scenario)` loads and checks packs and returns a `Ruleset`: all entities with full ids,
   the map, the scenario, effective stats (with scenario overrides and per-faction modifiers) and a `hash`.
-- `new_game_state(ruleset, seats, seed)` deals the starts and returns the state of turn 1.
+- `new_game_state(ruleset, seats, seed)` deals the starts and returns the state of turn 1; a seat may carry its
+  `faction` and `artifacts` (the setup phase's result), whose start effects are applied.
+- `setup_config`, `draft_offers`, `check_faction_prefs`, `check_artifacts` and `resolve_setup` (`setup.py`) run the
+  setup phase as pure functions of the ruleset, the seed and the choices.
+- `stat_key(state, ruleset, seat)` (`techs.py`) gives a seat's `Profile`: faction, learned techs, artifacts and
+  owner-scope buildings; `Ruleset.stat(path, key)` then returns the seat's effective value.
 - `submit_orders`, `cancel_order`, `amend_order` take a seat's order book and return a new one, with a reason for
   each refusal. They never change their input.
 - `resolve(state, orders_by_seat, ruleset, seed, diplomacy=())` returns the new state and a `TurnReport`: all
@@ -59,12 +70,15 @@ docs/                      SLICE.md (spec), CONCEPT.md (concept), CONNECT.md (co
   ops, already applied to the state) only goes into the report.
 - `diplomacy.make_gift`, `make_proposal`, `make_response`, `make_leave` check a request and return an op;
   `apply_op` applies it to the state (`GameState.pacts`, resources).
-- `view_state` and `render_state_text` apply the fog of war; `rules_text` writes the rules from the ruleset.
+- `view_state` and `render_state_text` apply the fog of war; `rules_text`/`rules_topic` (`rules.py`) write the
+  rules from the ruleset, `describe` (`catalog.py`) one entity.
 
 ## Game
 
 `Game` (in `game.py`) wraps the engine for one match:
 
+- with a setup phase, `setup` before turn 1: choices (`choose_faction`, `choose_artifacts`), ready without a hash,
+  then `_close_setup` rebuilds turn 1 from `resolve_setup` and journals `setup_closed`;
 - the phase cycle `negotiation_1 → actions → negotiation_2 → resolution → negotiation_1` of the next turn, then
   `game_over`;
 - an injected clock: `tick()` closes a phase whose deadline has passed, so tests run without waiting;
@@ -141,9 +155,12 @@ The journal records it in every `turn_resolved` event.
 
 `dah replay <id>`:
 
-1. rebuilds the ruleset from the config and compares its hash with `ruleset_hash` in the journal (a match created
-   before phase limits left the hash matches by the older hash, computed with its config's limits);
-2. creates the initial state from the seed;
+1. picks the ruleset with `game.pick_ruleset`: `--packs` if given; else the config's packs when their hash matches
+   `ruleset_hash` in the journal (a match created before phase limits left the hash matches by the older hash,
+   computed with its config's limits); else, for a match on the default packs, a frozen version from
+   `content/legacy` whose hash matches (`Game.load` does the same, so a running match keeps its rules);
+2. creates the initial state from the seed; with a setup phase, turn 1 is built from the `results` of the
+   `setup_closed` event (each seat's faction and artifacts);
 3. applies each turn's diplomacy ops from `private/diplomacy/` and resolves the turn with the orders saved in
    `private/orders/`;
 4. compares each turn's `state_hash` and the final winners and scores with the journal.

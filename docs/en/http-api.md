@@ -96,7 +96,7 @@ names; `choose_artifacts` the same for artifacts. Errors: `UNKNOWN_ID`, `INVALID
 `NOT_ENOUGH_POINTS`, `EXCLUSIVE`, `PHASE_LOCKED` (phase closed or none). A changed choice takes the seat's ready
 back. A choice that does not fit (an artifact the seat's first-choice faction may not hold) is accepted with a
 `warning` (also in `text`): at close such an artifact is replaced by the default (draft) or dropped and the freed
-budget filled by default (points). In the setup phase `POST /v1/ready` accepts an empty body; a `confirm_hash`, if
+budget (at most the dropped ones' cost) filled by default (points). In the setup phase `POST /v1/ready` accepts an empty body; a `confirm_hash`, if
 given, must be the current one.
 
 Fog of war: no route shows another seat's choice. During the phase `/v1/state` is the provisional turn 1 (the text
@@ -206,7 +206,7 @@ player `opponent` (a nick), or base numbers without it. The answer also has `sid
 ### Ready
 
 `POST /v1/ready` needs `confirm_hash` equal to the seat's current `orders_hash`, otherwise `409 STALE_HASH` (the
-message names the current hash). When the last living seat presses ready, the phase closes at once and the answer
+message names the current hash; with no `confirm_hash` at all, outside the setup phase, it says the hash is required). When the last living seat presses ready, the phase closes at once and the answer
 has `phase_closed: true`.
 
 ### Messages

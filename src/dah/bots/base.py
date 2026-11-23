@@ -86,6 +86,10 @@ class Bot:
     def diplomacy(self, view: StateView, api: DiplomacyApi) -> None:
         """Gifts and pact moves in a negotiation phase (called before `message`); none by default."""
 
+    def answer_pacts(self, view: StateView, api: DiplomacyApi) -> None:
+        """Answer pact proposals made to this seat; called again when a proposal arrives after the bot pressed
+        ready (the proposal clears it). Ignores them by default (the proposal then lapses with the phase)."""
+
     def action_orders(self, view: StateView, estimate: Estimator) -> list[Order]:
         """Orders for the actions phase (submitted with mode replace_all)."""
         return []
@@ -124,8 +128,11 @@ class Bot:
                 if status.get("game_over") or status.get("phase") == "game_over":
                     return
                 seq = int(status.get("phase_seq", 0))
-                if status.get("phase") in PLAYABLE_PHASES and seq != acted_seq and not status.get("you_ready"):
-                    self.play_phase(api, str(status["phase"]), me)
+                if status.get("phase") in PLAYABLE_PHASES and not status.get("you_ready"):
+                    if seq != acted_seq:
+                        self.play_phase(api, str(status["phase"]), me)
+                    else:  # the server cleared our ready mid-phase (e.g. a pact proposed to us): answer, ready again
+                        self.ready_again(api, str(status["phase"]), me)
                 acted_seq = seq
                 status = api.wait_phase(after_seq=seq, max_seconds=WAIT_SECONDS)
             except (httpx.HTTPError, ApiError) as exc:
@@ -150,6 +157,19 @@ class Bot:
             except ApiError as exc:  # a refused choice leaves the default: not worth failing the phase over
                 log.info("bot %s: setup choice rejected: %s", self.seat, exc)
         api.ready(None)
+
+    def ready_again(self, api: Api, phase: str, me: set[str]) -> None:
+        """Press ready again in a phase already played (without replaying it: no new messages or orders), after
+        answering pact proposals made since."""
+        if phase == SETUP_PHASE:
+            api.ready(None)
+            return
+        if phase in NEGOTIATION_PHASES and type(self).answer_pacts is not Bot.answer_pacts:
+            try:
+                self.answer_pacts(parse_state(api.state(), me), api)  # type: ignore[arg-type]
+            except ApiError as exc:
+                log.info("bot %s: pact answer rejected: %s", self.seat, exc)
+        api.ready(api.orders().get("orders_hash", ""))
 
     def play_phase(self, api: Api, phase: str, me: set[str]) -> None:
         if phase == SETUP_PHASE:

@@ -206,11 +206,14 @@ def default_artifacts(ruleset: Ruleset, setup: Mapping[str, Any], offer: Sequenc
     return _fill_points(ruleset, setup, faction, [])
 
 
-def _fill_points(ruleset: Ruleset, setup: Mapping[str, Any], faction: str, start: Sequence[str]) -> list[str]:
+def _fill_points(ruleset: Ruleset, setup: Mapping[str, Any], faction: str, start: Sequence[str],
+                 cap: int | None = None) -> list[str]:
     """`start` plus pool artifacts in id order while they fit the rest of the budget (skipping exclusive ones and
-    those the faction may not hold)."""
+    those the faction may not hold). `cap` limits how many points are added (the freed budget of dropped ones)."""
     out = list(start)
     budget = int(setup.get("artifact_points", 3)) - sum(ruleset.artifacts[a].cost for a in out)
+    if cap is not None:
+        budget = min(budget, cap)
     for a in artifact_pool(ruleset, setup):
         if a in out:
             continue
@@ -231,7 +234,8 @@ def resolve_setup(ruleset: Ruleset, setup: Mapping[str, Any], seed: int | str, s
     artifacts?: [...]}} (validated). Factions: seats that chose come first, in a seeded order, then the rest in a
     seeded order; each takes the first of its preferences (then of the scenario's list) not taken yet when
     `unique_factions` is on (duplicates only once every faction is taken). Artifacts: the choice, minus any the final
-    faction may not hold (draft: replaced by the default; points: the freed budget is filled as by default). Returns {seat: {faction, prefs, artifacts,
+    faction may not hold (draft: replaced by the default; points: only the freed budget, the dropped ones' cost, is filled as by
+    default; points the seat left unspent stay unspent). Returns {seat: {faction, prefs, artifacts,
     auto_faction, auto_artifacts, faction_conflict, dropped}}.
     """
     seats = list(seats)
@@ -263,7 +267,8 @@ def resolve_setup(ruleset: Ruleset, setup: Mapping[str, Any], seed: int | str, s
         if dropped and setup.get("artifacts") == "draft":
             arts = default_artifacts(ruleset, setup, offer, entry["faction"])
         elif dropped and setup.get("artifacts") == "points":
-            arts = _fill_points(ruleset, setup, entry["faction"], arts)     # the freed budget is not lost
+            freed = sum(ruleset.artifacts[a].cost for a in dropped if a in ruleset.artifacts)
+            arts = _fill_points(ruleset, setup, entry["faction"], arts, cap=freed)  # only the freed budget
         entry.update(artifacts=sorted(arts), auto_artifacts=auto, dropped=dropped)
     return dict(sorted(out.items()))
 

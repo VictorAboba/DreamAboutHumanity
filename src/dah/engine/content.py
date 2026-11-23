@@ -112,7 +112,7 @@ class UnitDef:
     cost: dict[str, int]
     upkeep: dict[str, int]
     counters: tuple[str, ...]
-    move: int | None = None                       # None: registry.DEFAULT_UNIT_MOVE (stat unit.<id>.move)
+    move: int | None = None                       # None: Ruleset.move_default (stat unit.<id>.move)
     requires_tech: tuple[str, ...] = ()
     requires_building: tuple[str, ...] = ()       # in the province of recruitment
     factions: tuple[str, ...] = ()                # unique unit: only these factions (empty: everyone)
@@ -282,6 +282,9 @@ class Ruleset:
     base_stats: dict[str, float] = field(default_factory=dict)
     override_mods: tuple[dict[str, Any], ...] = ()
     faction_mods: dict[str, tuple[dict[str, Any], ...]] = field(default_factory=dict)
+    # Default `unit.<id>.move`: registry.default_unit_move of whether the packs have stage-2 content (not hashed:
+    # it follows from hashed content), so the frozen slice keeps one edge per move.
+    move_default: int = registry.DEFAULT_UNIT_MOVE
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "_cache", {})     # Profile -> stats table (not a field: never hashed or copied)
@@ -305,7 +308,7 @@ class Ruleset:
                 for bid, n in key.buildings:
                     if bid in self.buildings:
                         mods += list(self.buildings[bid].owner_mods) * n
-                table = effective_stats(self.base_stats or self.stats, mods)[0]
+                table = effective_stats(self.base_stats or self.stats, mods, self.move_default)[0]
                 cache[key] = table
             return table
         return self.faction_stats.get(key, self.stats)
@@ -318,6 +321,8 @@ class Ruleset:
         spec = registry.stat_spec(path)
         if spec is None:
             raise KeyError(f"unknown stat {path!r}")
+        if spec.pattern == registry.MOVE_STAT:
+            return self.move_default
         return spec.default if spec.default is not None else 0
 
     def _passive(self, key: StatKey) -> tuple[list[dict[str, Any]], str | None]:
@@ -397,7 +402,7 @@ class Ruleset:
         data = asdict(self)
         data.pop("warnings")
         data.pop("hash")
-        for derived in ("base_stats", "override_mods", "faction_mods"):
+        for derived in ("base_stats", "override_mods", "faction_mods", "move_default"):
             data.pop(derived)
         data["map"].pop("layout", None)
         data["map"].pop("layout_computed", None)
@@ -432,10 +437,10 @@ _NEW_FIELDS = frozenset({"move", "requires_tech", "requires_building", "factions
 _COSMETIC_FIELDS = frozenset({"lore", "description", "name_en", "color"})
 
 
-def effective_stats(base: Mapping[str, float],
-                    modifiers: Iterable[Mapping[str, Any]]) -> tuple[dict[str, float], list[tuple[str, float]]]:
+def effective_stats(base: Mapping[str, float], modifiers: Iterable[Mapping[str, Any]],
+                    move_default: int = registry.DEFAULT_UNIT_MOVE) -> tuple[dict[str, float], list[tuple[str, float]]]:
     """Apply modifiers (base -> add -> mul -> last set -> clamp) per target. Returns (table, [(target, raw value
-    out of bounds)])."""
+    out of bounds)]). `move_default`: the base of a `unit.<id>.move` the pack does not set."""
     by_target: dict[str, list[Mapping[str, Any]]] = {}
     for m in modifiers:
         by_target.setdefault(m["target"], []).append(m)
@@ -444,7 +449,8 @@ def effective_stats(base: Mapping[str, float],
     for target, mods in sorted(by_target.items()):
         spec = registry.stat_spec(target)
         assert spec is not None
-        start = base.get(target, spec.default if spec.default is not None else 0)
+        default = move_default if spec.pattern == registry.MOVE_STAT else spec.default
+        start = base.get(target, default if default is not None else 0)
         value = registry.apply_modifiers(start, mods)
         if not spec.in_bounds(value):
             clamped.append((target, value))
@@ -1021,8 +1027,9 @@ class _Builder:
                     field_path[1] = field_path[1].split(":", 1)[1]
                 self.err(raw, field_path, f"value {value} out of bounds {spec.lo}..{spec.hi}")
 
-    def effective(self, base: Mapping[str, float], modifiers: list[dict[str, Any]], where: str) -> dict[str, float]:
-        out, clamped = effective_stats(base, modifiers)
+    def effective(self, base: Mapping[str, float], modifiers: list[dict[str, Any]], where: str,
+                  move_default: int = registry.DEFAULT_UNIT_MOVE) -> dict[str, float]:
+        out, clamped = effective_stats(base, modifiers, move_default)
         for target, value in clamped:
             spec = registry.stat_spec(target)
             assert spec is not None
@@ -1141,8 +1148,9 @@ def _ruleset(b: _Builder, parts: dict[str, Any], packs: dict[str, str], scenario
     if scenario.map not in parts["maps"]:
         raise ContentError([Issue(raw.file, _json_path(raw.path, ["map"]), f"map {scenario.map!r} is invalid")])
     overrides = b.effects(raw, raw.data.get("overrides", []), "overrides", "override")
-    stats = b.effective(parts["base_stats"], overrides, raw.file)
-    faction_stats = {f: b.effective(parts["base_stats"], overrides + parts["faction_mods"][f], f)
+    move_default = registry.default_unit_move(any(parts[k] for k in ("branches", "techs", "artifacts")))
+    stats = b.effective(parts["base_stats"], overrides, raw.file, move_default)
+    faction_stats = {f: b.effective(parts["base_stats"], overrides + parts["faction_mods"][f], f, move_default)
                      for f in scenario.factions}
     if scenario.setup is not None and scenario.setup["artifacts"] != "none" and not parts["artifacts"]:
         b.warnings.append(Issue(raw.file, _json_path(raw.path, ["setup", "artifacts"]),
@@ -1156,7 +1164,7 @@ def _ruleset(b: _Builder, parts: dict[str, Any], packs: dict[str, str], scenario
         scenario=scenario, stats=stats, faction_stats=faction_stats, warnings=tuple(b.warnings),
         branches=parts["branches"], techs=parts["techs"], artifacts=parts["artifacts"],
         base_stats=parts["base_stats"], override_mods=tuple(overrides),
-        faction_mods={f: tuple(parts["faction_mods"][f]) for f in scenario.factions})
+        faction_mods={f: tuple(parts["faction_mods"][f]) for f in scenario.factions}, move_default=move_default)
     return replace(ruleset, hash=sha256_json(ruleset.to_dict()))
 
 
