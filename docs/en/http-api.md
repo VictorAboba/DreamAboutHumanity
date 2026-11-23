@@ -53,7 +53,7 @@ Submitting and validating orders answer 200 even when some orders are refused: t
 | POST | `/v1/orders/validate` | `{"orders": [...]}` | `results[{ok, cp_cost, reason?, message?}]`, `ok_count` |
 | POST | `/v1/orders` | `{"orders": [...], "mode"}` | `accepted[]`, `rejected[]`, `orders_hash`, `cp_left` |
 | DELETE | `/v1/orders/{id}` | | `order_id`, `cp_cost`, `orders_hash`, `cp_left` |
-| PATCH | `/v1/orders/{id}` | `{"units"?, "to"?, "count"?}` | the same plus the changed `order` |
+| PATCH | `/v1/orders/{id}` | `{"units"?, "unit"?, "count"?, "to"?}` | the same plus the changed `order` |
 | POST | `/v1/estimate` | see [Estimate](#estimate) | `win_prob`, average losses |
 | POST | `/v1/messages` | `{"to": [nick, ...] \| "all", "text"}` | `message_id`, `left{}` |
 | GET | `/v1/inbox` | `?since=` | `messages[]`, `last_id`, `text` |
@@ -95,6 +95,18 @@ none) gives the whole state; a later turn is `400 INVALID`.
 - `accepted` holds the accepted orders with their new ids; `rejected` holds `{index, order, reason, message}` for
   each refused one.
 - `/v1/orders/validate` checks the same way and changes nothing.
+- `orders` is a list of order objects, or the same list as one JSON string
+  (`{"orders": "[{\"kind\":\"move\",...}]"}`); a single order object counts as a list of one, and an order that
+  is itself a JSON string is decoded too.
+- A move takes its units flat, `{"kind": "move", "from": "P01", "to": "P04", "unit": "assault", "count": 2}`, or
+  nested, `"units": {"assault": 2}` (also a list `[{"unit": "assault", "count": 2}]` or a JSON string). Units may be
+  full or short ids or state labels. The server normalizes every form to the nested one before checking and
+  storing, so the journal and replay do not depend on the form. An empty or missing `units` is refused with
+  `INVALID`, and the message shows what arrived and both workarounds (flat form, `orders` as a JSON string).
+  A field sent as `null` counts as absent (in orders and patches); with non-empty nested `units`, a stray
+  `count` is ignored; with a valid flat `unit`/`count`, nested `units` that hold no positive count are ignored.
+- The `PATCH` body is the patch: `{"unit": "assault", "count": 1}`, `{"units": {...}}`, `{"to": "P03"}` or
+  `{"count": 1}` for a recruit; `{"patch": <object or JSON string>}` is accepted too.
 - `DELETE` and `PATCH` are free in N1 and A and cost CP in N2 ([Game rules](rules.md#n2-and-command-points)). A
   refused edit is an error answer with the reason code.
 - Any change of orders takes the seat's ready back.

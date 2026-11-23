@@ -53,7 +53,7 @@
 | POST | `/v1/orders/validate` | `{"orders": [...]}` | `results[{ok, cp_cost, reason?, message?}]`, `ok_count` |
 | POST | `/v1/orders` | `{"orders": [...], "mode"}` | `accepted[]`, `rejected[]`, `orders_hash`, `cp_left` |
 | DELETE | `/v1/orders/{id}` | | `order_id`, `cp_cost`, `orders_hash`, `cp_left` |
-| PATCH | `/v1/orders/{id}` | `{"units"?, "to"?, "count"?}` | то же и изменённый `order` |
+| PATCH | `/v1/orders/{id}` | `{"units"?, "unit"?, "count"?, "to"?}` | то же и изменённый `order` |
 | POST | `/v1/estimate` | см. [Estimate](#estimate) | `win_prob`, средние потери |
 | POST | `/v1/messages` | `{"to": [ник, ...] \| "all", "text"}` | `message_id`, `left{}` |
 | GET | `/v1/inbox` | `?since=` | `messages[]`, `last_id`, `text` |
@@ -95,6 +95,17 @@
 - В `accepted` — принятые приказы с новыми ID; в `rejected` — `{index, order, reason, message}` для каждого
   отклонённого.
 - `/v1/orders/validate` проверяет так же, но ничего не меняет.
+- `orders` — список приказов или тот же список одной JSON-строкой (`{"orders": "[{\"kind\":\"move\",...}]"}`);
+  один объект приказа считается списком из одного, приказ-строка с JSON тоже раскрывается.
+- Юниты `move` можно дать плоско, `{"kind": "move", "from": "P01", "to": "P04", "unit": "assault", "count": 2}`,
+  или вложенно, `"units": {"assault": 2}` (а также списком `[{"unit": "assault", "count": 2}]` или JSON-строкой).
+  Юнит — полный или короткий ID либо метка из текста состояния. Сервер приводит любую форму к вложенной до проверки
+  и сохранения, поэтому журнал и повтор партии от формы не зависят. Пустой или отсутствующий `units` — `INVALID`, в
+  сообщении — что пришло и оба обхода (плоская форма, `orders` одной JSON-строкой). Поле со значением `null`
+  считается отсутствующим (в приказах и в patch); при непустом вложенном `units` лишний `count` игнорируется; при
+  верных плоских `unit`/`count` вложенный `units` без единого положительного числа игнорируется.
+- Тело `PATCH` — это сам patch: `{"unit": "assault", "count": 1}`, `{"units": {...}}`, `{"to": "P03"}` или
+  `{"count": 1}` у найма; `{"patch": <объект или JSON-строка>}` тоже принимается.
 - `DELETE` и `PATCH` бесплатны в П1 и Д и стоят ОК в П2 ([Правила игры](rules.md#п2-и-очки-командования)).
   Отклонённая правка — ответ с ошибкой и кодом причины.
 - Любое изменение приказов снимает ready места.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from collections import Counter
 from dataclasses import dataclass, replace
@@ -95,43 +96,185 @@ def _require_str(data: Mapping[str, Any], key: str) -> str:
     return value
 
 
+def _as_int(value: Any) -> Any:
+    """"2" and 2.0 count as 2 (ASCII digits, integral floats, below 2**31); anything else is returned as is
+    for the caller to refuse."""
+    if isinstance(value, str):
+        text = value.strip()
+        if text.isascii() and text.isdigit() and len(text) <= 10 and int(text) < _INT_BOUND:
+            return int(text)
+    elif isinstance(value, float) and value.is_integer() and abs(value) < _INT_BOUND:
+        return int(value)
+    return value
+
+
+_INT_BOUND = 2 ** 31
+
+
 def _positive_int(value: Any, key: str) -> int:
+    value = _as_int(value)
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise OrderRejected(INVALID, f"поле {key!r} должно быть целым числом ≥ 1")
     return value
 
 
-def _units(ruleset: Ruleset, raw: Any) -> dict[str, int]:
-    if not isinstance(raw, Mapping) or not raw:
-        raise OrderRejected(INVALID, "поле 'units' — непустой словарь {юнит: число}")
+def _label(text: str) -> str:
+    return text.strip().lower().rstrip(".")
+
+
+def resolve_unit_ref(ruleset: Ruleset, ref: Any) -> str | None:
+    """Full unit id for a full or short id, a state label (штурм) or a name (Штурмовики), any case."""
+    if not isinstance(ref, str) or not ref.strip():
+        return None
+    ref = ref.strip()
+    full = ruleset.resolve("unit", ref) or ruleset.resolve("unit", ref.lower())
+    if full:
+        return full
+    label = _label(ref.split(":", 1)[-1])
+    hits = [uid for uid, u in ruleset.units.items() if label in (_label(u.short), _label(u.name))]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _shown(value: Any, limit: int = 120) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        text = repr(value)
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+FLAT_MOVE_EXAMPLE = '{"kind":"move","from":"P01","to":"P04","unit":"assault","count":2}'
+STRING_ORDERS_EXAMPLE = 'orders="[{\\"kind\\":\\"move\\",\\"from\\":\\"P01\\",\\"to\\":\\"P04\\",\\"units\\":{\\"assault\\":2}}]"'
+FLAT_PATCH_EXAMPLE = 'patch={"unit":"assault","count":1}'
+STRING_PATCH_EXAMPLE = 'patch="{\\"units\\":{\\"assault\\":1}}"'
+
+
+def _empty_units_message(raw: Any, received: Mapping[str, Any] | None, patch: bool) -> str:
+    got = "поле 'units' не задано" if raw is None else f"поле 'units' пустое: получено units={_shown(raw)}"
+    if received is not None:
+        got += f" (весь {'patch' if patch else 'приказ'}: {_shown(dict(received), 200)})"
+    if patch:
+        return (f"{got}. Нужно {{юнит: число}}. Если клиент теряет вложенный объект — плоская форма: "
+                f"{FLAT_PATCH_EXAMPLE}, или передай patch одной JSON-строкой: {STRING_PATCH_EXAMPLE}")
+    return (f"{got}. Нужно {{юнит: число}}. Если клиент теряет вложенный объект — плоская форма: "
+            f"{FLAT_MOVE_EXAMPLE}, или передай orders одной JSON-строкой: {STRING_ORDERS_EXAMPLE}")
+
+
+def _decode_units(raw: Any) -> Any:
+    """{"assault": 2} as is; also a JSON string of it, or a list of {"unit", "count"} / ["assault", 2] pairs."""
+    if isinstance(raw, str):
+        if not raw.strip():
+            return {}
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return raw
+    if isinstance(raw, list):
+        converted: dict[Any, Any] = {}
+        for item in raw:
+            if isinstance(item, Mapping) and isinstance(item.get("unit"), str):
+                ref, n = item["unit"], item.get("count", item.get("n"))
+            elif isinstance(item, (list, tuple)) and len(item) == 2 and isinstance(item[0], str):
+                ref, n = item
+            else:
+                return raw
+            n = _as_int(n)
+            if isinstance(n, bool) or not isinstance(n, int) or n < 0:     # each entry, before any summing
+                raise OrderRejected(INVALID, f"число юнитов {str(ref)[:40]!r} должно быть целым ≥ 0: "
+                                             f"получено {_shown(item)}")
+            converted[ref] = converted.get(ref, 0) + n
+        return converted
+    return raw
+
+
+def _no_positive_count(raw: Any) -> bool:
+    """Nested units that carry nothing: missing, empty, or every count zero (keys kept, values lost)."""
+    if raw is None or (isinstance(raw, (Mapping, list, str)) and not raw):
+        return True
+    return isinstance(raw, Mapping) and all(_as_int(n) == 0 and not isinstance(n, bool) for n in raw.values())
+
+
+def _move_units(ruleset: Ruleset, data: Mapping[str, Any], patch: bool = False) -> dict[str, int]:
+    """Units of a move or a move patch: nested {"units": {...}} (also a list of pairs or a JSON string) or flat
+    {"unit": "assault", "count": 2}. Both together only if they agree; null fields count as absent (some
+    clients fill every schema property with null), and a stray count next to nested units is ignored."""
+    flat, count = data.get("unit"), data.get("count")
+    raw = _decode_units(data.get("units"))
+    if flat is None:
+        if count is None or not _no_positive_count(raw):
+            return _units(ruleset, data.get("units"), data, patch)
+        flat = ""      # count without unit and without nested units: refused below with the flat example
+    example = FLAT_PATCH_EXAMPLE if patch else FLAT_MOVE_EXAMPLE
+    if not isinstance(flat, str) or not flat.strip():
+        raise OrderRejected(INVALID, f"плоская форма: 'unit' — строка с юнитом, 'count' — число ≥ 1; получено "
+                                     f"unit={_shown(flat)}, count={_shown(count)}. Пример: {example}")
+    flat_units = _units(ruleset, {flat: _positive_int(count, "count")})
+    if _no_positive_count(raw):
+        return flat_units       # flat wins over a lost nested object (empty, or keys with zero counts)
+    nested = _units(ruleset, raw, data, patch)
+    if nested != flat_units:
+        raise OrderRejected(INVALID, f"указаны и units={_shown(data.get('units'))}, и unit/count "
+                                     f"({_shown(flat)}×{_shown(data.get('count'))}), и они расходятся: оставь одно")
+    return nested
+
+
+def _units(ruleset: Ruleset, raw: Any, received: Mapping[str, Any] | None = None,
+           patch: bool = False) -> dict[str, int]:
+    given, raw = raw, _decode_units(raw)
+    if raw is None or (isinstance(raw, (Mapping, list, str)) and not raw):
+        raise OrderRejected(INVALID, _empty_units_message(given, received, patch))
+    if not isinstance(raw, Mapping):
+        raise OrderRejected(INVALID, f"поле 'units' — словарь {{юнит: число}}, а получено units={_shown(raw)}. "
+                                     f"Плоская форма: {FLAT_PATCH_EXAMPLE if patch else FLAT_MOVE_EXAMPLE}")
     out: dict[str, int] = {}
     for ref, n in raw.items():
-        full = ruleset.resolve("unit", ref)
+        full = resolve_unit_ref(ruleset, ref)
         if full is None:
-            raise OrderRejected(UNKNOWN_ID, f"неизвестный юнит {ref!r}")
+            known = ", ".join(f"{uid} ({u.short})" for uid, u in ruleset.units.items())
+            raise OrderRejected(UNKNOWN_ID, f"неизвестный юнит {str(ref)[:40]!r}; юниты: {known}")
+        n = _as_int(n)
         if isinstance(n, bool) or not isinstance(n, int) or n < 0:
             raise OrderRejected(INVALID, f"число юнитов {ref!r} должно быть целым ≥ 0")
         if n:
             out[full] = out.get(full, 0) + n
     if not out:
-        raise OrderRejected(INVALID, "в приказе нет ни одного юнита")
+        raise OrderRejected(INVALID, f"в приказе нет ни одного юнита: получено units={_shown(raw)}")
     return dict(sorted(out.items()))
 
 
+def decode_json_arg(value: Any) -> Any:
+    """A value sent as a JSON string (an order, a list of orders, a patch) becomes its object; anything else,
+    including a malformed string, is returned as is for the caller to refuse."""
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return value
+    return value
+
+
 def parse_order(ruleset: Ruleset, data: Mapping[str, Any], order_id: str, phase: str) -> Order:
-    """Normalize a JSON order (short or full ids) into an Order. Raises OrderRejected."""
+    """Normalize a JSON order into the canonical Order. Raises OrderRejected.
+
+    Lenient on input, canonical on output: unit ids may be full, short or state labels; a move's units may be
+    nested ({"units": {"assault": 2}}, also a list of pairs or a JSON string) or flat ({"unit": "assault",
+    "count": 2}); the order itself may be a JSON string. The Order is always the nested form.
+    """
+    data = decode_json_arg(data)
     if not isinstance(data, Mapping):
-        raise OrderRejected(INVALID, "приказ должен быть JSON-объектом")
+        raise OrderRejected(INVALID, f"приказ должен быть JSON-объектом, получено {_shown(data)}")
     kind = data.get("kind")
+    if isinstance(kind, str):
+        kind = kind.strip().lower()
     if kind not in KINDS:
         raise OrderRejected(INVALID, f"kind должен быть одним из {', '.join(KINDS)}")
     added = P2 if phase == P2 else ACTIONS
     if kind == "move":
         return Order(order_id, kind, added, src=_require_str(data, "from"), dst=_require_str(data, "to"),
-                     units=_units(ruleset, data.get("units")))
+                     units=_move_units(ruleset, data))
     province = _require_str(data, "province")
     if kind == "recruit":
-        unit = ruleset.resolve("unit", _require_str(data, "unit"))
+        unit = resolve_unit_ref(ruleset, _require_str(data, "unit"))
         if unit is None:
             raise OrderRejected(UNKNOWN_ID, f"неизвестный юнит {data.get('unit')!r}")
         return Order(order_id, kind, added, province=province, unit=unit,
@@ -350,15 +493,23 @@ def amend_order(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders,
     old = book.find(order_id)
     if old is None:
         return EditResult(False, book, UNKNOWN_ID, f"нет приказа {order_id!r}")
+    patch = decode_json_arg(patch)
+    if not isinstance(patch, Mapping):
+        return EditResult(False, book, INVALID, f"patch должен быть объектом, получено {_shown(patch)}")
+    patch = {k: v for k, v in patch.items() if v is not None}     # null-filling clients: null = not changed
     allowed = {"move": {"units", "to"}, "recruit": {"count"}}.get(old.kind, set())
-    extra = set(patch) - allowed
+    accepted = allowed | ({"unit", "count"} if old.kind == "move" else set())   # move: the flat form too
+    extra = set(patch) - accepted
     if not patch or extra:
         what = ", ".join(sorted(allowed)) or "ничего"
+        if old.kind == "move":
+            what += f" (или плоско unit+count: {FLAT_PATCH_EXAMPLE})"
         return EditResult(False, book, INVALID, f"у приказа {old.kind} можно менять: {what}")
     faction = state.players[seat].faction
     try:
         if old.kind == "move":
-            new = replace(old, units=_units(ruleset, patch["units"]) if "units" in patch else old.units,
+            moved = any(k in patch for k in ("units", "unit", "count"))
+            new = replace(old, units=_move_units(ruleset, patch, patch=True) if moved else old.units,
                           dst=_require_str(patch, "to") if "to" in patch else old.dst)
         else:
             new = replace(old, count=_positive_int(patch["count"], "count"))

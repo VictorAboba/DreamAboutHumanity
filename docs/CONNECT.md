@@ -27,8 +27,14 @@ stdio MCP-сервер `dah`, который переводит вызовы и�
 `estimate(attacker, defender, province_type, fortified?, hasty?)`, `send_message(to, text)`, `inbox(since?)`,
 `ready(confirm_hash)`, `unready`, `history(turn?)`.
 
-- `orders` — JSON-массив приказов, например
-  `[{"kind": "move", "from": "P01", "to": "P02", "units": {"core:assault": 2}}]`.
+- `orders` — JSON-массив приказов. Надёжнее всего плоская форма `move` (один тип юнитов на приказ):
+  `[{"kind": "move", "from": "P01", "to": "P04", "unit": "assault", "count": 2}]`. Вложенная тоже работает:
+  `[{"kind": "move", "from": "P01", "to": "P04", "units": {"assault": 2, "armor": 1}}]`. Если клиент теряет
+  вложенные объекты (приходит пустой `units`), передайте весь список одной JSON-строкой:
+  `orders="[{\"kind\":\"move\",\"from\":\"P01\",\"to\":\"P04\",\"unit\":\"assault\",\"count\":2}]"` — это
+  гарантировано для `validate_orders`, `submit_orders` и `patch` у `amend_order`
+  (`amend_order(id="o3", patch={"unit": "assault", "count": 1})` или `patch` строкой). Сервер приводит любую форму
+  к вложенной; отказ из-за пустого `units` показывает, что пришло, и оба обхода.
 - `estimate` — прогноз боя, например
   `estimate(attacker={"core:assault": 4}, defender={"core:assault": 2}, province_type="P07")`. Юнит — полный ID,
   короткий (`assault`) или метка из текста состояния (`штурм`); `province_type` — ID типа (`core:agri`), его метка

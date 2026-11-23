@@ -101,17 +101,20 @@ from the next turn. A construction is lost if its province changes owner.
 ## Orders
 
 Orders are JSON objects. The server gives each accepted order an id (`o1`, `o2`, ...). Unit and building ids may be
-short (`assault`) or full (`core:assault`).
+short (`assault`) or full (`core:assault`); a unit may also be named by its state label (`штурм`) or its name.
 
 ```
-{"kind": "move", "from": "P01", "to": "P02", "units": {"assault": 2}}
+{"kind": "move", "from": "P01", "to": "P02", "unit": "assault", "count": 2}
 {"kind": "recruit", "province": "P01", "unit": "assault", "count": 1}
 {"kind": "build", "province": "P02", "building": "mine"}
 {"kind": "fortify", "province": "P01"}
 ```
 
 - `move`: from an own province to a neighbouring one. Into a foreign province, or a neutral one with an army, it
-  is an attack.
+  is an attack. The flat form above (`unit` + `count`, one unit type) is the most robust for any client. Several
+  unit types go either into several moves or into the nested form `"units": {"assault": 2, "armor": 1}`; `units`
+  may also be a list `[{"unit": "assault", "count": 2}]`. The server stores every move in the nested form, so all
+  forms give the same order, `orders_hash` and replay.
 - `recruit`: in an own province with barracks.
 - `build`: in an own province that has no such building yet.
 - `fortify`: +25% defense (`combat.fortify_bonus`) if no units leave the province.
@@ -128,6 +131,12 @@ Reasons of a refusal: `NOT_ADJACENT`, `NOT_OWNER`, `NOT_ENOUGH_UNITS`, `NOT_ENOU
 
 `submit_orders` has two modes: `replace_all` drops the seat's orders and puts the new ones in their place; `append`
 adds to them. Each submitted order is checked against the ones before it, so reservations add up.
+
+`orders` may also be passed as one JSON string holding the same list:
+`orders="[{\"kind\":\"move\",\"from\":\"P01\",\"to\":\"P04\",\"unit\":\"assault\",\"count\":2}]"`. This is
+guaranteed for `validate_orders`, `submit_orders` and the `patch` of `amend_order`: some MCP clients lose nested
+objects (an empty `units`) but pass strings intact. A move with an empty or missing `units` is refused with
+`INVALID`; the message shows what arrived and both workarounds.
 
 ## N2 and command points
 
@@ -146,7 +155,8 @@ In N1 and A orders are free to add, change and cancel. In N2 every change costs 
   negotiations: in N2 attacking is allowed.
 - `replace_all` is refused in N2; use `append`, `cancel_order` and `amend_order`.
 - `amend_order` changes `units` or `to` of a move and `count` of a recruit. A `build` or `fortify` can only be
-  cancelled.
+  cancelled. The units of a move may be given flat too: `amend_order(id="o3", patch={"unit": "assault",
+  "count": 1})`.
 
 ## Resolution
 

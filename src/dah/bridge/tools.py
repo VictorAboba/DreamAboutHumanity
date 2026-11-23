@@ -12,15 +12,46 @@ DEFAULT_WAIT_SECONDS = 45
 
 _ID = {"type": ["string", "integer"], "description": "ID приказа"}
 _UNITS = {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0},
-          "description": "Юниты: {unit_id: число}"}
+          "description": "Вложенная форма (если типов юнитов несколько): {юнит: число}"}
+FLAT_MOVE = '{"kind": "move", "from": "P01", "to": "P04", "unit": "assault", "count": 2}'
+NESTED_MOVE = '{"kind": "move", "from": "P01", "to": "P04", "units": {"assault": 2, "armor": 1}}'
+STRING_ORDERS = 'orders="[{\\"kind\\":\\"move\\",\\"from\\":\\"P01\\",\\"to\\":\\"P04\\",\\"unit\\":\\"assault\\",\\"count\\":2}]"'
+_ORDER_ITEM = {
+    "type": "object",
+    "description": "Один приказ. move лучше плоско: unit + count (один тип юнитов на приказ); несколько типов — "
+                   "units {юнит: число} или несколько приказов",
+    "properties": {
+        "kind": {"type": "string", "enum": ["move", "recruit", "build", "fortify"]},
+        "from": {"type": "string", "description": "move: откуда (P01)"},
+        "to": {"type": "string", "description": "move: куда, соседняя провинция (P04)"},
+        "unit": {"type": "string", "description": "move/recruit: юнит — короткий ID (assault), полный "
+                                                  "(core:assault) или метка из get_state (штурм)"},
+        "count": {"type": "integer", "minimum": 1, "description": "move/recruit: сколько юнитов"},
+        "units": _UNITS,
+        "province": {"type": "string", "description": "recruit/build/fortify: провинция"},
+        "building": {"type": "string", "description": "build: здание (mine, barracks...)"},
+    },
+    "required": ["kind"],
+}
 _EST_UNITS = {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0},
               "description": "Юниты стороны: {юнит: число}, например {\"core:assault\": 4, \"core:armor\": 1}; "
                              "юнит — полный ID, короткий (assault) или метка из get_state (штурм)"}
 EST_EXAMPLE = ('estimate(attacker={"core:assault": 4}, defender={"core:assault": 2}, province_type="core:agri", '
                'fortified=false)')
-_ORDERS = {"type": "array", "items": {"type": "object"},
-           "description": "Список приказов, например [{\"kind\": \"move\", \"from\": \"P01\", \"to\": \"P02\", "
-                          "\"units\": {\"core:assault\": 2}}]"}
+_ORDERS = {"type": "array", "items": _ORDER_ITEM,
+           "description": f"Список приказов. Плоская форма (надёжнее всего): [{FLAT_MOVE}]. Вложенная тоже "
+                          f"работает: [{NESTED_MOVE}]. Можно передать весь список одной JSON-строкой: "
+                          f"{STRING_ORDERS}"}
+_PATCH = {"type": "object",
+          "description": "Что изменить: {\"unit\": \"assault\", \"count\": 1} (плоско), {\"units\": {...}}, "
+                         "{\"to\": \"P03\"} или {\"count\": 1} у найма. Можно одной JSON-строкой: "
+                         "patch=\"{\\\"unit\\\":\\\"assault\\\",\\\"count\\\":1}\"",
+          "properties": {"unit": {"type": "string", "description": "move: юнит (плоская форма, вместе с count)"},
+                         "count": {"type": "integer", "minimum": 1,
+                                   "description": "move: сколько юнитов unit; recruit: новое число"},
+                         "units": _UNITS, "to": {"type": "string", "description": "move: новая цель"}}}
+_ORDERS_HINT = (f" Плоская форма move: {FLAT_MOVE}; если вложенные объекты теряются — передай orders одной "
+                "JSON-строкой.")
 
 
 @dataclass(frozen=True)
@@ -52,18 +83,17 @@ TOOLS: tuple[ToolSpec, ...] = (
                       "format": {"type": "string", "enum": ["text", "json"], "default": "text",
                                  "description": "text (коротко, по умолчанию) или json"}})),
     ToolSpec("list_orders", "Твои поданные приказы, их хэш и остаток ОК.", _schema()),
-    ToolSpec("validate_orders", "Проверить приказы без подачи: причина отказа и цена в ОК.",
+    ToolSpec("validate_orders", "Проверить приказы без подачи: причина отказа и цена в ОК." + _ORDERS_HINT,
              _schema({"orders": _ORDERS}, ["orders"])),
-    ToolSpec("submit_orders", "Подать приказы; mode: replace_all заменяет все, append добавляет.",
+    ToolSpec("submit_orders", "Подать приказы; mode: replace_all заменяет все, append добавляет." + _ORDERS_HINT,
              _schema({"orders": _ORDERS,
                       "mode": {"type": "string", "enum": ["replace_all", "append"], "default": "replace_all"}},
                      ["orders"])),
     ToolSpec("cancel_order", "Отменить приказ по ID (в П2 стоит ОК).", _schema({"id": _ID}, ["id"])),
-    ToolSpec("amend_order", "Изменить приказ: units, count или to (в П2 стоит ОК).",
-             _schema({"id": _ID, "patch": {"type": "object", "description": "{units?, count?, to?}",
-                                           "properties": {"units": _UNITS, "count": {"type": "integer"},
-                                                          "to": {"type": "string"}}}},
-                     ["id", "patch"])),
+    ToolSpec("amend_order", "Изменить приказ (в П2 стоит ОК): у move — юниты (плоско unit+count или units) "
+                            "и/или to, у recruit — count. Пример: amend_order(id=\"o3\", patch={\"unit\": "
+                            "\"assault\", \"count\": 1}); patch можно передать одной JSON-строкой.",
+             _schema({"id": _ID, "patch": _PATCH}, ["id", "patch"])),
     ToolSpec("estimate", "Прогноз боя: вероятность победы атакующего и средние потери сторон (200 прогонов). "
                          f"Пример: {EST_EXAMPLE}.",
              _schema({"attacker": _EST_UNITS, "defender": _EST_UNITS,
@@ -103,20 +133,30 @@ def _json_arg(value: Any, kind: type, name: str) -> Any:
         try:
             value = json.loads(value)
         except ValueError:
-            raise ToolInputError(f"{name}: ожидался JSON") from None
+            raise ToolInputError(f"{name}: ожидался JSON{_json_arg_hint(name)}") from None
+    if kind is list and isinstance(value, dict) and "kind" in value:
+        value = [value]     # one order without the surrounding list
     if not isinstance(value, kind):
-        raise ToolInputError(f"{name}: ожидался {'список' if kind is list else 'объект'}")
+        raise ToolInputError(f"{name}: ожидался {'список' if kind is list else 'объект'}{_json_arg_hint(name)}")
     return value
+
+
+def _json_arg_hint(name: str) -> str:
+    if name == "orders":
+        return f". Пример: orders=[{FLAT_MOVE}] или {STRING_ORDERS}"
+    if name == "patch":
+        return '. Пример: patch={"unit": "assault", "count": 1} или patch={"to": "P03"}'
+    return ""
 
 
 EXAMPLES = {
     "send_message": 'send_message(to=["Ник"], text="Предлагаю мир") или send_message(to="all", text="...")',
-    "validate_orders": 'validate_orders(orders=[{"kind": "move", "from": "P01", "to": "P02", '
-                       '"units": {"core:assault": 2}}])',
-    "submit_orders": 'submit_orders(orders=[{"kind": "move", "from": "P01", "to": "P02", '
-                     '"units": {"core:assault": 2}}], mode="replace_all")',
+    "validate_orders": f"validate_orders(orders=[{FLAT_MOVE}]) или validate_orders({STRING_ORDERS})",
+    "submit_orders": f'submit_orders(orders=[{FLAT_MOVE}], mode="replace_all") или '
+                     f"submit_orders({STRING_ORDERS})",
     "cancel_order": 'cancel_order(id="o3")',
-    "amend_order": 'amend_order(id="o3", patch={"to": "P03"})',
+    "amend_order": 'amend_order(id="o3", patch={"unit": "assault", "count": 1}) или '
+                   'amend_order(id="o3", patch={"to": "P03"})',
     "ready": 'ready(confirm_hash="<orders_hash из list_orders>")',
     "estimate": EST_EXAMPLE,
 }

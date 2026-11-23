@@ -20,6 +20,7 @@ from dah.engine import (DeadlineInfo, GameState, Ruleset, SeatOrders, TurnReport
                         render_report_text, render_state_text, reserved_resources, resolve, rules_text, scores,
                         state_hash, submit_orders, view_state)
 from dah.engine.model import canonical_json
+from dah.engine.orders import FLAT_MOVE_EXAMPLE, STRING_ORDERS_EXAMPLE, decode_json_arg, resolve_unit_ref
 from dah.engine.view import PHASE_LABELS
 from dah.journal import Journal, read_events
 from dah.store import GameDir, write_json, read_json
@@ -503,9 +504,18 @@ class Game:
 
     @staticmethod
     def _items(items: Any) -> list[Any]:
+        """orders: a list of order objects, or the same list as one JSON string (guaranteed: some MCP clients
+        lose nested objects but pass strings intact); one order object alone counts as a list of one. Orders
+        that are JSON strings themselves are decoded too; the engine normalizes the rest (flat unit/count)."""
+        items = decode_json_arg(items)
+        if isinstance(items, dict):
+            items = [items]
         if not isinstance(items, list):
-            raise GameError("INVALID", "orders должен быть списком приказов")
-        return items
+            got = "ничего" if items is None else repr(items)[:80]
+            raise GameError("INVALID", f"orders должен быть списком приказов (или этим списком одной JSON-строкой), "
+                                       f"получено {got}. Пример: orders=[{FLAT_MOVE_EXAMPLE}] или "
+                                       f"{STRING_ORDERS_EXAMPLE}")
+        return [decode_json_arg(item) for item in items]
 
     def validate(self, seat: str, items: Any) -> dict[str, Any]:
         items = self._items(items)
@@ -547,8 +557,12 @@ class Game:
         return self._apply_edit(seat, "cancel", order_id, res)
 
     def amend(self, seat: str, order_id: str, patch: Any) -> dict[str, Any]:
+        patch = decode_json_arg(patch)
+        if isinstance(patch, dict) and set(patch) == {"patch"}:   # {"patch": {...}} or {"patch": "<JSON>"}
+            patch = decode_json_arg(patch["patch"])
         if not isinstance(patch, dict):
-            raise GameError("INVALID", "patch должен быть объектом {units?, to?, count?}")
+            raise GameError("INVALID", "patch должен быть объектом {units?, unit?+count?, to?, count?} или им же "
+                                       "одной JSON-строкой")
         res = amend_order(self.state, self.ruleset, seat, self._book(seat), order_id, patch, self.phase)
         return self._apply_edit(seat, "amend", order_id, res)
 
@@ -585,15 +599,7 @@ class Game:
 
     def resolve_unit(self, ref: Any) -> str | None:
         """Full unit id for a full or short id, a state label (штурм) or a name (Штурмовики), any case."""
-        if not isinstance(ref, str) or not ref.strip():
-            return None
-        ref = ref.strip()
-        full = self.ruleset.resolve("unit", ref) or self.ruleset.resolve("unit", ref.lower())
-        if full:
-            return full
-        label = self._label(ref.split(":", 1)[-1])
-        hits = [uid for uid, u in self.ruleset.units.items() if label in (self._label(u.short), self._label(u.name))]
-        return hits[0] if len(hits) == 1 else None
+        return resolve_unit_ref(self.ruleset, ref)
 
     def resolve_province_type(self, ref: Any) -> str | None:
         """Full province type id for a full or short type id, a state label (агро, кузн.), a type name (Агромир),
