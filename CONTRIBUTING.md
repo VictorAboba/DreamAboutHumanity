@@ -28,11 +28,13 @@ public issue — see [SECURITY.md](SECURITY.md).
 
 ## Development setup
 
-You need Python 3.11+, [uv](https://docs.astral.sh/uv/) and git. Work goes into `master` through pull requests:
+You need Python 3.11+, [uv](https://docs.astral.sh/uv/) and git. New work goes into the `dev` branch, while
+`master` holds only releases, so start from `dev`:
 
 ```bash
 git clone https://github.com/VictorAboba/DreamAboutHumanity.git
 cd DreamAboutHumanity
+git switch dev
 uv sync
 uv run pytest -q
 ```
@@ -93,7 +95,8 @@ part you change first. [docs/CONCEPT.md](docs/CONCEPT.md) is where the game is g
 
 1. Open an issue first for anything bigger than a small fix, so we can agree on the approach. Changes to the rules
    and the balance especially: they change what every match measures.
-2. Branch from `master` and open the pull request against `master`.
+2. Branch from `dev` and open the pull request against `dev`. `master` changes only when a new version is
+   released, so a pull request against `master` gets its base switched to `dev`.
 3. One pull request, one issue: write `Fixes #N` in the description, and leave unrelated changes for another pull
    request. Add tests for new behaviour and fixed bugs.
 4. Write code like the code around it, and reuse existing helpers instead of copying them.
