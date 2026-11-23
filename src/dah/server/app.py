@@ -1,0 +1,296 @@
+"""FastAPI server of the game HTTP API (SLICE.md section 7).
+
+Every answer is `{ok: true, ...}` or `{ok: false, error: {code, message}}`. Every authenticated request is
+journaled as a `call` event (route, request/response size in chars, duration, status) under the turn and phase
+current when it arrived; host traffic (dah-waker, marked by the `X-DAH-Host` header, plus telemetry and spend)
+is flagged `host: true`. A background task calls `tick()` on every loaded game once per `tick_interval` seconds.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import hmac
+import json
+import logging
+import os
+import time
+from typing import Any, Awaitable, Callable
+
+from fastapi import FastAPI, Request
+from fastapi.responses import Response
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from dah.game import Clock, Game, GameError
+from dah.server.registry import GameRegistry
+
+log = logging.getLogger(__name__)
+
+MAX_WAIT_SECONDS = 55
+DEFAULT_WAIT_SECONDS = 45
+MAX_BODY_BYTES = 64_000
+# Routes only a host program (dah-waker) calls; with the `X-DAH-Host` header any call is host traffic. Host calls
+# do not count as the player's first call and are kept apart from the player's calls in the report.
+HOST_ROUTES = frozenset({"/v1/telemetry", "/v1/spend"})
+HOST_HEADER = "x-dah-host"
+ADMIN_HEADER = "x-dah-admin-key"
+STATUS = {"UNAUTHORIZED": 401, "FORBIDDEN": 403, "NOT_FOUND": 404, "INVALID": 400, "UNKNOWN_ID": 400,
+          "TOO_LARGE": 413, "INTERNAL": 500}
+
+Handler = Callable[[Game, str, Request, dict[str, Any]], Awaitable[dict[str, Any]] | dict[str, Any]]
+
+
+def _json_response(status: int, content: dict[str, Any]) -> tuple[Response, int]:
+    text = json.dumps(content, ensure_ascii=False, separators=(",", ":"))
+    return Response(text, status_code=status, media_type="application/json"), len(text)
+
+
+def _error(code: str, message: str) -> dict[str, Any]:
+    return {"ok": False, "error": {"code": code, "message": message}}
+
+
+def _bearer(request: Request) -> str:
+    header = request.headers.get("authorization", "")
+    scheme, _, token = header.partition(" ")
+    return token.strip() if scheme.lower() == "bearer" else ""
+
+
+def _key_matches(given: str, expected: str | None) -> bool:
+    return bool(expected) and hmac.compare_digest(given.encode("utf-8"), expected.encode("utf-8"))
+
+
+def _int_param(request: Request, name: str, default: int | None = None) -> int | None:
+    raw = request.query_params.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise GameError("INVALID", f"параметр {name} должен быть целым числом") from None
+
+
+async def _read_body(request: Request) -> bytes:
+    """The request body; refuses one over MAX_BODY_BYTES without reading the rest."""
+    chunks, size = [], 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > MAX_BODY_BYTES:
+            raise GameError("TOO_LARGE", f"тело запроса длиннее {MAX_BODY_BYTES} байт")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _parse_body(raw: bytes) -> dict[str, Any]:
+    if not raw.strip():
+        return {}
+    try:
+        data = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise GameError("INVALID", "тело запроса — не JSON") from None
+    if not isinstance(data, dict):
+        raise GameError("INVALID", "тело запроса должно быть JSON-объектом")
+    return data
+
+
+# ---------------------------------------------------------------- route handlers
+
+def whoami(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.whoami(seat)
+
+
+def rules(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return {"text": game.rules(request.query_params.get("topic"))}
+
+
+def phase(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.phase_info(seat)
+
+
+async def wait_phase(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    after_seq = _int_param(request, "after_seq")
+    max_seconds = max(0, min(MAX_WAIT_SECONDS, _int_param(request, "max_seconds", DEFAULT_WAIT_SECONDS) or 0))
+    changed = await game.wait_phase(after_seq, max_seconds)
+    return {"changed": changed, **game.phase_info(seat)}
+
+
+def state(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    fmt = request.query_params.get("format", "text")
+    if fmt == "json":
+        return {"state": game.state_json(seat)}
+    if fmt != "text":
+        raise GameError("INVALID", "format: text или json")
+    return {"text": game.state_text(seat, _int_param(request, "since_turn"))}
+
+
+def list_orders(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.orders(seat)
+
+
+def validate_orders(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.validate(seat, body.get("orders"))
+
+
+def submit_orders(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.submit(seat, body.get("orders"), body.get("mode", "append"))
+
+
+def cancel_order(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.cancel(seat, request.path_params["order_id"])
+
+
+def amend_order(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.amend(seat, request.path_params["order_id"], body)
+
+
+def estimate(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.estimate(body)
+
+
+def send_message(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.send_message(seat, body.get("to"), body.get("text"))
+
+
+def inbox(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.inbox(seat, _int_param(request, "since"))
+
+
+def ready(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.set_ready(seat, body.get("confirm_hash"))
+
+
+def unready(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.unready(seat)
+
+
+def history(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.history(seat, _int_param(request, "turn"))
+
+
+def telemetry(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    game.telemetry(seat, body.get("kind"), body.get("detail"))
+    return {}
+
+
+def spend(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    """`source: host` also needs the admin key in the `X-DAH-Admin-Key` header."""
+    host_allowed = _key_matches(request.headers.get(ADMIN_HEADER, ""), request.app.state.admin_key)
+    game.spend(seat, body.get("spent_usd"), body.get("source"), body.get("tokens"), turn=body.get("turn"),
+               phase=body.get("phase"), host_allowed=host_allowed)
+    return {}
+
+
+SEAT_ROUTES: list[tuple[str, str, Handler]] = [
+    ("GET", "/v1/whoami", whoami),
+    ("GET", "/v1/rules", rules),
+    ("GET", "/v1/phase", phase),
+    ("GET", "/v1/wait_phase", wait_phase),
+    ("GET", "/v1/state", state),
+    ("GET", "/v1/orders", list_orders),
+    ("POST", "/v1/orders/validate", validate_orders),
+    ("POST", "/v1/orders", submit_orders),
+    ("DELETE", "/v1/orders/{order_id}", cancel_order),
+    ("PATCH", "/v1/orders/{order_id}", amend_order),
+    ("POST", "/v1/estimate", estimate),
+    ("POST", "/v1/messages", send_message),
+    ("GET", "/v1/inbox", inbox),
+    ("POST", "/v1/ready", ready),
+    ("POST", "/v1/unready", unready),
+    ("GET", "/v1/history", history),
+    ("POST", "/v1/telemetry", telemetry),
+    ("POST", "/v1/spend", spend),
+]
+
+
+# ---------------------------------------------------------------- app
+
+async def _run(handler: Callable[..., Any], *args: Any) -> tuple[int, dict[str, Any]]:
+    try:
+        result = handler(*args)
+        if asyncio.iscoroutine(result):
+            result = await result
+        return 200, {"ok": True, **result}
+    except GameError as exc:
+        return STATUS.get(exc.code, 409), _error(exc.code, exc.message)
+    except Exception:
+        log.exception("request failed")
+        return 500, _error("INTERNAL", "внутренняя ошибка сервера")
+
+
+def create_app(games_dir: str, *, admin_key: str | None = None, clock: Clock = time.time,
+               tick_interval: float | None = 1.0) -> FastAPI:
+    """`admin_key` defaults to $DAH_ADMIN_KEY; `tick_interval=None` disables the background clock (tests)."""
+    registry = GameRegistry(games_dir, clock)
+    admin_key = admin_key if admin_key is not None else os.environ.get("DAH_ADMIN_KEY") or None
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app: FastAPI):
+        task = asyncio.create_task(_ticker(registry, tick_interval)) if tick_interval else None
+        yield
+        if task:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    # No /docs, /redoc or /openapi.json: every route needs a key.
+    app = FastAPI(title="DreamAboutHumanity", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    app.state.registry = registry
+    app.state.admin_key = admin_key
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error(request: Request, exc: StarletteHTTPException) -> Response:
+        code = "NOT_FOUND" if exc.status_code == 404 else f"HTTP_{exc.status_code}"
+        return _json_response(exc.status_code, _error(code, str(exc.detail)))[0]
+
+    def seat_endpoint(route: str, handler: Handler) -> Callable[[Request], Awaitable[Response]]:
+        async def endpoint(request: Request) -> Response:
+            started = time.perf_counter()
+            auth = registry.authenticate(_bearer(request))
+            if auth is None:
+                return _json_response(401, _error("UNAUTHORIZED", "нужен заголовок Authorization: Bearer <ключ>"))[0]
+            game, seat = auth
+            game.tick()
+            turn, phase_now = game.state.turn, game.phase
+            host = HOST_HEADER in request.headers or route.split(" ", 1)[1] in HOST_ROUTES
+            if not host:
+                game.note_first_call(seat)
+            raw = b""
+            try:
+                raw = await _read_body(request)
+                body = _parse_body(raw)
+            except GameError as exc:
+                status, content = STATUS.get(exc.code, 400), _error(exc.code, exc.message)
+            else:
+                status, content = await _run(handler, game, seat, request, body)
+            response, resp_chars = _json_response(status, content)
+            req_chars = len(raw.decode("utf-8", errors="replace")) + len(request.url.query)
+            game.record_call(seat, route, req_chars, resp_chars, (time.perf_counter() - started) * 1000, status,
+                             turn=turn, phase=phase_now, host=host)
+            return response
+        return endpoint
+
+    for method, path, handler in SEAT_ROUTES:
+        app.add_api_route(path, seat_endpoint(f"{method} {path}", handler), methods=[method])
+
+    @app.get("/v1/admin/games/{game_id}")
+    async def admin_game(game_id: str, request: Request) -> Response:
+        started = time.perf_counter()
+        if not _key_matches(_bearer(request), admin_key):
+            return _json_response(403, _error("FORBIDDEN", "нужен админ-ключ"))[0]
+        registry.refresh()
+        game = registry.games.get(game_id)
+        if game is None:
+            return _json_response(404, _error("NOT_FOUND", f"нет партии {game_id!r}"))[0]
+        game.tick()
+        turn, phase_now = game.state.turn, game.phase
+        response, resp_chars = _json_response(200, {"ok": True, **game.admin_status()})
+        game.record_call("admin", "GET /v1/admin/games/{id}", len(request.url.query), resp_chars,
+                         (time.perf_counter() - started) * 1000, 200, turn=turn, phase=phase_now, host=True)
+        return response
+
+    return app
+
+
+async def _ticker(registry: GameRegistry, interval: float) -> None:
+    while True:
+        registry.tick_all()
+        await asyncio.sleep(interval)

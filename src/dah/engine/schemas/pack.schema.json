@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dah.local/schemas/pack.schema.json",
+  "type": "object",
+  "required": ["id", "version", "title", "engine_api"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {"$ref": "common.schema.json#/$defs/id"},
+    "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+    "title": {"$ref": "common.schema.json#/$defs/name"},
+    "author": {"type": "string", "maxLength": 100},
+    "requires": {"type": "array", "items": {"$ref": "common.schema.json#/$defs/id"}},
+    "engine_api": {"type": "string", "pattern": "^\\^[0-9]+$"}
+  }
+}

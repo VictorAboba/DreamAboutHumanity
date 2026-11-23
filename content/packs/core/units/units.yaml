@@ -1,0 +1,24 @@
+- id: assault
+  name: Штурмовики
+  short: штурм
+  attack: 3
+  defense: 3
+  cost: {alloy: 12}
+  upkeep: {provisions: 1}
+  counters: [artillery]
+- id: armor
+  name: Бронеход
+  short: бронех
+  attack: 5
+  defense: 4
+  cost: {alloy: 25}
+  upkeep: {provisions: 2}
+  counters: [assault]
+- id: artillery
+  name: Артиллерия
+  short: арт
+  attack: 4
+  defense: 1
+  cost: {alloy: 20}
+  upkeep: {provisions: 1}
+  counters: [armor]

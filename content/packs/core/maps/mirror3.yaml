@@ -1,0 +1,48 @@
+id: mirror3
+name: Зеркало Трёх
+max_players: 3
+provinces:
+  - {id: P01, name: Столица Аргос, type: capital}
+  - {id: P02, name: Кузня Вейр, type: forge}
+  - {id: P03, name: Нивы Сола, type: agri}
+  - {id: P04, name: Пепельный Брод, type: waste}
+  - {id: P05, name: Столица Тессар, type: capital}
+  - {id: P06, name: Кузня Орм, type: forge}
+  - {id: P07, name: Нивы Лира, type: agri}
+  - {id: P08, name: Солёная Пустошь, type: waste}
+  - {id: P09, name: Столица Кайрон, type: capital}
+  - {id: P10, name: Кузня Дарн, type: forge}
+  - {id: P11, name: Нивы Эльма, type: agri}
+  - {id: P12, name: Сухой Предел, type: waste}
+  - {id: P13, name: Сердце Кузен, type: forge}
+  - {id: P14, name: Зелёный Перекрёсток, type: agri}
+  - {id: P15, name: Мёртвое Око, type: waste}
+edges:
+  - [P01, P02]
+  - [P01, P03]
+  - [P01, P04]
+  - [P05, P06]
+  - [P05, P07]
+  - [P05, P08]
+  - [P09, P10]
+  - [P09, P11]
+  - [P09, P12]
+  - [P02, P07]
+  - [P06, P11]
+  - [P10, P03]
+  - [P04, P13]
+  - [P04, P14]
+  - [P04, P15]
+  - [P08, P13]
+  - [P08, P14]
+  - [P08, P15]
+  - [P12, P13]
+  - [P12, P14]
+  - [P12, P15]
+  - [P13, P14]
+  - [P14, P15]
+  - [P15, P13]
+starts:
+  - {capital: P01, provinces: [P02, P03, P04]}
+  - {capital: P05, provinces: [P06, P07, P08]}
+  - {capital: P09, provinces: [P10, P11, P12]}

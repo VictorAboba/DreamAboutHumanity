@@ -1,0 +1,11 @@
+id: covenant
+name: Завет Предела
+lore: >-
+  Последние верные старому договору миры на краю обжитого пространства.
+  Они не ищут чудес: только сплав, хлеб и крепкий строй.
+bonuses: []
+penalties: []
+starting:
+  resources: {alloy: 40, provisions: 30}
+  units: {assault: 3}
+  buildings: [barracks]

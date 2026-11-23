@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dah.local/schemas/building.schema.json",
+  "type": "object",
+  "required": ["id", "name", "cost", "build_turns"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {"$ref": "common.schema.json#/$defs/id"},
+    "name": {"$ref": "common.schema.json#/$defs/name"},
+    "short": {"$ref": "common.schema.json#/$defs/short"},
+    "cost": {"$ref": "common.schema.json#/$defs/amounts"},
+    "build_turns": {"type": "integer", "minimum": 1, "maximum": 10},
+    "effects": {"$ref": "common.schema.json#/$defs/effects"},
+    "recruit": {"type": "boolean"},
+    "max_per_province": {"const": 1}
+  }
+}

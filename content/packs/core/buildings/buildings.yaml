@@ -1,0 +1,17 @@
+- id: mine
+  name: Шахта
+  cost: {alloy: 20}
+  build_turns: 1
+  effects:
+    - {type: income, resource: alloy, amount: 3}
+- id: farm
+  name: Ферма
+  cost: {alloy: 15}
+  build_turns: 1
+  effects:
+    - {type: income, resource: provisions, amount: 3}
+- id: barracks
+  name: Казарма
+  cost: {alloy: 30}
+  build_turns: 2
+  recruit: true

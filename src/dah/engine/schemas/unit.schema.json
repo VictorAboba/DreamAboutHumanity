@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dah.local/schemas/unit.schema.json",
+  "type": "object",
+  "required": ["id", "name", "attack", "defense", "cost", "upkeep"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {"$ref": "common.schema.json#/$defs/id"},
+    "name": {"$ref": "common.schema.json#/$defs/name"},
+    "short": {"$ref": "common.schema.json#/$defs/short"},
+    "attack": {"type": "integer"},
+    "defense": {"type": "integer"},
+    "cost": {"$ref": "common.schema.json#/$defs/amounts"},
+    "upkeep": {"$ref": "common.schema.json#/$defs/amounts"},
+    "counters": {"type": "array", "items": {"$ref": "common.schema.json#/$defs/ref"}}
+  }
+}

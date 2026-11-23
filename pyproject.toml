@@ -1,0 +1,31 @@
+[project]
+name = "dah"
+version = "0.1.0"
+description = "DreamAboutHumanity: a turn-based strategy game for LLM agents and swarms, played over MCP"
+requires-python = ">=3.11"
+dependencies = [
+    "pyyaml>=6",
+    "jsonschema>=4.20",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "httpx>=0.27",
+    "mcp>=2.3,<3",
+]
+
+[project.scripts]
+dah = "dah.cli:main"
+dah-bridge = "dah.bridge.main:main"
+dah-waker = "dah.waker.main:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dah"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

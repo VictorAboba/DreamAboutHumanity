@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dah.local/schemas/common.schema.json",
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[a-z0-9_]{1,32}$"},
+    "ref": {"type": "string", "pattern": "^([a-z0-9_]{1,32}:)?[a-z0-9_]{1,32}$"},
+    "name": {"type": "string", "minLength": 1, "maxLength": 48},
+    "short": {"type": "string", "minLength": 1, "maxLength": 12},
+    "amounts": {
+      "type": "object",
+      "propertyNames": {"$ref": "#/$defs/ref"},
+      "additionalProperties": {"type": "integer"}
+    },
+    "effect": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {"type": {"type": "string"}}
+    },
+    "effects": {"type": "array", "items": {"$ref": "#/$defs/effect"}},
+    "duration": {
+      "oneOf": [
+        {"type": "integer", "minimum": 1},
+        {"type": "string", "pattern": "^[0-9]+[smh]$"}
+      ]
+    }
+  }
+}

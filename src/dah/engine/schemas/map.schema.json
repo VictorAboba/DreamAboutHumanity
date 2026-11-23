@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dah.local/schemas/map.schema.json",
+  "type": "object",
+  "required": ["id", "name", "max_players", "provinces", "edges", "starts"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {"$ref": "common.schema.json#/$defs/id"},
+    "name": {"$ref": "common.schema.json#/$defs/name"},
+    "max_players": {"type": "integer", "minimum": 1, "maximum": 16},
+    "provinces": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "type"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {"type": "string", "pattern": "^[A-Z][A-Z0-9]{0,7}$"},
+          "name": {"$ref": "common.schema.json#/$defs/name"},
+          "type": {"$ref": "common.schema.json#/$defs/ref"}
+        }
+      }
+    },
+    "edges": {
+      "type": "array",
+      "items": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 2}
+    },
+    "starts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["capital"],
+        "additionalProperties": false,
+        "properties": {
+          "capital": {"type": "string"},
+          "provinces": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    }
+  }
+}
