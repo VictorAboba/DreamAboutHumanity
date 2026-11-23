@@ -93,9 +93,55 @@ def round_half_up(x: float) -> int:
     return int(math.floor(x + 0.5))
 
 
+def _ability(ruleset: Ruleset, unit: str, name: str, key: Any) -> bool:
+    return bool(ruleset.stat(f"unit.{unit}.ability.{name}.on", key))
+
+
+def attack_shares(ruleset: Ruleset, units: Mapping[str, int], key: Any) -> tuple[float, float]:
+    """(share of the attack power from `ignore_fortify` units, share from `siege` units) of an attacking stack."""
+    total = ignore = siege = 0.0
+    for unit, n in units.items():
+        if n <= 0:
+            continue
+        power = ruleset.stat(f"unit.{unit}.attack", key) * n
+        total += power
+        if _ability(ruleset, unit, "ignore_fortify", key):
+            ignore += power
+        if _ability(ruleset, unit, "siege", key):
+            siege += power
+    if total <= 0:
+        return 0.0, 0.0
+    return ignore / total, siege / total
+
+
+def effective_defense_mul(ruleset: Ruleset, defense_mul: float, attacker_units: Mapping[str, int],
+                          attacker_key: Any) -> float:
+    """Province defense multiplier against a stack: each `siege` unit's share of the attack power meets at most its
+    `siege.cap`, the rest the full multiplier (TECH_AND_SETUP.md 1.2)."""
+    if defense_mul <= 1.0:
+        return defense_mul
+    total = capped = 0.0
+    for unit, n in sorted(attacker_units.items()):
+        if n <= 0:
+            continue
+        power = ruleset.stat(f"unit.{unit}.attack", attacker_key) * n
+        total += power
+        if _ability(ruleset, unit, "siege", attacker_key):
+            cap = ruleset.stat(f"unit.{unit}.ability.siege.cap", attacker_key)
+            capped += power * min(defense_mul, cap)
+        else:
+            capped += power * defense_mul
+    if total <= 0 or capped == total * defense_mul:
+        return defense_mul
+    return capped / total
+
+
 def strength(ruleset: Ruleset, force: Force, enemy_units: Mapping[str, int], *, defending: bool,
-             faction: str | None = None, defense_mul: float = 1.0, fortified: bool = False) -> float:
-    """Deterministic part of the formula (without the random factor)."""
+             faction: Any = None, defense_mul: float = 1.0, fortified: bool = False,
+             enemy_faction: Any = None) -> float:
+    """Deterministic part of the formula (without the random factor). `faction`/`enemy_faction` are stat keys
+    (faction id or techs.Profile). A defender owned by a seat counts `garrison` (+defense in its own province);
+    the attacker's `siege` and `ignore_fortify` units weaken the province multiplier and the fortify bonus."""
     stat = "defense" if defending else "attack"
     counter_mul = ruleset.stat("combat.counter_mul", faction)
     hasty_mul = 1.0 - ruleset.stat("p2.hasty_penalty", faction)
@@ -103,14 +149,18 @@ def strength(ruleset: Ruleset, force: Force, enemy_units: Mapping[str, int], *, 
     total = 0.0
     for unit, n in sorted(force.units.items()):
         value = ruleset.stat(f"unit.{unit}.{stat}", faction)
+        if defending and force.owner is not None and _ability(ruleset, unit, "garrison", faction):
+            value += ruleset.stat(f"unit.{unit}.ability.garrison.defense", faction)
         if present.intersection(ruleset.units[unit].counters):
             value *= counter_mul
         hasty_n = 0 if defending else force.hasty.get(unit, 0)
         total += value * ((n - hasty_n) + hasty_n * hasty_mul)
     if defending:
-        total *= defense_mul
+        total *= effective_defense_mul(ruleset, defense_mul, enemy_units, enemy_faction)
         if fortified:
-            total *= 1.0 + ruleset.stat("combat.fortify_bonus", faction)
+            ignore, _ = attack_shares(ruleset, enemy_units, enemy_faction)
+            bonus = ruleset.stat("combat.fortify_bonus", faction)
+            total *= 1.0 + (bonus if ignore == 0 else bonus * (1.0 - ignore))
     return total
 
 
@@ -136,7 +186,8 @@ def fight(ruleset: Ruleset, a: Force, b: Force, rng: random.Random, *, b_defendi
     """Resolve one battle; `a` always attacks. Applies losses to both forces in place."""
     sa = strength(ruleset, a, b.units, defending=False, faction=factions.get(a.owner))
     sb = strength(ruleset, b, a.units, defending=b_defending, faction=factions.get(b.owner),
-                  defense_mul=defense_mul if b_defending else 1.0, fortified=fortified and b_defending)
+                  defense_mul=defense_mul if b_defending else 1.0, fortified=fortified and b_defending,
+                  enemy_faction=factions.get(a.owner))
     sa *= rng.uniform(0.9, 1.1)
     sb *= rng.uniform(0.9, 1.1)
     a_won = sa > sb
@@ -154,9 +205,12 @@ def fight(ruleset: Ruleset, a: Force, b: Force, rng: random.Random, *, b_defendi
 
 def estimate(ruleset: Ruleset, attacker_units: Mapping[str, int], defender_units: Mapping[str, int],
              province_type: str, fortified: bool = False, hasty: bool = False,
-             runs: int = ESTIMATE_RUNS) -> dict[str, Any]:
+             runs: int = ESTIMATE_RUNS, *, attacker_key: Any = None, defender_key: Any = None,
+             defense_mul: float | None = None) -> dict[str, Any]:
     """Monte-Carlo forecast of one attack, deterministic (fixed seed). Unit/type ids may be short.
 
+    `attacker_key`/`defender_key`: stat keys (faction id or Profile) of the sides, None = base stats;
+    `defense_mul`: the province's multiplier when known (type x province.defense_mul), else the type's.
     Returns {win_prob, attacker_losses_avg, defender_losses_avg}. Raises KeyError on unknown ids.
     """
     att = _resolve_units(ruleset, attacker_units)
@@ -164,8 +218,10 @@ def estimate(ruleset: Ruleset, attacker_units: Mapping[str, int], defender_units
     ptype = ruleset.resolve("province_type", province_type)
     if ptype is None:
         raise KeyError(f"unknown province type {province_type!r}")
-    defense_mul = ruleset.province_types[ptype].defense_mul
+    if defense_mul is None:
+        defense_mul = ruleset.province_types[ptype].defense_mul
     rng = stream(ESTIMATE_SEED, 0, "estimate", "")
+    keys = {"a": attacker_key, "d": defender_key}
     wins = 0
     lost_a = lost_d = 0
     for _ in range(runs):
@@ -174,7 +230,7 @@ def estimate(ruleset: Ruleset, attacker_units: Mapping[str, int], defender_units
         if not d.total():
             wins += 1
             continue
-        res = fight(ruleset, a, d, rng, b_defending=True, factions={}, defense_mul=defense_mul, fortified=fortified)
+        res = fight(ruleset, a, d, rng, b_defending=True, factions=keys, defense_mul=defense_mul, fortified=fortified)
         wins += res.a_won
         lost_a += sum(res.losses_a.values())
         lost_d += sum(res.losses_b.values())

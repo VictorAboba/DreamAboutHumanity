@@ -80,6 +80,24 @@ MAPPING = [
     ("unready", {}, "POST", "/v1/unready", {}, {}),
     ("history", {"turn": 2}, "GET", "/v1/history", {"turn": "2"}, None),
     ("history", {}, "GET", "/v1/history", {}, None),
+    # stage 2 (TECH_AND_SETUP.md section 4)
+    ("ready", {}, "POST", "/v1/ready", {}, {"confirm_hash": None}),
+    ("estimate", {"attacker": {"militia": 2}, "defender": {"militia": 1}, "province_type": "forge",
+                  "side": "defender", "opponent": "Хор"}, "POST", "/v1/estimate", {},
+     {"attacker": {"militia": 2}, "defender": {"militia": 1}, "province_type": "forge", "fortified": False,
+      "hasty": False, "side": "defender", "opponent": "Хор"}),
+    ("get_setup", {}, "GET", "/v1/setup", {}, None),
+    ("choose_faction", {"prefs": ["iron", "ash"]}, "POST", "/v1/setup/faction", {}, {"prefs": ["iron", "ash"]}),
+    ("choose_faction", {"prefs": '["iron", "ash"]'}, "POST", "/v1/setup/faction", {}, {"prefs": ["iron", "ash"]}),
+    ("choose_faction", {"faction": "iron"}, "POST", "/v1/setup/faction", {}, {"prefs": "iron"}),
+    ("choose_artifacts", {"ids": ["ember"]}, "POST", "/v1/setup/artifacts", {}, {"ids": ["ember"]}),
+    ("choose_artifacts", {"artifacts": "ember"}, "POST", "/v1/setup/artifacts", {}, {"ids": "ember"}),
+    ("list_techs", {}, "GET", "/v1/techs", {}, None),
+    ("describe", {"id": "knight"}, "GET", "/v1/describe", {"id": "knight"}, None),
+    ("describe", {"name": "Рыцарь"}, "GET", "/v1/describe", {"id": "Рыцарь"}, None),
+    ("submit_orders", {"orders": {"kind": "research", "tech": "smithing"}}, "POST", "/v1/orders", {},
+     {"orders": [{"kind": "research", "tech": "smithing"}], "mode": "replace_all"}),
+    ("amend_order", {"id": "o2", "patch": '{"tech": "drills"}'}, "PATCH", "/v1/orders/o2", {}, {"tech": "drills"}),
 ]
 
 

@@ -14,11 +14,13 @@ class ApiError(Exception):
 
 
 class ApiClient:
-    def __init__(self, server_url: str, key: str, timeout: float = 70.0) -> None:
+    def __init__(self, server_url: str, key: str, timeout: float = 70.0,
+                 transport: httpx.BaseTransport | None = None) -> None:
         self._http = httpx.Client(
             base_url=server_url.rstrip("/"),
             headers={"Authorization": f"Bearer {key}"},
             timeout=timeout,
+            transport=transport,  # tests: an in-process app
         )
 
     def close(self) -> None:
@@ -85,5 +87,20 @@ class ApiClient:
     def leave_pact(self, pact_id: str) -> dict[str, Any]:
         return self._call("POST", f"/v1/pacts/{pact_id}/leave", json={})
 
-    def ready(self, confirm_hash: str) -> dict[str, Any]:
-        return self._call("POST", "/v1/ready", json={"confirm_hash": confirm_hash})
+    def ready(self, confirm_hash: str | None) -> dict[str, Any]:
+        """`None`: no hash (the setup phase accepts that; it confirms the current choice)."""
+        return self._call("POST", "/v1/ready", json={} if confirm_hash is None else {"confirm_hash": confirm_hash})
+
+    # --- stage 2: setup phase and techs (TECH_AND_SETUP.md section 4) ---
+
+    def get_setup(self) -> dict[str, Any]:
+        return self._call("GET", "/v1/setup")
+
+    def choose_faction(self, prefs: list[str]) -> dict[str, Any]:
+        return self._call("POST", "/v1/setup/faction", json={"prefs": prefs})
+
+    def choose_artifacts(self, ids: list[str]) -> dict[str, Any]:
+        return self._call("POST", "/v1/setup/artifacts", json={"ids": ids})
+
+    def list_techs(self) -> dict[str, Any]:
+        return self._call("GET", "/v1/techs")

@@ -10,7 +10,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from dah.cli import main
-from dah.game import Game, make_config
+from dah.game import Game
+from slice_helpers import slice_config
 from dah.server import create_app, spectate
 from dah.store import GameDir, hash_key, init_game_dir, read_json
 
@@ -31,7 +32,7 @@ class FakeClock:
 class Env:
     def __init__(self, tmp_path, turn_limit: int = 3) -> None:
         self.clock = FakeClock()
-        config = make_config(game_id="g1", scenario="core:slice2", seats=SEATS, seed=7, turn_limit=turn_limit)
+        config = slice_config(game_id="g1", scenario="core:slice2", seats=SEATS, seed=7, turn_limit=turn_limit)
         self.gdir, keys = init_game_dir(tmp_path, config)
         self.spectator_key = self.gdir.issue_spectator_key()
         self.game = Game.create(self.gdir, self.clock)

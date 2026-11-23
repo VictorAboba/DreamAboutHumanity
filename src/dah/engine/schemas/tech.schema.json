@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dah.local/schemas/tech.schema.json",
+  "type": "object",
+  "required": [
+    "id",
+    "name",
+    "branch",
+    "tier",
+    "cost"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "name": {
+      "$ref": "common.schema.json#/$defs/lname"
+    },
+    "branch": {
+      "$ref": "common.schema.json#/$defs/ref"
+    },
+    "tier": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10
+    },
+    "cost": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "requires": {
+      "$ref": "common.schema.json#/$defs/refs"
+    },
+    "requires_any": {
+      "$ref": "common.schema.json#/$defs/refs"
+    },
+    "requires_tier": {
+      "description": "at least `count` researched techs of `tier` (of this tech's branch unless same_branch is false)",
+      "type": "object",
+      "required": [
+        "tier",
+        "count"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "tier": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        },
+        "same_branch": {
+          "type": "boolean"
+        }
+      }
+    },
+    "factions": {
+      "$ref": "common.schema.json#/$defs/refs"
+    },
+    "effects": {
+      "$ref": "common.schema.json#/$defs/effects"
+    },
+    "unlocks": {
+      "$ref": "common.schema.json#/$defs/refs"
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 1000
+    },
+    "lore": {
+      "$ref": "common.schema.json#/$defs/lore"
+    }
+  }
+}

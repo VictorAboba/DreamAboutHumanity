@@ -7,7 +7,8 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Mapping
 
-PHASES = ("negotiation_1", "actions", "negotiation_2", "resolution", "game_over")
+PHASES = ("setup", "negotiation_1", "actions", "negotiation_2", "resolution", "game_over")
+SETUP = "setup"          # before turn 1 when the scenario has a setup (TECH_AND_SETUP.md section 2)
 P2 = "negotiation_2"
 ACTIONS = "actions"
 HONOR = "honor"
@@ -60,6 +61,14 @@ class Player:
     alive: bool = True
     command_points: int = 0
     flags: list[str] = field(default_factory=list)
+    # stage 2 (TECH_AND_SETUP.md): left out of state_hash while empty, so slice games hash as before
+    techs: list[str] = field(default_factory=list)          # researched, in order of completion
+    research: dict[str, int] = field(default_factory=dict)  # tech -> points put in so far (kept when switching)
+    researching: str | None = None                          # the active tech (persists until done or switched)
+    artifacts: list[str] = field(default_factory=list)      # chosen at setup (hidden from others until game end)
+
+
+PLAYER_STAGE2_FIELDS = ("techs", "research", "researching", "artifacts")
 
 
 @dataclass
@@ -108,6 +117,10 @@ def state_hash(state: GameState) -> str:
     data.pop("seq")
     if not data.get("pacts"):
         data.pop("pacts", None)
+    for player in data["players"].values():
+        for key in PLAYER_STAGE2_FIELDS:
+            if not player.get(key):
+                player.pop(key, None)
     return sha256_json(data)
 
 
@@ -120,7 +133,7 @@ def issue_order_id(state: GameState, seat: str) -> str:
 @dataclass
 class Order:
     id: str
-    kind: str                        # move | recruit | build | fortify
+    kind: str                        # move | recruit | build | fortify | research
     phase_added: str = ACTIONS       # actions | negotiation_2
     src: str | None = None           # move: from
     dst: str | None = None           # move: to
@@ -130,6 +143,7 @@ class Order:
     count: int | None = None
     building: str | None = None
     pact: str = HONOR                # move: "honor" (keep pacts) | "break" (fight a pact partner, ending the pact)
+    tech: str | None = None          # research: the tech to make active
 
     @property
     def hasty(self) -> bool:
@@ -143,6 +157,8 @@ class Order:
             out.update({"province": self.province, "unit": self.unit, "count": self.count})
         elif self.kind == "build":
             out.update({"province": self.province, "building": self.building})
+        elif self.kind == "research":
+            out["tech"] = self.tech
         else:
             out["province"] = self.province
         return out
@@ -154,7 +170,7 @@ class Order:
             src=data.get("from"), dst=data.get("to"),
             units=dict(data["units"]) if data.get("units") is not None else None,
             province=data.get("province"), unit=data.get("unit"), count=data.get("count"),
-            building=data.get("building"), pact=data.get("pact") or HONOR,
+            building=data.get("building"), pact=data.get("pact") or HONOR, tech=data.get("tech"),
         )
 
 

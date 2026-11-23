@@ -5,7 +5,7 @@ from dah.engine import (GameState, SeatOrders, TurnReport, build_ruleset, issue_
 from dah.engine.model import P2
 
 AS, AR, AT = "core:assault", "core:armor", "core:artillery"
-ALLOY, FOOD = "core:alloy", "core:provisions"
+ALLOY, FOOD, CREED = "core:alloy", "core:provisions", "core:creed"
 
 
 @pytest.fixture(scope="module")
@@ -58,7 +58,7 @@ def test_new_game_state(rs3):
         assert len(owned) == 4
         capital = next(p for p in owned if p.id in rs3.map.capitals)
         assert capital.units == {AS: 4} and capital.buildings == ["core:barracks"]   # core 0.2: 4 assault
-        assert st.players[seat].resources == {ALLOY: 30, FOOD: 15}
+        assert st.players[seat].resources == {ALLOY: 30, FOOD: 15, CREED: 0}
         assert st.players[seat].command_points == 3
     # the free start is neutral and empty
     neutral = [p for p in st.provinces.values() if p.owner is None]
@@ -74,7 +74,7 @@ def test_capture_empty_neutral_and_economy(duel, rs2):
     assert new.provinces["P09"].owner == "A" and new.provinces["P09"].units == {AS: 2}
     assert rep.public["ownership_changes"] == [{"province": "P09", "from": None, "to": "A"}]
     # core 0.2: start 30/15; income capital 3/2, forge 4, agri 4, waste 1/1, captured forge 4; upkeep 2 provisions
-    assert new.players["A"].resources == {ALLOY: 30 + 12, FOOD: 15 + 7 - 2}
+    assert new.players["A"].resources == {ALLOY: 30 + 12, FOOD: 15 + 7 - 2, CREED: 3}   # core 0.3: capital creed +3
     assert new.turn == 2 and new.phase == "negotiation_1"
     assert rep.public["scores"] == scores(new, rs2) == {"A": 8, "B": 7}
 
@@ -269,8 +269,8 @@ def test_report_visibility_and_idle(duel, rs2):
     assert any(e["kind"] == "recruited" for e in rep.by_seat["B"])
     assert not any(e["kind"] in ("recruited", "economy") and "A" not in e["seats"] for e in rep.by_seat["A"])
     assert any(e["kind"] == "economy" for e in rep.by_seat["A"])
-    assert rep.idle["A"] == {"resources": {ALLOY: 30, FOOD: 15}, "units": 3}   # core 0.2 start resources
-    assert rep.idle["B"] == {"resources": {ALLOY: 18, FOOD: 15}, "units": 2}
+    assert rep.idle["A"] == {"resources": {ALLOY: 30, FOOD: 15, CREED: 0}, "units": 3}   # core start resources
+    assert rep.idle["B"] == {"resources": {ALLOY: 18, FOOD: 15, CREED: 0}, "units": 2}
 
 
 def test_attack_from_two_origins_retreats_each_part_home(duel, rs2):

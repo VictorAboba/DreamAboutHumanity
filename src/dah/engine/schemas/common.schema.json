@@ -2,26 +2,108 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://dah.local/schemas/common.schema.json",
   "$defs": {
-    "id": {"type": "string", "pattern": "^[a-z0-9_]{1,32}$"},
-    "ref": {"type": "string", "pattern": "^([a-z0-9_]{1,32}:)?[a-z0-9_]{1,32}$"},
-    "name": {"type": "string", "minLength": 1, "maxLength": 48},
-    "short": {"type": "string", "minLength": 1, "maxLength": 12},
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9_]{1,32}$"
+    },
+    "ref": {
+      "type": "string",
+      "pattern": "^([a-z0-9_]{1,32}:)?[a-z0-9_]{1,32}$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 48
+    },
+    "short": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 12
+    },
     "amounts": {
       "type": "object",
-      "propertyNames": {"$ref": "#/$defs/ref"},
-      "additionalProperties": {"type": "integer"}
+      "propertyNames": {
+        "$ref": "#/$defs/ref"
+      },
+      "additionalProperties": {
+        "type": "integer"
+      }
     },
     "effect": {
       "type": "object",
-      "required": ["type"],
-      "properties": {"type": {"type": "string"}}
+      "description": "`type` (slice packs) or `effect` (TECH_AND_SETUP.md): the effect kind",
+      "anyOf": [
+        {
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "required": [
+            "effect"
+          ]
+        }
+      ],
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "effect": {
+          "type": "string"
+        }
+      }
     },
-    "effects": {"type": "array", "items": {"$ref": "#/$defs/effect"}},
+    "effects": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/effect"
+      }
+    },
     "duration": {
       "oneOf": [
-        {"type": "integer", "minimum": 1},
-        {"type": "string", "pattern": "^[0-9]+[smh]$"}
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "type": "string",
+          "pattern": "^[0-9]+[smh]$"
+        }
       ]
+    },
+    "lname": {
+      "description": "a name, or {ru, en} (ru is shown to players)",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/name"
+        },
+        {
+          "type": "object",
+          "required": [
+            "ru"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "ru": {
+              "$ref": "#/$defs/name"
+            },
+            "en": {
+              "$ref": "#/$defs/name"
+            }
+          }
+        }
+      ]
+    },
+    "refs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ref"
+      }
+    },
+    "lore": {
+      "description": "inline text, or a path to a Markdown file of the pack (lore/x.md)",
+      "type": "string",
+      "maxLength": 1000
     }
   }
 }

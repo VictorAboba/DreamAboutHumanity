@@ -128,11 +128,13 @@ h4 { margin: 12px 0 6px; font-size: 14px; }
         <button type="button" role="tab" data-tab="feed" aria-selected="true">Лента</button>
         <button type="button" role="tab" data-tab="mail" aria-selected="false">Переписка</button>
         <button type="button" role="tab" data-tab="score" aria-selected="false">Счёт</button>
+        <button type="button" role="tab" data-tab="techs" aria-selected="false" hidden id="techstab">Технологии</button>
         <button type="button" role="tab" data-tab="timings" aria-selected="false" hidden id="timingstab">Тайминги</button>
       </div>
       <div id="tab-feed" role="tabpanel"></div>
       <div id="tab-mail" role="tabpanel" hidden></div>
       <div id="tab-score" role="tabpanel" hidden></div>
+      <div id="tab-techs" role="tabpanel" hidden></div>
       <div id="tab-timings" role="tabpanel" hidden></div>
     </section>
   </div>
@@ -151,13 +153,15 @@ h4 { margin: 12px 0 6px; font-size: 14px; }
 (function () {
   "use strict";
   var SVGNS = "http://www.w3.org/2000/svg";
-  var PHASES = {negotiation_1: "Переговоры (П1)", actions: "Действия (Д)", negotiation_2: "Переговоры (П2)",
+  var PHASES = {setup: "Фаза старта", negotiation_1: "Переговоры (П1)", actions: "Действия (Д)", negotiation_2: "Переговоры (П2)",
                 resolution: "Расчёт", game_over: "Партия окончена"};
-  var PHASE_SHORT = {negotiation_1: "П1", actions: "Д", negotiation_2: "П2"};
+  var PHASE_SHORT = {setup: "старт", negotiation_1: "П1", actions: "Д", negotiation_2: "П2"};
+  var ARTIFACT_MODES = {draft: "драфт артефактов", points: "артефакты за очки", none: "без артефактов"};
   var KIND_TAGS = {battle: "бой", edge_battle: "бой", captured: "захват", eliminated: "выбыл", retreat: "отход",
                    retreat_lost: "гибель", destroyed: "уничтожены", recruited: "найм", build_started: "стройка",
                    build_done: "построено", fortify_broken: "укрепление", starvation: "голод",
-                   order_rejected: "приказ", economy: "экономика"};
+                   order_rejected: "приказ", economy: "экономика", research_started: "наука",
+                   tech_completed: "технология"};
   var REASONS = {last_standing: "остался последним", turn_limit: "по лимиту ходов"};
   var parts = location.pathname.split("/").filter(Boolean);
   var gameId = decodeURIComponent(parts[parts.length - 1] || "");
@@ -264,7 +268,9 @@ h4 { margin: 12px 0 6px; font-size: 14px; }
     $("scenario").textContent = m.scenario.name + " · " + m.map.name;
     if (!l) return;
     $("turnchip").textContent = "Ход " + l.turn + "/" + l.turn_limit;
-    $("phasechip").textContent = PHASES[l.phase] || l.phase;
+    var phaseText = PHASES[l.phase] || l.phase;
+    if (l.setup && l.setup.open) phaseText += " · выбор фракций" + (l.setup.artifacts && l.setup.artifacts !== "none" ? ", " + (ARTIFACT_MODES[l.setup.artifacts] || l.setup.artifacts) : "");
+    $("phasechip").textContent = phaseText;
     $("level").textContent = l.level_label;
     var running = !l.game_over;
     $("countdown").hidden = !running || l.seconds_left == null;
@@ -369,7 +375,8 @@ h4 { margin: 12px 0 6px; font-size: 14px; }
     (S.snap ? S.snap.players : []).forEach(function (p) { players[p.seat] = p; });
     S.meta.seats.forEach(function (s) {
       var p = players[s.seat];
-      var label = s.nick + (p ? " — " + p.score + " оч." + (p.alive ? "" : ", выбыл") : "");
+      var label = s.nick + (p && p.faction_name ? " · " + p.faction_name : "") +
+        (p ? " — " + p.score + " оч." + (p.alive ? "" : ", выбыл") : "");
       var sw = el("span", {cls: "sw"});
       sw.style.background = seatColor(s.seat);
       lg.appendChild(el("span", s.kind ? {title: s.kind + (s.bot ? " " + s.bot : "")} : {}, [sw, label]));
@@ -411,7 +418,7 @@ h4 { margin: 12px 0 6px; font-size: 14px; }
     S.tab = name;
     Array.prototype.forEach.call(document.querySelectorAll("[data-tab]"), function (b) {
       b.setAttribute("aria-selected", String(b.getAttribute("data-tab") === name)); });
-    ["feed", "mail", "score", "timings"].forEach(function (t) { $("tab-" + t).hidden = t !== name; });
+    ["feed", "mail", "score", "techs", "timings"].forEach(function (t) { $("tab-" + t).hidden = t !== name; });
     if (name === "timings") loadTimings(false);
   }
   function eventItem(e) {
@@ -430,7 +437,19 @@ h4 { margin: 12px 0 6px; font-size: 14px; }
     var box = $("tab-feed"), s = S.snap;
     clear(box);
     if (!s) return;
-    if (s.turn === 0) box.appendChild(el("p", {cls: "note", text: "Стартовая карта. События появятся после расчёта первого хода."}));
+    if (s.provisional) {
+      box.appendChild(el("p", {cls: "note", text: "Фаза старта: игроки выбирают фракции и артефакты. Карта предварительная — ход 1 соберётся заново, когда фаза закроется."}));
+      var choices = S.live && S.live.setup && S.live.setup.choices;
+      if (choices) {
+        var cl = el("ul", {cls: "feed"});
+        S.meta.seats.forEach(function (st) {
+          var c = choices[st.seat];
+          cl.appendChild(el("li", {text: st.nick + ": " + (c ? "фракции " + ((c.factions || []).join(", ") || "—") + "; артефакты " + ((c.artifacts || []).join(", ") || "—") : "ещё не выбрал")}));
+        });
+        box.appendChild(el("h4", {text: "Выбор игроков (видно только админу)"}));
+        box.appendChild(cl);
+      }
+    } else if (s.turn === 0) box.appendChild(el("p", {cls: "note", text: "Стартовая карта. События появятся после расчёта первого хода."}));
     else if (s.in_progress) box.appendChild(el("p", {cls: "note", text: "Ход идёт: события появятся после расчёта."}));
     if (!s.full && s.turn > 0) box.appendChild(el("p", {cls: "note", text: "Зрителю видны только публичные события: смены владельцев и выбывания. Бои, войска и приказы откроются после конца партии."}));
     if (s.events.length) {
@@ -521,6 +540,47 @@ h4 { margin: 12px 0 6px; font-size: 14px; }
     box.appendChild(el("div", {cls: "tablebox"}, [tb]));
     box.appendChild(el("p", {cls: "note", text: "Очки: 1 за провинцию, +3 за каждую столицу."}));
   }
+  function renderTechs() {
+    var box = $("tab-techs"), s = S.snap;
+    clear(box);
+    if (!s || s.techs_total == null) return;
+    if (!s.full) box.appendChild(el("p", {cls: "note", text: "Зрителю видно только число изученных технологий; что именно изучено и артефакты откроются после конца партии."}));
+    var tb = el("table");
+    var head = ["Игрок", "Фракция", "Изучено"];
+    if (s.full) head = head.concat(["Исследуется", "Артефакты"]);
+    tb.appendChild(el("tr", {}, head.map(function (h) { return el("th", {text: h}); })));
+    s.players.forEach(function (p) {
+      var cells = [p.nick, p.faction_name || "—", String(p.techs_count != null ? p.techs_count : 0) + " из " + s.techs_total];
+      if (s.full) {
+        var r = p.researching;
+        cells.push(r ? nameOf("tech_names", r.tech) + " " + r.progress + "/" + r.cost : "—");
+        cells.push((p.artifacts || []).map(function (a) { return nameOf("artifact_names", a); }).join(", ") || "—");
+      }
+      tb.appendChild(el("tr", {}, cells.map(function (x) { return el("td", {text: x}); })));
+    });
+    box.appendChild(el("div", {cls: "tablebox"}, [tb]));
+    if (!s.full) return;
+    s.players.forEach(function (p) {
+      var sw = el("span", {cls: "sw"});
+      sw.style.background = seatColor(p.seat);
+      sw.style.marginRight = "6px";
+      box.appendChild(el("h4", {}, [sw, p.nick + (p.faction_name ? " · " + p.faction_name : "")]));
+      var byBranch = {};
+      (p.techs || []).forEach(function (t) {
+        var b = (s.tech_branches || {})[t] || "";
+        (byBranch[b] = byBranch[b] || []).push(nameOf("tech_names", t));
+      });
+      var ul = el("ul", {cls: "feed"});
+      Object.keys(byBranch).sort().forEach(function (b) {
+        ul.appendChild(el("li", {text: nameOf("branch_names", b) + ": " + byBranch[b].join(", ")}));
+      });
+      var progress = [];
+      for (var t in p.research || {}) if (p.research[t] > 0 && (p.techs || []).indexOf(t) < 0) progress.push(nameOf("tech_names", t) + " " + p.research[t]);
+      if (progress.length) ul.appendChild(el("li", {cls: "muted", text: "Начато: " + progress.join(", ")}));
+      if (!ul.firstChild) ul.appendChild(el("li", {cls: "muted", text: "Ничего не изучено."}));
+      box.appendChild(ul);
+    });
+  }
   function fmtMoney(v) {
     if (v.spent_usd == null) return "—";
     var out = "$" + v.spent_usd.toFixed(2);
@@ -566,6 +626,10 @@ h4 { margin: 12px 0 6px; font-size: 14px; }
   }
   function renderAll() {
     renderHeader(); renderControls(); renderMap(); renderDetails(); renderFeed(); renderMail(); renderScore();
+    var hasTechs = !!(S.snap && S.snap.techs_total != null);
+    $("techstab").hidden = !hasTechs;
+    if (!hasTechs && S.tab === "techs") selectTab("feed");
+    renderTechs();
     if (S.tab === "timings") renderTimings();
   }
 

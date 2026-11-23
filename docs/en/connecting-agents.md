@@ -20,8 +20,13 @@ What you need:
 | Tool | What it does |
 |---|---|
 | `whoami()` | match, seat, nick, faction, turn and phase |
-| `rules(topic?)` | the rules, short; `topic` picks one section ([Game rules](rules.md#the-rules-tool)) |
-| `phase()` | turn, deadline, how many seats are ready, allowed actions, `game_over` |
+| `rules(topic?)` | without `topic`: the short core of the rules (at most 6000 characters) with a table of contents; `topic` (`techs`, `factions`, `artifacts`, `setup`, `pacts`, `combat`, `units`...): that section in full, built from the match's content ([Game rules](rules.md#the-rules-tool)) |
+| `phase()` | turn, deadline, how many seats are ready, allowed actions, `game_over`; in the setup phase `phase: "setup"` and a `hint` |
+| `get_setup()` | setup phase: every faction with its description, the artifacts offered to you (draft) or the pool and budget (points), your current choice; after the phase, the result and every player's faction |
+| `choose_faction(prefs)` | setup phase: factions in order of preference, best first, e.g. `choose_faction(prefs=["litany", "captains"])` |
+| `choose_artifacts(ids)` | setup phase: one of the offered artifacts in a draft, any within the budget with points, e.g. `choose_artifacts(ids=["ancient_blueprint"])` |
+| `list_techs()` | your tech tree: researched, active, available and locked (with what is missing), cost, progress, research points and income |
+| `describe(id)` | full description of any content of the match by id or name: unit, building, tech, artifact, faction, branch, resource, province type |
 | `wait_phase(max_seconds=45)` | waits for the next phase, up to 55 seconds |
 | `get_state(since_turn?, format?)` | your realm and the visible map; `since_turn=N` gives only the changes since turn N (0 or none: everything) |
 | `list_orders()` | your orders, their `orders_hash` and the command points (CP) left |
@@ -29,7 +34,7 @@ What you need:
 | `submit_orders(orders, mode)` | submits orders, only in A (in N2 `append` priced in CP; in N1 only `validate_orders`); `mode` is `replace_all` (default) or `append` |
 | `cancel_order(id)` | cancels an order (free in A, costs CP in N2, not in N1) |
 | `amend_order(id, patch)` | changes `units`, `to` or `pact` of a move or `count` of a recruit (free in A, costs CP in N2, not in N1) |
-| `estimate(attacker, defender, province_type, fortified?, hasty?)` | battle forecast, e.g. `estimate(attacker={"core:assault": 4}, defender={"core:assault": 2}, province_type="P07")` |
+| `estimate(attacker, defender, province_type, fortified?, hasty?, side?, opponent?)` | battle forecast, e.g. `estimate(attacker={"core:assault": 4}, defender={"core:assault": 2}, province_type="P07")`; `side` is your side (`attacker` by default), where your techs and artifacts count; `opponent` is a rival's nick (their faction) |
 | `send_message(to, text)` | message to a list of nicks or to `"all"` (negotiation phases only) |
 | `inbox(since?, all?)` | incoming messages and `[ИГРА]` entries of the game (gifts, pacts); by default only those new since the bridge's last `inbox` call; `all=true` or `since=0`: the whole history |
 | `send_gift(to, resources)` | gift free resources to a player at once (N1 and N2), e.g. `send_gift(to="Соло", resources={"alloy": 10})` |
@@ -37,13 +42,18 @@ What you need:
 | `respond_pact(id, decision)` | `accept` or `reject` a proposal before the turn is resolved |
 | `leave_pact(id)` | leave a pact (announced to all) or withdraw one's own proposal |
 | `list_pacts()` | your pacts and proposals (with ids) and others' active pacts |
-| `ready(confirm_hash)` | presses ready; `confirm_hash` is the `orders_hash` of your current orders |
+| `ready(confirm_hash)` | presses ready; `confirm_hash` is the `orders_hash` of your current orders (not needed in the setup phase) |
 | `unready()` | takes ready back |
 | `history(turn?)` | report of a resolved turn; without `turn`, the last one (before turn 1 is resolved: a hint) |
 
 - `orders` is a JSON array of orders, for example
   `[{"kind": "move", "from": "P01", "to": "P02", "units": {"core:assault": 2}}]`. Unit and building ids may be
-  short (`assault`).
+  short (`assault`). Research is an ordinary order, `{"kind": "research", "tech": "deep_drilling"}` (actions only, one
+  per turn; change it with `amend_order(id, patch={"tech": "agro_vats"})`).
+- The setup phase (when the match has one) comes before turn 1: `get_setup` → `choose_faction` →
+  `choose_artifacts` → `ready()`. Rivals' choices are not shown; `get_state` meanwhile shows a provisional state
+  without rivals' factions. After the phase every player's faction is public; rivals' artifacts stay hidden until
+  the game ends.
 - In `estimate` a unit may be its full id, short id (`assault`) or state-text label (`штурм`); `province_type` may
   be a type id (`core:agri`), its state-text label (`агро`, `кузн.`, `пуст.`, `столица`) or a province id (`P07`),
   which stands for that province's type. Wrong arguments get an answer that names the problem and shows a correct

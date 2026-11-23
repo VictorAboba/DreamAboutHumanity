@@ -102,11 +102,27 @@ class GameClient:
         return self.request("PATCH", f"/v1/orders/{order_id}", body=patch)
 
     def estimate(self, attacker: Any, defender: Any, province_type: Any, fortified: Any = False,
-                 hasty: Any = False) -> dict[str, Any]:
+                 hasty: Any = False, side: Any = None, opponent: Any = None) -> dict[str, Any]:
         """Arguments go as given: the server checks them and explains a refusal with a correct example."""
-        return self.request("POST", "/v1/estimate", body={
-            "attacker": attacker, "defender": defender, "province_type": province_type,
-            "fortified": fortified, "hasty": hasty})
+        body = {"attacker": attacker, "defender": defender, "province_type": province_type,
+                "fortified": fortified, "hasty": hasty}
+        body.update({k: v for k, v in (("side", side), ("opponent", opponent)) if v is not None})
+        return self.request("POST", "/v1/estimate", body=body)
+
+    def get_setup(self) -> dict[str, Any]:
+        return self.request("GET", "/v1/setup")
+
+    def choose_faction(self, prefs: Any) -> dict[str, Any]:
+        return self.request("POST", "/v1/setup/faction", body={"prefs": prefs})
+
+    def choose_artifacts(self, ids: Any) -> dict[str, Any]:
+        return self.request("POST", "/v1/setup/artifacts", body={"ids": ids})
+
+    def list_techs(self) -> dict[str, Any]:
+        return self.request("GET", "/v1/techs")
+
+    def describe(self, ref: Any) -> dict[str, Any]:
+        return self.request("GET", "/v1/describe", params={"id": ref})
 
     def send_message(self, to: list[str] | str, text: str) -> dict[str, Any]:
         return self.request("POST", "/v1/messages", body={"to": to, "text": text})
@@ -129,7 +145,8 @@ class GameClient:
     def leave_pact(self, pact_id: str) -> dict[str, Any]:
         return self.request("POST", f"/v1/pacts/{quote(str(pact_id), safe='')}/leave", body={})
 
-    def ready(self, confirm_hash: str) -> dict[str, Any]:
+    def ready(self, confirm_hash: str | None) -> dict[str, Any]:
+        """`confirm_hash` may be None only in the setup phase."""
         return self.request("POST", "/v1/ready", body={"confirm_hash": confirm_hash})
 
     def unready(self) -> dict[str, Any]:

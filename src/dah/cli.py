@@ -58,6 +58,19 @@ def _pairs(values: list[str] | None, option: str) -> dict[str, str]:
     return out
 
 
+def _setup_goal_lines(config: dict[str, Any]) -> list[str]:
+    """The setup phase (TECH_AND_SETUP.md section 2) for the goal, when the game has one."""
+    setup = config.get("setup")
+    if not setup:
+        return []
+    limit = int(config["phase_limits"].get("setup", 0))
+    arts = {"draft": " и артефакт (dah.choose_artifacts(ids=[\"id\"]) — один из предложенных)",
+            "points": " и артефакты в пределах бюджета очков (dah.choose_artifacts(ids=[...]))"}.get(
+        setup.get("artifacts"), "")
+    return [f"Перед ходом 1 — фаза старта ({limit // 60} мин {limit % 60} с): dah.get_setup(), выбери фракции по "
+            f"предпочтению (dah.choose_faction(prefs=[\"id\", ...])){arts}, затем dah.ready() без confirm_hash."]
+
+
 def goal_text(config: dict[str, Any], seat: str) -> str:
     """Goal for a swarm/agent seat (SLICE.md section 13). Contains no key."""
     entry = next((s for s in config["seats"] if s["seat"] == seat), None)
@@ -69,13 +82,18 @@ def goal_text(config: dict[str, Any], seat: str) -> str:
     return "\n".join([
         f"Ты играешь в DreamAboutHumanity — пошаговую стратегию для ИИ-игроков (партия {config['game_id']}, "
         f"{config['turn_limit']} ходов). Твой ник: {entry['nick']}. Соперники: {others}.",
-        "Подключение к игре — MCP-сервер `dah` (инструменты dah.*). Начни с dah.rules() и dah.whoami().",
+        "Подключение к игре — MCP-сервер `dah` (инструменты dah.*). Начни с dah.rules() и dah.whoami(). "
+        "dah.rules() — краткие правила с оглавлением; разделы целиком — dah.rules(topic=\"techs\") и т.п.; "
+        "dah.describe(id) — любой юнит, здание, технология, артефакт, фракция.",
         "ЦЕЛЬ НЕ ДОСТИГНУТА, ПОКА dah.phase() НЕ ВЕРНУЛ game_over. Не объявляй работу завершённой раньше.",
+        *_setup_goal_lines(config),
         f"Каждый ход: П1 переговоры → Д действия → П2 переговоры → расчёт. Длительность фаз: {minutes}.",
         "В каждой фазе смотри dah.get_state(since_turn=прошлый ход) и dah.inbox() (по умолчанию — только новое). "
         "П1: переговоры (dah.send_message), подношения (dah.send_gift), пакты (dah.propose_pact, dah.respond_pact, "
         "dah.leave_pact); приказы в П1 можно только проверить dah.validate_orders. Д: подай приказы "
-        "(dah.submit_orders). П2: переговоры и правка приказов за ОК (dah.amend_order, dah.cancel_order, append).",
+        "(dah.submit_orders). П2: переговоры и правка приказов за ОК (dah.amend_order, dah.cancel_order, append). "
+        "Если в партии есть технологии (dah.list_techs()), исследование — приказ "
+        "{\"kind\": \"research\", \"tech\": \"<id>\"} в Д.",
         "После каждого действия нажимай dah.ready(confirm_hash) — confirm_hash это orders_hash из dah.list_orders "
         "или ответа dah.submit_orders. Не нажал ready — фаза закроется по таймеру.",
         "Потом жди следующей фазы: dah.wait_phase() или пробуждение сообщением, которое начинается с [DAH].",
@@ -123,13 +141,24 @@ def cmd_game_create(args: argparse.Namespace) -> int:
     scenario_short = args.scenario.rsplit(":", 1)[-1].replace("_", "-")
     game_id = args.id or f"{scenario_short}-{secrets.token_hex(3)}"
     seed = args.seed if args.seed is not None else secrets.randbelow(10**6)
+    limits = parse_limits(args.limits) if args.limits else {}
+    if args.setup_limit:
+        limits["setup"] = parse_duration(args.setup_limit)
     config = make_config(game_id=game_id, scenario=args.scenario, seats=seats, seed=seed,
-                         phase_limits=parse_limits(args.limits) if args.limits else None, turn_limit=args.turns,
-                         pack_dirs=args.packs)
+                         phase_limits=limits or None, turn_limit=args.turns, pack_dirs=args.packs,
+                         artifacts=args.artifacts, artifact_offer=args.artifact_offer,
+                         artifact_points=args.artifact_points)
     gdir, keys = init_game_dir(args.games_dir, config)
     Game.create(gdir, start=False)
-    print(f"Партия {game_id} создана в {gdir.path} (seed {seed}); фаза П1 хода 1 откроется, когда партию "
+    first = "фаза старта (выбор фракций и артефактов)" if config.get("setup") else "фаза П1 хода 1"
+    print(f"Партия {game_id} создана в {gdir.path} (seed {seed}); {first} откроется, когда партию "
           "загрузит сервер (dah serve).")
+    if config.get("setup"):
+        st = config["setup"]
+        mode = {"draft": f"драфт: {st['artifact_offer']} на выбор", "points": f"очки: бюджет {st['artifact_points']}",
+                "none": "без артефактов"}[st["artifacts"]]
+        print(f"Фаза старта: {config['phase_limits']['setup']} с; артефакты — {mode}; уникальные фракции: "
+              f"{'да' if st['unique_factions'] else 'нет'}.")
     print("Ключи мест — показываются ОДИН раз, храните как пароль:")
     for s in config["seats"]:
         print(f"  {s['seat']} {s['nick']} ({s.get('bot') or s['kind']}): {keys[s['seat']]}")
@@ -190,7 +219,10 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 
 def cmd_replay(args: argparse.Namespace) -> int:
-    rep = replay(_game_dir(args))
+    packs = [p for item in (args.packs or []) for p in item.split(",") if p.strip()] or None
+    rep = replay(_game_dir(args), packs)
+    if rep.pack_dirs and not args.packs:
+        print(f"правила: замороженная версия паков {', '.join(rep.pack_dirs)} (её хэш совпал с журналом)")
     if not rep.ruleset_ok:
         print(f"РАСХОЖДЕНИЕ ПРАВИЛ: ruleset_hash журнала {rep.ruleset_expected}, сейчас {rep.ruleset_actual} — "
               "контент паков изменился после партии")
@@ -230,6 +262,12 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--dt-session", action="append", help="SEAT=ID сессии DreamTeam")
     create.add_argument("--declared", action="append", help='SEAT={"system":..,"model":..,"agents":..,"version":..}')
     create.add_argument("--packs", action="append", help="каталог пака (по умолчанию все паки репозитория)")
+    create.add_argument("--artifacts", choices=("draft", "points", "none"),
+                        help="режим артефактов фазы старта (по умолчанию — из сценария); draft/points включают фазу "
+                             "старта и у сценария без неё")
+    create.add_argument("--artifact-offer", type=int, help="драфт: сколько артефактов предложить месту (1..10)")
+    create.add_argument("--artifact-points", type=int, help="очки: бюджет места (0..50)")
+    create.add_argument("--setup-limit", help="лимит фазы старта, например 5m (по умолчанию — из сценария или 5m)")
     create.add_argument("--games-dir", default=DEFAULT_GAMES_DIR)
     create.add_argument("--server", default=DEFAULT_SERVER, help="адрес dah serve для ссылки /watch")
     create.set_defaults(func=cmd_game_create)
@@ -267,6 +305,10 @@ def build_parser() -> argparse.ArgumentParser:
         p.set_defaults(func=func)
         if name == "report":
             p.add_argument("--json", action="store_true")
+        else:
+            p.add_argument("--packs", action="append", metavar="DIR[,DIR...]",
+                           help="паки для повтора вместо паков конфига (без флага: паки конфига или замороженная "
+                                "версия из content/legacy, чей хэш совпал с журналом)")
 
     goal = sub.add_parser("goal-text", help="текст цели для места")
     goal.add_argument("game_id")

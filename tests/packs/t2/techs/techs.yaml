@@ -1,0 +1,45 @@
+- id: smithing
+  name: {ru: Кузнечное дело, en: Smithing}
+  branch: war
+  tier: 1
+  cost: 6
+  unlocks: [knight, smithy]
+- id: fortification
+  name: {ru: Фортификация, en: Fortification}
+  branch: war
+  tier: 1
+  cost: 8
+  unlocks: [citadel]
+- id: drills
+  name: {ru: Буры, en: Drills}
+  branch: economy
+  tier: 1
+  cost: 5
+  effects:
+    - {effect: modify, target: resource.alloy.income_mul, op: mul, value: 1.5}
+- id: doctrine
+  name: {ru: Доктрина, en: Doctrine}
+  branch: war
+  tier: 2
+  cost: 10
+  requires_tier: {tier: 1, count: 2}
+  effects:
+    - {effect: modify, target: command_points, op: add, value: 1}
+- id: banking
+  name: {ru: Банки, en: Banking}
+  branch: economy
+  tier: 2
+  cost: 10
+  requires: [drills]
+  requires_any: [smithing, fortification]
+  effects:
+    - {effect: income, resource: alloy, amount: 2}
+    - {effect: set_flag, flag: banking}
+- id: iron_rite
+  name: {ru: Железный обряд, en: Iron Rite}
+  branch: economy
+  tier: 1
+  cost: 4
+  factions: [iron]
+  effects:
+    - {effect: income, resource: creed, amount: 1}

@@ -67,12 +67,65 @@
 | POST | `/v1/ready` | `{"confirm_hash"}` | `ready` ("N/M"), `phase_closed` |
 | POST | `/v1/unready` | | `ready` |
 | GET | `/v1/history` | `?turn=` | `turn`, `text` (до расчёта хода 1 без `turn` — `turn: null` и подсказка) |
+| GET | `/v1/setup` | | см. [Фаза старта](#фаза-старта) |
+| POST | `/v1/setup/faction` | `{"prefs": [фракция, ...]}` (также `factions`, `faction`) | `factions[]`, `confirm_hash`, `text` |
+| POST | `/v1/setup/artifacts` | `{"ids": [артефакт, ...]}` (также `artifacts`, `artifact`) | `artifacts[]`, `confirm_hash`, `text` |
+| GET | `/v1/techs` | | см. [Технологии](#технологии) |
+| GET | `/v1/describe` | `?id=` (или `name=`) | `kind`, `id`, `name`, поля сущности, `text`; `also[]` при нескольких совпадениях |
+
+### Фаза старта
+
+Если в конфиге партии есть `setup` ([TECH_AND_SETUP.md](../TECH_AND_SETUP.md), раздел 2), до хода 1 идёт фаза
+`setup`: `/v1/phase` отвечает `phase: "setup"`, `turn: 1` и подсказкой `hint`; `allowed` — `get_setup`,
+`choose_faction`, `choose_artifacts`, `describe`, `list_techs`, `ready`, `unready`, `get_state`, `inbox` и всегда
+открытые `rules`, `whoami`, `phase`, `wait_phase`. Приказы, сообщения и
+дипломатия — `409 PHASE_LOCKED`.
+
+`GET /v1/setup` — `{enabled, phase, open, deadline, seconds_left, ready, you_ready, unique_factions,
+artifacts_mode (draft|points|none), artifact_offer, artifact_points, factions[], offer[], your_choice{factions,
+artifacts}, confirm_hash, text}`. `factions` — все фракции сценария (как `/v1/describe`: `bonuses`, `penalties`,
+старт, уникальное), `offer` — предложенные этому месту артефакты (драфт) или весь пул (очки). В тексте у артефакта —
+сила (драфт) или стоимость в очках и «только …», если его может взять не всякая фракция; драфт раздаётся из
+артефактов, доступных всем фракциям сценария, пока их хватает. После закрытия фазы `factions` и `offer` пусты, зато
+есть `result{faction, prefs, artifacts, auto_faction, auto_artifacts, faction_conflict, dropped}` (своё) и
+`players[{seat, nick, faction}]`. Без фазы старта — `{enabled: false, phase, text}`.
+
+`choose_faction` принимает список (или одну фракцию, или строку через запятую, или JSON-строку) ID, коротких ID или
+названий; `choose_artifacts` — так же артефакты. Ошибки: `UNKNOWN_ID`, `INVALID`, `NOT_OFFERED`,
+`NOT_ENOUGH_POINTS`, `EXCLUSIVE`, `PHASE_LOCKED` (фаза закрыта или её нет). Смена выбора снимает ready места.
+Неподходящий выбор (артефакт не для первой из предпочтённых фракций) принимается с `warning` (и в `text`): при
+закрытии такой артефакт заменяется умолчанием (драфт) или отбрасывается, а освободившийся бюджет заполняется по
+умолчанию (очки). `POST /v1/ready` в фазе старта принимает пустое тело; `confirm_hash`, если дан, должен быть
+текущим `confirm_hash`.
+
+Туман: чужой выбор не виден ни в одном маршруте. `/v1/state` в фазе старта — предварительное состояние хода 1 (текст
+начинается с «ФАЗА СТАРТА», в JSON — `setup: {open, provisional, note}`, все `faction`, и своя, — `null`, а
+`you.faction_choice` — текущая первая из предпочтений; так же `/v1/whoami`). После фазы фракции всех публичны (JSON
+`players[].faction` и строка счёта в тексте), артефакты соперников скрыты до конца партии, а публичный `techs_count`
+не считает технологии, данные артефактами.
+
+### Технологии
+
+`GET /v1/techs` — дерево технологий места: `{enabled, resource, points, income, active: {tech, progress, cost} |
+null, researched[], branches[{id, name, name_en, order, description, color}], techs[{id, name, name_en, branch,
+tier, cost, base_cost, progress, status: researched|active|available|locked, missing[], requires[], requires_any[],
+requires_tier, factions[], effects[], unlocks[], description}], text}`. Чужие технологии не показываются (видно
+только `techs_count` у игроков в `/v1/state?format=json`).
+
+Исследование — обычный приказ `{"kind": "research", "tech": "<ID или название>"}` (поле `technology` тоже
+принимается): подаётся в Д, в П1 только проверяется, в П2 — `PHASE_LOCKED`; один на ход; меняется
+`PATCH /v1/orders/{id}` с `{"tech": "..."}`. Отказы: `NOT_AVAILABLE`, `ALREADY_RESEARCHED`, `UNKNOWN_ID`, `INVALID`.
+
+`GET /v1/rules` без `topic` — краткое ядро (≤ 6000 символов) с оглавлением; `?topic=techs|factions|artifacts|setup|
+pacts|combat|units|buildings|abilities|...` — раздел целиком из контента партии; ID или название контента — его
+описание; неизвестная тема — только список тем.
 
 ### Фаза и ожидание
 
 `/v1/phase` возвращает `game_id`, `turn`, `turn_limit`, `phase`, `deadline` (UTC, `2026-11-23T14:30:00Z`),
 `seconds_left`, `ready` ("N/M" среди живых мест), `you_ready`, `phase_seq`, `allowed` (инструменты, разрешённые в
-этой фазе), `alive`, `game_over`, `text`, а после конца партии ещё `result`.
+этой фазе), `alive`, `game_over`, `text`, а после конца партии ещё `result`; в фазе старта (`phase: "setup"`) — ещё
+`hint` (что делать).
 
 `phase_seq` растёт на единицу при каждой смене фазы. `/v1/wait_phase?after_seq=N` отвечает, как только `phase_seq`
 перестал быть равен `N`, или через `max_seconds` (по умолчанию 45, не больше 55) с `changed: false`. Без
@@ -82,7 +135,8 @@
 проверяются: `POST /v1/orders`, `DELETE` и `PATCH` отвечают `409 PHASE_LOCKED` с подсказкой), сообщения, дипломатия
 (`send_gift`, `propose_pact`, `respond_pact`, `leave_pact`, `list_pacts`), входящие, ready и история. Д: состояние,
 все инструменты приказов, `list_pacts`, входящие, ready и история (без сообщений и дипломатии). П2: всё. Выбывшему
-месту и после конца партии доступны только `get_state`, `history`, `inbox` и `list_pacts`.
+месту и после конца партии доступны только `get_state`, `history`, `inbox`, `list_pacts`, `list_techs`, `describe`
+и всегда открытые `rules`, `whoami`, `phase`, `wait_phase` (они есть и в `allowed` каждой фазы).
 
 Служебным вызовам (с заголовком `X-DAH-Host`, его шлёт `dah-waker`) `/v1/phase` и `/v1/wait_phase` добавляют
 поля об игроке этого места: `player_waiting` (long-poll игрока `/v1/wait_phase` ждёт сейчас или ждал в момент
@@ -103,7 +157,9 @@
 от 1 до текущего хода в тексте только то, что изменилось с начала этого хода; `since_turn=0` (или без него) — всё
 состояние; ход позже текущего — `400 INVALID`. `format=json` возвращает
 `state` с полями `turn`, `turn_limit`, `phase`, `you` (ресурсы, чистый доход, ОК), `players` (ник, жив ли, счёт)
-и `provinces` (`visible`, а у видимых — `units`, `buildings`, `fortified`).
+и `provinces` (`visible`, а у видимых — `units`, `buildings`, `fortified`). Если в наборе есть технологии или
+артефакты: у `you` — `techs`, `researching`, `research`, `artifacts`; у каждого игрока — `faction` и `techs_count`
+(чужие технологии и артефакты — только после конца партии).
 
 ### Приказы
 
@@ -137,6 +193,11 @@
 в виде `losses: {attacker, defender}` и распознанный `province_type`. Неизвестный ID даёт `400 UNKNOWN_ID` со
 списком допустимых, пропущенное или неверное поле — `400 INVALID`; оба сообщения заканчиваются верным примером
 вызова. Маршрут работает в любой фазе ([Правила игры](rules.md#estimate)).
+
+Необязательные `side` (`attacker` по умолчанию или `defender`) и `opponent`: на стороне `side` считаются
+характеристики вызывающего места (фракция, технологии, артефакты, здания со `scope: owner`; при `side: defender` и ID
+своей провинции в `province_type` — ещё её оборона от зданий), на другой — публичная фракция игрока `opponent` (ник),
+без него — базовые числа. В ответе ещё `side`.
 
 ### Ready
 

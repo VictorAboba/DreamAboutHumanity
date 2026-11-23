@@ -31,11 +31,11 @@ def issues_of(pack_dir: Path, scenario: str = "slice3"):
 
 
 @pytest.mark.parametrize("scenario,map_id,n", [("slice3", "core:mirror3", 15), ("slice2", "core:mirror2", 10),
-                                               ("core:blitz_test", "core:mirror3", 15)])
+                                               ("core:blitz_test", "core:mirror3", 15), ("quad4", "core:mirror4", 21)])
 def test_core_scenarios_build(scenario, map_id, n):
     rs = build_ruleset(None, scenario)
     assert rs.map.id == map_id and len(rs.map.provinces) == n
-    assert rs.roles == {"build": "core:alloy", "upkeep_food": "core:provisions"}
+    assert rs.roles == {"build": "core:alloy", "upkeep_food": "core:provisions", "research": "core:creed"}
     assert rs.warnings == ()
     assert len(rs.hash) == 64
 
@@ -43,7 +43,7 @@ def test_core_scenarios_build(scenario, map_id, n):
 def test_core_content_values():
     rs = build_ruleset(None, "slice3")
     assert rs.scenario.turn_limit == 10
-    assert rs.scenario.phase_limits == {"negotiation_1": 720, "actions": 300, "negotiation_2": 300}
+    assert rs.scenario.phase_limits == {"setup": 300, "negotiation_1": 720, "actions": 300, "negotiation_2": 300}
     assert build_ruleset(None, "slice2").scenario.phase_limits == rs.scenario.phase_limits
     assert rs.scenario.diplomacy_limits == {"gifts_per_phase": 3, "pact_proposals_per_phase": 3}
     assert build_ruleset(None, "blitz_test").scenario.phase_limits["actions"] == 5
@@ -60,7 +60,7 @@ def test_core_content_values():
     assert rs.buildings["core:mine"].income == {"core:alloy": 5}
     assert rs.building_cost("core:mine") == {"core:alloy": 10} and rs.building_cost("core:farm") == {"core:alloy": 8}
     assert rs.province_types["core:capital"].defense_mul == 1.25
-    assert rs.province_types["core:capital"].income == {"core:alloy": 3, "core:provisions": 2}
+    assert rs.province_types["core:capital"].income == {"core:alloy": 3, "core:provisions": 2, "core:creed": 3}
     assert rs.province_types["core:agri"].income == {"core:provisions": 4}
     assert rs.province_types["core:waste"].defense_mul == 1.1
     assert rs.stat("combat.fortify_bonus") == 0.15   # scenario override of the engine default 0.25

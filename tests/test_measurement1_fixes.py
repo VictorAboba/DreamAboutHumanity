@@ -16,7 +16,8 @@ from dah.bridge.client import GameClient
 from dah.bridge.tools import Bridge
 from dah.cli import goal_text, main
 from dah.engine import orders_hash
-from dah.game import Game, GameError, make_config
+from dah.game import Game, GameError
+from slice_helpers import slice_config
 from dah.journal import Journal, read_events
 from dah.report import build_report, render_report
 from dah.server import create_app
@@ -34,7 +35,7 @@ class FakeClock:
 
 
 def new_game(tmp_path, clock: FakeClock) -> Game:
-    config = make_config(game_id="g1", scenario="core:slice2", seats=SEATS, seed=7)
+    config = slice_config(game_id="g1", scenario="core:slice2", seats=SEATS, seed=7)
     gdir, _ = init_game_dir(tmp_path, config)
     return Game.create(gdir, clock)
 
@@ -50,7 +51,7 @@ def events(game: Game, type_: str) -> list[dict]:
 class Env:
     def __init__(self, tmp_path) -> None:
         self.clock = FakeClock()
-        config = make_config(game_id="g1", scenario="core:slice2", seats=SEATS, seed=7)
+        config = slice_config(game_id="g1", scenario="core:slice2", seats=SEATS, seed=7)
         self.gdir, keys = init_game_dir(tmp_path, config)
         Game.create(self.gdir, self.clock)
         self.client = TestClient(create_app(str(tmp_path), admin_key="adm", clock=self.clock, tick_interval=None))
@@ -241,7 +242,7 @@ def test_bridge_passes_estimate_to_server_and_adds_examples_to_argument_errors()
 
 
 def test_goal_text_says_to_finish_after_game_over(tmp_path):
-    config = make_config(game_id="g1", scenario="core:slice2", seats=SEATS, seed=7)
+    config = slice_config(game_id="g1", scenario="core:slice2", seats=SEATS, seed=7)
     assert "После game_over сразу заверши цель одним коротким итогом (счёт, место)" in goal_text(config, "A")
 
 

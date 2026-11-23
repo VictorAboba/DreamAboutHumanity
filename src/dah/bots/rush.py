@@ -1,9 +1,12 @@
 """Rush bot: spends everything on the army and attacks wherever the estimate is >= 0.6.
 
-Every turn it recruits the most it can pay for and feed (a farm first when food, not alloy, is the limit), sends each
+Every turn it recruits the most it can pay for and feed (up to two of its faction's unique unit first; a farm first
+when food, not alloy, is the limit), sends each
 army at its best adjacent foreign or neutral province with estimate >= 0.6 (the capital keeps 0-2 units, fixed per
 bot by its seed), marches interior armies towards the border and fortifies what stays. In negotiation_2 it adds one
 hasty attack if CP allow.
+Stage 2: it prefers aggressive factions (captains, growth, synclite), artifacts that give armies, and researches war
+first (then logistics).
 """
 
 from __future__ import annotations
@@ -18,12 +21,13 @@ from dah.bots.tactics import (
     fortify_orders,
     garrison,
     plan_moves,
+    recruit_site,
     reserved_by_orders,
+    unique_recruit,
 )
 from dah.bots.view import (
     BUILD_RESOURCE,
     BUILDING_COST_ALLOY,
-    RECRUIT_BUILDINGS,
     UNIT_COST_ALLOY,
     StateView,
     farm_site,
@@ -34,19 +38,25 @@ RECRUIT_UNIT = "assault"
 FOOD_TURNS = 2  # recruits stay fed for this many turns
 GARRISONS = (0, 1, 2)  # units the capital keeps: one of these per bot (its seed picks)
 P2_NEW_ATTACK_CP = 2  # registry default of p2.cost.new_attack
+UNIQUE_PER_TURN = 2  # unique units recruited per turn at most
 
 __all__ = ["RushBot", "advance", "best_attack", "distance_to_foreign"]
 
 
 class RushBot(Bot):
     name = "rush"
+    faction_style = ("captains", "growth", "synclite", "ash_choir", "litany")
+    artifact_likes = ("mercenary_band", "mercenary_contract", "calm_banner", "war_codex", "seal_of_command")
+    branch_priority = ("war", "logistics", "industry", "mystery")
+    tech_first = ("drill_doctrine", "surprise_doctrine")
 
     def __init__(self, seat: str, seed: int) -> None:
         super().__init__(seat, seed)
         self.garrison = self.rng.choice(GARRISONS)
 
     def action_orders(self, view: StateView, estimate: Estimator) -> list[Order]:
-        orders = recruit_orders(view, view.resource(BUILD_RESOURCE), FOOD_TURNS, farm_first=True)
+        orders = recruit_orders(view, view.resource(BUILD_RESOURCE), FOOD_TURNS, farm_first=True,
+                                unique_max=UNIQUE_PER_TURN)
         moves = plan_moves(view, estimate, WIN_THRESHOLD, self.rng, garrison(capital_of(view), self.garrison))
         return orders + moves + fortify_orders(view, moves)
 
@@ -60,9 +70,11 @@ class RushBot(Bot):
         return best_attack(view, reserved, estimate, hasty, WIN_THRESHOLD, self.rng)
 
 
-def recruit_orders(view: StateView, alloy: int, food_turns: int, *, farm_first: bool) -> list[Order]:
+def recruit_orders(view: StateView, alloy: int, food_turns: int, *, farm_first: bool,
+                   unique_max: int = 0) -> list[Order]:
     """Recruit the most `alloy` pays for and the food keeps fed for `food_turns` turns; with `farm_first`, when food
-    rather than alloy is the limit, lay a farm first (an agri world first)."""
+    rather than alloy is the limit, lay a farm first (an agri world first). Up to `unique_max` of the faction's unique
+    unit come first, assault with the rest."""
     orders: list[Order] = []
     count = alloy // UNIT_COST_ALLOY[RECRUIT_UNIT]
     feedable = view.feedable(RECRUIT_UNIT, food_turns)
@@ -72,7 +84,14 @@ def recruit_orders(view: StateView, alloy: int, food_turns: int, *, farm_first: 
             orders.append({"kind": "build", "province": site.id, "building": view.qualify("farm")})
             alloy -= BUILDING_COST_ALLOY["farm"]
         count = min(alloy // UNIT_COST_ALLOY[RECRUIT_UNIT], feedable)
-    site = next((p for p in view.own_provinces() if RECRUIT_BUILDINGS & set(p.buildings)), None)
+    unique, spent, upkeep = unique_recruit(view, alloy, food_turns, unique_max)
+    if unique is not None:
+        orders.append(unique)
+        alloy -= spent
+        count = alloy // UNIT_COST_ALLOY[RECRUIT_UNIT]
+        if feedable is not None:
+            count = min(count, max(0, feedable - upkeep))
+    site = recruit_site(view)
     if site is not None and count > 0:
         orders.append({"kind": "recruit", "province": site.id, "unit": view.qualify(RECRUIT_UNIT), "count": count})
     return orders

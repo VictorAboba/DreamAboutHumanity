@@ -14,5 +14,9 @@
 - id: capital
   name: Столица
   short: столица
-  income: {alloy: 3, provisions: 2}
+  income: {alloy: 3, provisions: 2, creed: 3}
   defense_mul: 1.25
+- id: shrine
+  name: {ru: Святыня, en: Shrine}
+  short: свят.
+  income: {creed: 3, provisions: 1}

@@ -31,6 +31,12 @@ are not listed under messages: the events say the same.
 The delayed spectator never sees the game-wide message id (its gaps would count the private messages in between):
 public messages are numbered among public messages only. Seat kinds, bot types and declared setups are hidden until
 the game is over, as they are from the players.
+
+Stage 2 (TECH_AND_SETUP.md section 4): `live` has `setup` while a setup phase runs (mode, ready N/M; the admin also
+sees each seat's choice so far). Snapshots taken during the setup phase are of the provisional turn 1 and are never
+cached (turn 1 is rebuilt when the phase closes). Every level sees each seat's faction once the setup phase has closed
+(as the players do); the full levels also see artifacts, techs, research progress and the active tech, the delayed
+spectator only the number of techs each seat has researched. Setup choices are never shown to the delayed spectator.
 """
 
 from __future__ import annotations
@@ -49,10 +55,11 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, Response
 
-from dah.engine import GameState, TurnReport, scores
+from dah.engine import GameState, TurnReport, scores, stat_key
 from dah.engine import diplomacy as dip
+from dah.engine.techs import public_techs
 from dah.engine.view import PHASE_LABELS, event_text
-from dah.game import GAME_OVER, Game, iso_time
+from dah.game import GAME_OVER, SETUP, Game, iso_time
 from dah.journal import read_events
 from dah.report import build_report
 from dah.store import hash_key
@@ -62,7 +69,7 @@ TIMINGS_MIN_AGE = 5.0  # seconds: a live game's journal changes on nearly every 
 LEVEL_LABELS = {LIVE: "Админ (вживую)", DELAYED: "Зритель (задержка 1 ход)", REVEALED: "Партия окончена — всё открыто"}
 # Events that concern only their own seat: shown with the seat's nick in front.
 _PERSONAL_KINDS = frozenset({"economy", "starvation", "recruited", "build_started", "build_done", "order_rejected",
-                             "retreat", "retreat_lost", "fortify_broken"})
+                             "retreat", "retreat_lost", "fortify_broken", "research_started", "tech_completed"})
 WATCH_PAGE = Path(__file__).with_name("watch.html")
 _SCRIPT_RE = re.compile(r"<script>(.*?)</script>", re.S)
 
@@ -126,7 +133,10 @@ class GameCache:
             raw = game.gdir.load_turn("states", 1)
             if raw is None:
                 return {}
-            self.start_scores = scores(GameState.from_dict(raw), game.ruleset)
+            start = scores(GameState.from_dict(raw), game.ruleset)
+            if game.phase == SETUP:  # provisional: turn 1 is rebuilt when the setup phase closes
+                return start
+            self.start_scores = start
         return self.start_scores
 
     def load_spectator_hash(self, game: Game) -> str | None:
@@ -254,6 +264,27 @@ def live(game: Game, cache: GameCache, access: str, level: str) -> dict[str, Any
     }
     if game.game_over:
         out["result"] = game.state.result
+    if game.setup:
+        out["setup"] = setup_info(game, level)
+    return out
+
+
+def setup_closed(game: Game) -> bool:
+    """Factions are settled (and public): the game has no setup phase, or it has closed."""
+    return not game.setup or game.phase != SETUP
+
+
+def setup_info(game: Game, level: str) -> dict[str, Any]:
+    """The setup phase as the header shows it; the admin (live level) also sees the choices so far."""
+    setup = game.setup or {}
+    out: dict[str, Any] = {"open": game.phase == SETUP, "artifacts": setup.get("artifacts"),
+                           "unique_factions": bool(setup.get("unique_factions", True))}
+    if level == LIVE and game.phase == SETUP:
+        rs = game.ruleset
+        out["choices"] = {
+            seat: {"factions": [rs.factions[f].name for f in (c.get("factions") or []) if f in rs.factions],
+                   "artifacts": [rs.artifacts[a].name for a in (c.get("artifacts") or []) if a in rs.artifacts]}
+            for seat, c in sorted(game.setup_choices.items())}
     return out
 
 
@@ -317,8 +348,9 @@ def snapshot(game: Game, cache: GameCache, turn: int, level: str) -> dict[str, A
     if turn > last:
         raise SpectateError(403, "NOT_YET", f"ход {turn} ещё не открыт для зрителей (виден до хода {last})")
     in_progress = turn > resolved_turns(game)
+    provisional = game.phase == SETUP  # turn 1 is rebuilt when the setup phase closes: nothing is cached
     key = (turn, level)
-    if not in_progress and key in cache.snapshots:
+    if not in_progress and not provisional and key in cache.snapshots:
         return cache.snapshots[key]
     full = level != DELAYED
     state = _end_state(game, turn)
@@ -334,12 +366,23 @@ def snapshot(game: Game, cache: GameCache, turn: int, level: str) -> dict[str, A
                                        for b in state.pending_builds if b.province == pid])
         provinces.append(entry)
     players = []
+    factions_public = setup_closed(game) and (len(rs.scenario.factions) > 1 or bool(game.setup))
     for seat, p in state.players.items():
         entry = {"seat": seat, "nick": p.nick, "alive": p.alive, "score": sc.get(seat, 0),
                  "provinces": len(state.owned(seat))}
+        if factions_public:
+            entry.update(faction=p.faction, faction_name=rs.factions[p.faction].name if p.faction in rs.factions
+                         else p.faction)
+        if rs.techs:
+            entry["techs_count"] = len(public_techs(rs, p))  # public (TECH_AND_SETUP.md 1.4), no artifact grants
         if full:
             entry.update(resources=dict(p.resources), command_points=p.command_points,
                          units=sum(pr.unit_total() for pr in state.owned(seat)))
+            if rs.techs or rs.artifacts:
+                entry.update(techs=list(p.techs), artifacts=list(p.artifacts), research=dict(p.research),
+                             researching=({"tech": p.researching, "progress": p.research.get(p.researching, 0),
+                                           "cost": rs.tech_cost(p.researching, stat_key(state, rs, seat))}
+                                          if p.researching in rs.techs else None))
         players.append(entry)
     events: list[dict[str, Any]] = []
     orders: dict[str, Any] | None = None
@@ -379,7 +422,16 @@ def snapshot(game: Game, cache: GameCache, turn: int, level: str) -> dict[str, A
         out["unit_names"] = {u: d.name for u, d in rs.units.items()}
         out["building_names"] = {b: d.name for b, d in rs.buildings.items()}
         out["resource_names"] = {r: d.name for r, d in rs.resources.items()}
-    if not in_progress:
+        if rs.techs or rs.artifacts:
+            out["tech_names"] = {t: d.name for t, d in rs.techs.items()}
+            out["tech_branches"] = {t: d.branch for t, d in rs.techs.items()}
+            out["branch_names"] = {b: d.name for b, d in rs.branches.items()}
+            out["artifact_names"] = {a: d.name for a, d in rs.artifacts.items()}
+    if rs.techs:
+        out["techs_total"] = len(rs.techs)
+    if provisional:
+        out["provisional"] = True
+    if not in_progress and not provisional:
         cache.snapshots[key] = out
     return out
 

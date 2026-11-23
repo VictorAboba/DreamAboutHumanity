@@ -1,0 +1,39 @@
+- id: ember
+  name: {ru: Тлеющая реликвия, en: Ember Relic}
+  power: 2
+  cost: 2
+  effects:
+    - {effect: grant_tech, tech: smithing}
+    - {effect: add_resource, resource: alloy, amount: 15}
+- id: cache
+  name: Тайник
+  power: 2
+  cost: 1
+  effects:
+    - {effect: add_resource, resource: alloy, amount: 30}
+- id: warband
+  name: Дружина
+  power: 1
+  cost: 1
+  effects:
+    - {effect: grant_units, unit: militia, count: 2, where: capital}
+- id: seal
+  name: Печать штаба
+  power: 1
+  cost: 2
+  exclusive_with: [cache]
+  effects:
+    - {effect: modify, target: command_points, op: add, value: 1}
+- id: banner
+  name: Знамя Обета
+  power: 1
+  cost: 1
+  factions: [iron]
+  effects:
+    - {effect: unlock, kind: unit, id: knight}
+- id: tithe
+  name: Десятина
+  power: 1
+  cost: 1
+  effects:
+    - {effect: income, resource: creed, amount: 2}

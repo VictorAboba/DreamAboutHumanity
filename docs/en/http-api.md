@@ -67,12 +67,67 @@ Submitting and validating orders answer 200 even when some orders are refused: t
 | POST | `/v1/ready` | `{"confirm_hash"}` | `ready` ("N/M"), `phase_closed` |
 | POST | `/v1/unready` | | `ready` |
 | GET | `/v1/history` | `?turn=` | `turn`, `text` (before turn 1 is resolved, without `turn`: `turn: null` and a hint) |
+| GET | `/v1/setup` | | see [Setup phase](#setup-phase) |
+| POST | `/v1/setup/faction` | `{"prefs": [faction, ...]}` (also `factions`, `faction`) | `factions[]`, `confirm_hash`, `text` |
+| POST | `/v1/setup/artifacts` | `{"ids": [artifact, ...]}` (also `artifacts`, `artifact`) | `artifacts[]`, `confirm_hash`, `text` |
+| GET | `/v1/techs` | | see [Techs](#techs) |
+| GET | `/v1/describe` | `?id=` (or `name=`) | `kind`, `id`, `name`, the entity's fields, `text`; `also[]` when several match |
+
+### Setup phase
+
+When the game config has `setup` ([TECH_AND_SETUP.md](../TECH_AND_SETUP.md), section 2), a `setup` phase comes
+before turn 1: `/v1/phase` answers `phase: "setup"`, `turn: 1` and a `hint`; `allowed` is `get_setup`,
+`choose_faction`, `choose_artifacts`, `describe`, `list_techs`, `ready`, `unready`, `get_state`, `inbox` and the
+always-open `rules`, `whoami`, `phase`, `wait_phase`. Orders, messages
+and diplomacy answer `409 PHASE_LOCKED`.
+
+`GET /v1/setup` returns `{enabled, phase, open, deadline, seconds_left, ready, you_ready, unique_factions,
+artifacts_mode (draft|points|none), artifact_offer, artifact_points, factions[], offer[], your_choice{factions,
+artifacts}, confirm_hash, text}`. `factions` are all of the scenario's factions (as `/v1/describe`: `bonuses`,
+`penalties`, start, unique content); `offer` is the artifacts offered to this seat (draft) or the whole pool
+(points). The text gives each offered artifact's power (draft) or cost in points, and «только …» for an artifact
+only some factions may hold; draft offers are dealt from the artifacts every faction of the scenario may hold while
+there are enough of them. After the phase `factions` and `offer` are empty and the answer has the seat's own
+`result{faction, prefs, artifacts, auto_faction, auto_artifacts, faction_conflict, dropped}` and
+`players[{seat, nick, faction}]`. Without a setup phase: `{enabled: false, phase, text}`.
+
+`choose_faction` takes a list (or one faction, a comma-separated string, or a JSON string) of ids, short ids or
+names; `choose_artifacts` the same for artifacts. Errors: `UNKNOWN_ID`, `INVALID`, `NOT_OFFERED`,
+`NOT_ENOUGH_POINTS`, `EXCLUSIVE`, `PHASE_LOCKED` (phase closed or none). A changed choice takes the seat's ready
+back. A choice that does not fit (an artifact the seat's first-choice faction may not hold) is accepted with a
+`warning` (also in `text`): at close such an artifact is replaced by the default (draft) or dropped and the freed
+budget filled by default (points). In the setup phase `POST /v1/ready` accepts an empty body; a `confirm_hash`, if
+given, must be the current one.
+
+Fog of war: no route shows another seat's choice. During the phase `/v1/state` is the provisional turn 1 (the text
+starts with «ФАЗА СТАРТА»; the JSON has `setup: {open, provisional, note}`, every `faction` including your own is
+`null` and `you.faction_choice` is your current first preference; `/v1/whoami` likewise). After the phase every
+player's faction is public (JSON `players[].faction`, and in the score line of the text); rivals' artifacts stay
+hidden until the game ends, and the public `techs_count` leaves out techs granted by artifacts.
+
+### Techs
+
+`GET /v1/techs` is the seat's tech tree: `{enabled, resource, points, income, active: {tech, progress, cost} |
+null, researched[], branches[{id, name, name_en, order, description, color}], techs[{id, name, name_en, branch,
+tier, cost, base_cost, progress, status: researched|active|available|locked, missing[], requires[], requires_any[],
+requires_tier, factions[], effects[], unlocks[], description}], text}`. Others' techs are never shown (only
+`techs_count` of each player in `/v1/state?format=json`).
+
+Research is an ordinary order, `{"kind": "research", "tech": "<id or name>"}` (a `technology` field is accepted
+too): submitted in A, only checked in N1, `PHASE_LOCKED` in N2; one per turn; changed with
+`PATCH /v1/orders/{id}` and `{"tech": "..."}`. Refusals: `NOT_AVAILABLE`, `ALREADY_RESEARCHED`, `UNKNOWN_ID`,
+`INVALID`.
+
+`GET /v1/rules` without `topic` is the short core (at most 6000 characters) with a table of contents;
+`?topic=techs|factions|artifacts|setup|pacts|combat|units|buildings|abilities|...` is that section in full, built
+from the match's content; a content id or name gives its description; an unknown topic lists the topics only.
 
 ### Phase and waiting
 
 `/v1/phase` returns `game_id`, `turn`, `turn_limit`, `phase`, `deadline` (UTC, `2026-11-23T14:30:00Z`),
 `seconds_left`, `ready` ("N/M" of living seats), `you_ready`, `phase_seq`, `allowed` (tools allowed in this phase),
-`alive`, `game_over`, `text`, and `result` once the match is over.
+`alive`, `game_over`, `text`, and `result` once the match is over; in the setup phase (`phase: "setup"`) also a
+`hint` on what to do.
 
 `phase_seq` grows by one at each phase change. `/v1/wait_phase?after_seq=N` returns as soon as `phase_seq` differs
 from `N`, or after `max_seconds` (default 45, at most 55) with `changed: false`. Without `after_seq` it returns at
@@ -82,7 +137,8 @@ once with `changed: true`.
 in N1: `POST /v1/orders`, `DELETE` and `PATCH` answer `409 PHASE_LOCKED` with a hint), messages, diplomacy
 (`send_gift`, `propose_pact`, `respond_pact`, `leave_pact`, `list_pacts`), inbox, ready and history. A: the state,
 all order tools, `list_pacts`, inbox, ready and history (no messages, no diplomacy). N2: everything. A seat that is
-out, or a match that is over, gets only `get_state`, `history`, `inbox` and `list_pacts`.
+out, or a match that is over, gets only `get_state`, `history`, `inbox`, `list_pacts`, `list_techs`, `describe` and
+the always-open `rules`, `whoami`, `phase`, `wait_phase`, which every phase's `allowed` lists too.
 
 For host calls (the `X-DAH-Host` header, which `dah-waker` sends), `/v1/phase` and `/v1/wait_phase` add fields
 about the player of that seat: `player_waiting` (a player's long-poll of `/v1/wait_phase` is pending now, or was
@@ -103,7 +159,9 @@ only its own seat's player.
 between 1 and the current turn the text holds only what changed since the start of that turn; `since_turn=0` (or
 none) gives the whole state; a later turn is `400 INVALID`.
 `format=json` returns `state` with `turn`, `turn_limit`, `phase`, `you` (resources, net income, CP), `players`
-(nick, alive, score) and `provinces` (`visible`, and for visible ones `units`, `buildings`, `fortified`).
+(nick, alive, score) and `provinces` (`visible`, and for visible ones `units`, `buildings`, `fortified`). When the
+ruleset has techs or artifacts, `you` also has `techs`, `researching`, `research`, `artifacts`, and every player
+entry has `faction` and `techs_count` (others' techs and artifacts only after the game ends).
 
 ### Orders
 
@@ -139,6 +197,11 @@ a province id (`P07`) or name, which stands for that province's type. The answer
 `province_type`. Unknown ids give `400 UNKNOWN_ID` with the list of valid ones; a missing or malformed field gives
 `400 INVALID`; both messages end with a correct example call. The route works in any phase
 ([Game rules](rules.md#estimate)).
+
+Optional `side` (`attacker` by default, or `defender`) and `opponent`: the `side` gets the calling seat's stats
+(faction, techs, artifacts, owner-scoped buildings; with `side: defender` and an own province id in
+`province_type`, also that province's defense from buildings), the other side gets the public faction of the
+player `opponent` (a nick), or base numbers without it. The answer also has `side`.
 
 ### Ready
 

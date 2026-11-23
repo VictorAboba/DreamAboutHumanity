@@ -8,7 +8,8 @@ import json
 import pytest
 
 from dah.engine import SeatOrders, orders_hash
-from dah.game import Game, GameError, escape_untrusted, make_config, replay, wrap_untrusted
+from dah.game import Game, GameError, escape_untrusted, replay, wrap_untrusted
+from slice_helpers import slice_config
 from dah.journal import read_events
 from dah.store import GameDir, init_game_dir
 
@@ -32,7 +33,7 @@ def clock() -> FakeClock:
 
 
 def new_game(tmp_path, clock: FakeClock, **kwargs) -> Game:
-    config = make_config(game_id="g1", scenario="core:slice2", seats=SEATS, seed=7, **kwargs)
+    config = slice_config(game_id="g1", scenario="core:slice2", seats=SEATS, seed=7, **kwargs)
     gdir, _ = init_game_dir(tmp_path, config)
     return Game.create(gdir, clock)
 
@@ -249,7 +250,7 @@ def test_order_ids_do_not_reveal_other_seats(tmp_path, clock):
 
 def test_inbox_ids_count_only_own_messages(tmp_path, clock):
     seats = [*SEATS, {"seat": "C", "nick": "Сид", "kind": "agent"}]
-    config = make_config(game_id="g3", scenario="core:slice3", seats=seats, seed=7)
+    config = slice_config(game_id="g3", scenario="core:slice3", seats=seats, seed=7)
     game = Game.create(init_game_dir(tmp_path, config)[0], clock)
     game.send_message("B", ["Сид"], "секрет")
     assert game.send_message("C", ["Нико"], "привет")["message_id"] == 1
@@ -283,7 +284,7 @@ def test_order_edits_journaled_in_every_phase(tmp_path, clock):
 
 
 def test_create_without_start_opens_first_phase_later(tmp_path, clock):
-    config = make_config(game_id="g1", scenario="core:slice2", seats=SEATS, seed=7)
+    config = slice_config(game_id="g1", scenario="core:slice2", seats=SEATS, seed=7)
     gdir, _ = init_game_dir(tmp_path, config)
     Game.create(gdir, clock, start=False)
     clock.advance(3600)

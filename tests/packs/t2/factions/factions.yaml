@@ -1,0 +1,18 @@
+- id: iron
+  name: Железный Обет
+  description: Война дешевле.
+  lore: lore/iron.md
+  bonuses:
+    - {effect: modify, target: tech.branch.war.cost_mul, op: mul, value: 0.5}
+  starting:
+    resources: {alloy: 30, provisions: 15}
+    units: {militia: 3}
+    buildings: [barracks]
+- id: ash
+  name: Пепельный Двор
+  bonuses:
+    - {effect: modify, target: resource.alloy.income_mul, op: mul, value: 1.25}
+  starting:
+    resources: {alloy: 30, provisions: 15}
+    units: {militia: 3}
+    buildings: [barracks]

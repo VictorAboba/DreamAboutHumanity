@@ -1,0 +1,3 @@
+- {id: alloy, name: Сплав, role: build}
+- {id: provisions, name: Провиант, role: upkeep_food}
+- {id: creed, name: {ru: Кредо, en: Creed}, role: research}

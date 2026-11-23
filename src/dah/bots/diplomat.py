@@ -9,6 +9,9 @@
   seed.
 - Betrayal: in the last two turns it attacks a partner's province with "pact": "break" when the estimate shows a
   decisive win (>= 0.85), since a broken pact costs little once the game is about to end.
+- Stage 2: prefers factions of command and cunning (synclite, captains, ash_choir), artifacts of command and income,
+  researches logistics first (more command points), then industry; recruits one of its faction's unique unit per
+  turn before assault.
 """
 
 from __future__ import annotations
@@ -22,12 +25,13 @@ from dah.bots.tactics import (
     garrison,
     merge_reserved,
     plan_moves,
+    recruit_site,
     reserved_by_orders,
+    unique_recruit,
 )
 from dah.bots.view import (
     BUILD_RESOURCE,
     BUILDING_COST_ALLOY,
-    RECRUIT_BUILDINGS,
     UNIT_COST_ALLOY,
     StateView,
     farm_site,
@@ -45,10 +49,15 @@ GIFT_MIN_ALLOY = 30  # never gifts when poorer than this
 MAX_PROPOSALS = 2  # to one seat that never accepted
 FOOD_TURNS = 3
 RECRUIT_UNIT = "assault"
+UNIQUE_PER_TURN = 1
 
 
 class DiplomatBot(Bot):
     name = "diplomat"
+    faction_style = ("synclite", "captains", "ash_choir", "litany", "growth")
+    artifact_likes = ("seal_of_command", "tithe_chalice", "ore_vein", "trail_maps", "calm_banner")
+    branch_priority = ("logistics", "industry", "mystery", "war")
+    tech_first = ("treasury_order", "staff_litanies")
 
     def __init__(self, seat: str, seed: int) -> None:
         super().__init__(seat, seed)
@@ -88,13 +97,17 @@ class DiplomatBot(Bot):
             orders.append({"kind": "build", "province": province.id, "building": view.qualify(building)})
             alloy -= BUILDING_COST_ALLOY[building]
 
-        recruit_site = next((p for p in view.own_provinces() if RECRUIT_BUILDINGS & set(p.buildings)), None)
+        site = recruit_site(view)
+        unique, spent, unique_upkeep = unique_recruit(view, alloy, FOOD_TURNS, UNIQUE_PER_TURN)
+        if unique is not None:
+            orders.append(unique)
+            alloy -= spent
         count = alloy // UNIT_COST_ALLOY[RECRUIT_UNIT]
         if feedable is not None:
-            count = min(count, feedable)
-        if recruit_site is not None and count > 0:
+            count = min(count, feedable - unique_upkeep)
+        if site is not None and count > 0:
             orders.append(
-                {"kind": "recruit", "province": recruit_site.id, "unit": view.qualify(RECRUIT_UNIT), "count": count}
+                {"kind": "recruit", "province": site.id, "unit": view.qualify(RECRUIT_UNIT), "count": count}
             )
 
         betrayal = self._betrayal(view, estimate)

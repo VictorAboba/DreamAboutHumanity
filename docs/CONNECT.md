@@ -26,8 +26,22 @@ stdio MCP-сервер `dah`, который переводит вызовы и�
 `validate_orders(orders)`, `submit_orders(orders, mode)`, `cancel_order(id)`, `amend_order(id, patch)`,
 `estimate(attacker, defender, province_type, fortified?, hasty?)`, `send_message(to, text)`, `inbox(since?, all?)`,
 `send_gift(to, resources)`, `propose_pact(to, turns?)`, `respond_pact(id, decision)`, `leave_pact(id)`, `list_pacts`,
-`ready(confirm_hash)`, `unready`, `history(turn?)`.
+`ready(confirm_hash)`, `unready`, `history(turn?)`; этап 2 (фаза старта и технологии, [TECH_AND_SETUP.md](TECH_AND_SETUP.md)):
+`get_setup`, `choose_faction(prefs)`, `choose_artifacts(ids)`, `list_techs`, `describe(id)`.
 
+- `rules()` — краткое ядро правил (≤ 6000 символов) с оглавлением; `rules(topic="techs")` — раздел целиком, собранный
+  из контента партии. Темы: `turn`, `setup`, `resources`, `provinces`, `units`, `abilities`, `buildings`, `orders`,
+  `p2`, `combat`, `victory`, `pacts`, `fog`, `messages`, `techs`, `factions`, `artifacts` (есть только те, что нужны
+  партии); ID или название контента в `topic` даёт его описание.
+- Фаза старта `setup` (если она есть в партии) — до хода 1: `phase()` возвращает `phase: "setup"` и подсказку `hint`.
+  `get_setup()` — все фракции с описаниями, твои предложенные артефакты (драфт) или пул и бюджет (очки), твой выбор;
+  `choose_faction(prefs=["litany", "captains"])` — фракции по предпочтению; `choose_artifacts(ids=["ancient_blueprint"])`;
+  `ready()` — без `confirm_hash`. Чужой выбор не виден; `get_state` во время фазы — предварительное состояние, фракции
+  соперников в нём скрыты.
+- Технологии: `list_techs()` — твоё дерево (изученные, активная, доступные и закрытые с причиной, цена, прогресс);
+  исследование — обычный приказ `{"kind": "research", "tech": "deep_drilling"}` в Д (в П1 — только `validate_orders`),
+  сменить — `amend_order(id, patch={"tech": "agro_vats"})`. `describe(id="throne_warden")` — любой юнит, здание, технология,
+  артефакт, фракция по ID или названию. Чужие технологии и артефакты не видны (только число изученных технологий).
 - Приказы подаются только в фазе Д (`submit_orders`; в П2 — `append`, `amend_order`, `cancel_order` за ОК). В П1
   `submit_orders`, `cancel_order`, `amend_order` отвечают `PHASE_LOCKED`: там приказы можно только проверить
   (`validate_orders` работает в любой фазе).
@@ -51,6 +65,8 @@ stdio MCP-сервер `dah`, который переводит вызовы и�
   `estimate(attacker={"core:assault": 4}, defender={"core:assault": 2}, province_type="P07")`. Юнит — полный ID,
   короткий (`assault`) или метка из текста состояния (`штурм`); `province_type` — ID типа (`core:agri`), его метка
   из текста состояния (`агро`, `кузн.`, `пуст.`, `столица`) или ID провинции (`P07`) — тогда берётся её тип.
+  `side` (`attacker` по умолчанию или `defender`) — твоя сторона: на ней действуют твои технологии, артефакты и
+  здания; `opponent` — ник соперника, его фракция берётся на другую сторону.
 - `get_state()` — всё состояние, `get_state(since_turn=N)` — изменения с хода N (`since_turn=0` — тоже всё);
   `history()` — отчёт последнего рассчитанного хода (до расчёта хода 1 — подсказка вместо отчёта).
 - На неверные аргументы `estimate`, `get_state`, `history` и `send_message` ответ называет ошибку и показывает верный

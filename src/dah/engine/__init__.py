@@ -53,24 +53,53 @@ Views (Russian text)
                       since_turn=None, since_state=None, reports=(), book=None) -> str
         since_state = snapshot at the start of `since_turn`, reports = TurnReports of turns >= since_turn.
     render_report_text(report, ruleset, state, seat) -> str           # /v1/history
-    rules_text(ruleset) -> str                                        # /v1/rules, <= 6000 chars
-    estimate(ruleset, attacker_units, defender_units, province_type, fortified=False, hasty=False)
+    rules_text(ruleset, *, setup=..., extra=()) -> str                # /v1/rules: core <= 6000 chars + contents
+    rules_topic(ruleset, topic, *, setup=..., extra=()) -> str | None  # /v1/rules?topic=techs|factions|...
+    estimate(ruleset, attacker_units, defender_units, province_type, fortified=False, hasty=False,
+             *, attacker_key=None, defender_key=None, defense_mul=None)
         -> {win_prob, attacker_losses_avg, defender_losses_avg}     # 200 runs, fixed seed; KeyError on bad ids
     rng.stream(seed, turn, system, entity_id) -> random.Random
+
+Stage 2 (docs/TECH_AND_SETUP.md: techs, abilities, setup phase, artifacts)
+    stat_key(state, ruleset, seat) -> faction id | Profile   # the seat's key for ruleset.stat(path, key): techs,
+        artifacts and owner-scoped buildings; a faction id while it has none (the slice's per-faction table)
+    Ruleset: .techs/.branches/.artifacts, .research_resource, .tech_cost(tech, key), .passive_income(key),
+             .unlocks(key) -> {"unit:<id>", "building:<id>", "order:<kind>"}, .gated_orders, .scenario.setup
+    income_of(state, ruleset, seat, key=...) / upkeep_of(...)    # key defaults to stat_key
+    seat_reserved(state, ruleset, seat, book)                    # reserved_resources with the key and discounts
+    Order kind "research" {tech}: only in actions (validate-only in negotiation_1, PHASE_LOCKED in negotiation_2);
+        reasons NOT_AVAILABLE (locked unit/building/tech/order), ALREADY_RESEARCHED
+    techs_view(state, ruleset, seat, research_income=None) -> own tree;  techs_text(view, ruleset) -> str
+    tech_counts(state, rs) -> {seat: n}                          # public (artifact grants not counted)
+    describe(ruleset, kind, id) -> dict with Russian "text";  find(ruleset, ref) -> [(kind, id)]
+    setup_config(ruleset, artifacts=None, offer=None, points=None) -> dict | None
+    draft_offers(ruleset, setup, seats, seed) -> {seat: [artifact ids]}; artifact_pool(ruleset, setup)
+    check_faction_prefs(ruleset, prefs) / check_artifacts(ruleset, setup, offer, ids) -> ids  # SetupChoiceError
+    resolve_setup(ruleset, setup, seed, seats, choices, offers) -> {seat: {faction, prefs, artifacts,
+        auto_faction, auto_artifacts, faction_conflict, dropped}}
+    new_game_state(..., seats=[{seat, nick, faction?, artifacts?}], ...)   # artifacts applied at the start
 """
 
+from .catalog import describe, describe_effect, find
 from .combat import estimate
-from .content import ContentError, Issue, Ruleset, build_ruleset, default_pack_dirs, validate_packs
+from .content import ContentError, Issue, Profile, Ruleset, build_ruleset, default_pack_dirs, validate_packs
 from .model import GameState, Order, SeatOrders, issue_order_id, state_hash
 from .orders import (Check, EditResult, SubmitResult, amend_order, cancel_order, check_order, cp_left,
-                     orders_hash, reserved_resources, submit_orders)
-from .resolve import SetupError, TurnReport, new_game_state, resolve, scores, visible_provinces
-from .view import DeadlineInfo, render_report_text, render_state_text, rules_text, view_state
+                     orders_hash, reserved_resources, seat_reserved, submit_orders)
+from .resolve import SetupError, TurnReport, income_of, new_game_state, resolve, scores, upkeep_of, visible_provinces
+from .setup import (SetupChoiceError, artifact_pool, check_artifacts, check_faction_prefs, draft_offers,
+                    resolve_setup, setup_config)
+from .techs import stat_key, tech_counts, techs_text, techs_view
+from .rules import RULES_LIMIT, rules_text, rules_topic, topic_key
+from .view import DeadlineInfo, render_report_text, render_state_text, view_state
 
 __all__ = [
-    "Check", "ContentError", "DeadlineInfo", "EditResult", "GameState", "Issue", "Order", "Ruleset", "SeatOrders",
-    "SetupError", "SubmitResult", "TurnReport", "amend_order", "build_ruleset", "cancel_order", "check_order",
-    "cp_left", "default_pack_dirs", "estimate", "issue_order_id", "new_game_state", "orders_hash",
-    "render_report_text", "render_state_text", "reserved_resources", "resolve", "rules_text", "scores",
-    "state_hash", "submit_orders", "validate_packs", "view_state", "visible_provinces",
+    "Check", "ContentError", "DeadlineInfo", "EditResult", "GameState", "Issue", "Order", "Profile", "Ruleset",
+    "SeatOrders", "SetupChoiceError", "SetupError", "SubmitResult", "TurnReport", "amend_order", "artifact_pool",
+    "build_ruleset", "cancel_order", "check_artifacts", "check_faction_prefs", "check_order", "cp_left",
+    "default_pack_dirs", "describe", "describe_effect", "draft_offers", "estimate", "find", "income_of",
+    "issue_order_id", "new_game_state", "orders_hash", "render_report_text", "render_state_text",
+    "RULES_LIMIT", "reserved_resources", "resolve", "resolve_setup", "rules_text", "rules_topic", "scores", "seat_reserved", "setup_config",
+    "stat_key", "state_hash", "submit_orders", "tech_counts", "techs_text", "techs_view", "topic_key", "upkeep_of",
+    "validate_packs", "view_state", "visible_provinces",
 ]

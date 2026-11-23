@@ -339,8 +339,17 @@ line. `format=json` gives the same view as JSON.
 
 ## The rules tool
 
-`rules()` returns these rules in Russian, generated from the match's ruleset (so scenario changes show up). With
-`topic` it returns one section: `turn` or `phases`, `resources`, `provinces`, `units`, `buildings`, `orders`, `p2`
-or `cp`, `combat` or `resolution`, `victory`, `fog` or `visibility`, `messages`, `diplomacy` (or `pacts`,
-`gifts`). The section headings of the
-rules text work too (`ЮНИТЫ`, `П2`, ...). An unknown topic returns the list of topics and the whole rules.
+`rules()` returns the short core of these rules in Russian (at most 6000 characters), generated from the match's
+ruleset (so scenario changes show up), with a table of topics. When there is a lot of content (units, techs,
+factions), the long sections of the core shrink to a list of names pointing to their topic: diplomacy first, then
+resolution, provinces, buildings and units.
+
+With `topic` it returns one section in full, built from the match's content: `turn` (or `phases`), `setup` (the
+setup phase), `resources`, `provinces`, `units`, `abilities` (unit abilities), `buildings`, `orders`, `p2` (or
+`cp`), `combat` (or `resolution`), `victory`, `pacts` (or `diplomacy`, `gifts`), `fog` (or `visibility`),
+`messages`, `techs` (the whole tree: branches, tiers, costs, requirements, effects), `factions` (bonuses,
+drawbacks, start, unique content), `artifacts` (every artifact with power, cost and effects). Only the topics the
+match needs exist (no `techs` without techs). The section headings of the rules text work too (`ЮНИТЫ`,
+`ТЕХНОЛОГИИ`, ...). A content id or name (`throne_warden`, `Кузнечное дело`, or the start of a
+name such as `Литания`) returns its description, as `describe` does. An unknown topic returns only the list of
+topics (the core rules are `rules()` without a topic).

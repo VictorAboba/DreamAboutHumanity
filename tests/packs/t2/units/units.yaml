@@ -1,0 +1,35 @@
+- {id: militia, name: Ополчение, short: опол, attack: 2, defense: 2, cost: {alloy: 10}, upkeep: {provisions: 1}}
+- id: knight
+  name: {ru: Рыцарь, en: Knight}
+  short: рыц
+  attack: 5
+  defense: 4
+  cost: {alloy: 20}
+  upkeep: {provisions: 1}
+  requires: {tech: [smithing], building: [smithy]}
+- id: raider
+  name: Налётчик
+  short: налёт
+  attack: 3
+  defense: 1
+  cost: {alloy: 12}
+  upkeep: {provisions: 1}
+  factions: [iron]
+  abilities: [fast]
+- id: ram
+  name: Таран
+  short: таран
+  attack: 4
+  defense: 1
+  cost: {alloy: 15}
+  upkeep: {provisions: 1}
+  move: 1
+  abilities: [ignore_fortify, {id: siege, cap: 1.0}]
+- id: guard
+  name: Страж
+  short: страж
+  attack: 1
+  defense: 2
+  cost: {alloy: 10}
+  upkeep: {provisions: 1}
+  abilities: [{id: garrison, defense: 2}]

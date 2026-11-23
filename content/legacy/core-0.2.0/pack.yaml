@@ -1,0 +1,9 @@
+# Frozen copy of core 0.2.0 (the slice, before stage 2). Games created on it replay and continue with it: `dah replay`
+# and Game.load pick it when the journaled ruleset hash matches (game.pick_ruleset); compatibility tests check that
+# a pack without stage-2 content builds and hashes exactly as before. Do not edit.
+id: core
+version: 0.2.0
+title: Ядро DreamAboutHumanity
+author: DreamAboutHumanity
+requires: []
+engine_api: "^1"

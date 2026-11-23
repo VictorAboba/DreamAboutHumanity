@@ -11,7 +11,7 @@ from collections import deque
 from typing import Callable
 
 from dah.bots.base import Estimator, Order
-from dah.bots.view import Province, StateView, short_id
+from dah.bots.view import RECRUIT_BUILDINGS, UNIT_COST_ALLOY, UNIT_UPKEEP_FOOD, Province, StateView, short_id
 
 Reserved = dict[str, dict[str, int]]   # province -> short unit id -> units that stay
 
@@ -171,3 +171,25 @@ def distance_to_foreign(view: StateView) -> dict[str, int]:
                 distance[neighbor.id] = distance[current.id] + 1
                 queue.append(neighbor.id)
     return distance
+
+
+def recruit_site(view: StateView) -> Province | None:
+    """First own province with a recruiting building (id order)."""
+    return next((p for p in view.own_provinces() if RECRUIT_BUILDINGS & set(p.buildings)), None)
+
+
+def unique_recruit(view: StateView, alloy: int, food_turns: int, max_count: int) -> tuple[Order | None, int, int]:
+    """Recruit up to `max_count` of the own faction's unique unit (stage 2) that `alloy` (and the other stocks) pay
+    for and the food keeps fed for `food_turns` turns. Returns (order or None, alloy spent, upkeep added)."""
+    unit = view.unique_unit
+    site = recruit_site(view)
+    if unit is None or site is None or max_count <= 0 or unit not in UNIT_COST_ALLOY:
+        return None, 0, 0
+    count = min(view.affordable(unit, alloy), max_count)
+    feedable = view.feedable(unit, food_turns)
+    if feedable is not None:
+        count = min(count, feedable)
+    if count <= 0:
+        return None, 0, 0
+    order = {"kind": "recruit", "province": site.id, "unit": view.qualify(unit), "count": count}
+    return order, count * UNIT_COST_ALLOY[unit], count * UNIT_UPKEEP_FOOD.get(unit, 1)

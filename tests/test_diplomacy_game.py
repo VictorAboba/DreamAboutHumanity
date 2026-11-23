@@ -6,6 +6,7 @@ import pytest
 
 from dah.engine import orders_hash
 from dah.game import Game, GameError, escape_untrusted, make_config, replay
+from slice_helpers import slice_config
 from dah.journal import read_events
 from dah.report import build_report, render_report
 from dah.store import init_game_dir
@@ -25,7 +26,7 @@ class FakeClock:
 
 @pytest.fixture
 def game(tmp_path) -> Game:
-    config = make_config(game_id="d1", scenario="core:slice3", seats=SEATS, seed=7)
+    config = slice_config(game_id="d1", scenario="core:slice3", seats=SEATS, seed=7)
     return Game.create(init_game_dir(tmp_path, config)[0], FakeClock())
 
 
@@ -79,7 +80,7 @@ def test_p1_only_validates_orders(game):
 
 def test_default_limits_are_12_5_5(game):
     assert game.config["phase_limits"] == {"negotiation_1": 720, "actions": 300, "negotiation_2": 300}
-    assert make_config(game_id="x", scenario="core:slice2", seats=SEATS[:2], seed=1)["phase_limits"] == \
+    assert slice_config(game_id="x", scenario="core:slice2", seats=SEATS[:2], seed=1)["phase_limits"] == \
         game.config["phase_limits"]
     assert make_config(game_id="x", scenario="core:blitz_test", seats=SEATS, seed=1)["phase_limits"] == \
         {"negotiation_1": 5, "actions": 5, "negotiation_2": 5}
@@ -100,8 +101,8 @@ def test_gift_moves_free_resources_and_notifies_recipient_as_the_game(game):
     before_a, before_b = dict(game.state.players["A"].resources), dict(game.state.players["B"].resources)
     out = game.send_gift("A", "Соло", {"alloy": 10, "Провиант": 5})
     assert out["gift"]["resources"] == {ALLOY: 10, FOOD: 5} and out["gifts_left"] == 2
-    assert game.state.players["A"].resources == {ALLOY: before_a[ALLOY] - 10, FOOD: before_a[FOOD] - 5}
-    assert game.state.players["B"].resources == {ALLOY: before_b[ALLOY] + 10, FOOD: before_b[FOOD] + 5}
+    assert game.state.players["A"].resources == {**before_a, ALLOY: before_a[ALLOY] - 10, FOOD: before_a[FOOD] - 5}
+    assert game.state.players["B"].resources == {**before_b, ALLOY: before_b[ALLOY] + 10, FOOD: before_b[FOOD] + 5}
     (entry,) = game.inbox("B")["messages"]
     assert entry["system"] is True and entry["from"] == "ИГРА" and entry["event"] == "gift"
     assert entry["text"].startswith("[ИГРА] Нико прислал тебе подношение") and "untrusted" not in entry["text"]

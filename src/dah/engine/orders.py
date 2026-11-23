@@ -9,11 +9,13 @@ from dataclasses import dataclass, replace
 from itertools import count as _counter
 from typing import Any, Callable, Iterable, Mapping
 
-from .content import Ruleset
+from .content import Ruleset, StatKey
 from .diplomacy import pact_between
 from .model import ACTIONS, BREAK, HONOR, INT_BOUND, P2, GameState, Order, SeatOrders, as_int, sha256_json
+from .techs import (ALREADY_RESEARCHED, NOT_AVAILABLE, building_problem, move_problem, province_stat,
+                    resolve_tech_ref, stat_key, tech_problem, unit_problem)
 
-KINDS = ("move", "recruit", "build", "fortify")
+KINDS = ("move", "recruit", "build", "fortify", "research")
 PACT_FLAGS = (HONOR, BREAK)
 FREE_PHASES = (ACTIONS,)    # orders are given in actions (free) and edited in negotiation_2 (priced in CP)
 P1 = "negotiation_1"
@@ -32,6 +34,9 @@ PHASE_LOCKED = "PHASE_LOCKED"
 NOT_ENOUGH_CP = "NOT_ENOUGH_CP"
 UNKNOWN_ID = "UNKNOWN_ID"
 INVALID = "INVALID"          # malformed order or patch (not in SLICE's list; needed for bad input)
+# stage 2 (TECH_AND_SETUP.md, from engine/techs.py): NOT_AVAILABLE (a unit, building or tech locked by techs,
+# faction or a missing building), ALREADY_RESEARCHED (research of a tech the seat has)
+STAGE2_REASONS = (NOT_AVAILABLE, ALREADY_RESEARCHED)
 
 
 class OrderRejected(Exception):
@@ -279,6 +284,8 @@ def parse_order(ruleset: Ruleset, data: Mapping[str, Any], order_id: str, phase:
     if kind not in KINDS:
         raise OrderRejected(INVALID, f"kind должен быть одним из {', '.join(KINDS)}")
     added = P2 if phase == P2 else ACTIONS
+    if kind == "research":
+        return _research_order(ruleset, data, order_id, added)
     if kind == "move":
         return Order(order_id, kind, added, src=_require_str(data, "from"), dst=_require_str(data, "to"),
                      units=_move_units(ruleset, data), pact=_pact_flag(data.get("pact")))
@@ -297,24 +304,53 @@ def parse_order(ruleset: Ruleset, data: Mapping[str, Any], order_id: str, phase:
     return Order(order_id, kind, added, province=province)
 
 
+RESEARCH_EXAMPLE = '{"kind":"research","tech":"<id технологии>"}'
+
+
+def _research_order(ruleset: Ruleset, data: Mapping[str, Any], order_id: str, added: str) -> Order:
+    ref = data.get("tech")
+    tech = resolve_tech_ref(ruleset, ref)
+    if tech is None:
+        if not ruleset.techs:
+            raise OrderRejected(NOT_AVAILABLE, "в этой партии нет технологий")
+        if not isinstance(ref, str) or not ref.strip():
+            raise OrderRejected(INVALID, f"поле 'tech' обязательно: {RESEARCH_EXAMPLE}")
+        raise OrderRejected(UNKNOWN_ID, f"неизвестная технология {str(ref)[:40]!r}; список — list_techs")
+    return Order(order_id, "research", added, tech=tech)
+
+
 # ---------------------------------------------------------------- reservations
 
-def order_cost(ruleset: Ruleset, faction: str, order: Order) -> Counter[str]:
+def order_cost(ruleset: Ruleset, faction: StatKey, order: Order, state: GameState | None = None) -> Counter[str]:
+    """Resources an order holds. `faction` is the seat's stat key (techs.stat_key; a faction id is the slice's
+    case); with `state`, a recruit gets its province's `province.recruit_discount` (rounded in the seat's favour)."""
     if order.kind == "recruit":
         assert order.unit is not None and order.count is not None
-        return Counter({r: n * order.count for r, n in ruleset.unit_cost(order.unit, faction).items()})
+        cost = {r: n * order.count for r, n in ruleset.unit_cost(order.unit, faction).items()}
+        if state is not None and order.province in state.provinces:
+            discount = province_stat(state, ruleset, order.province, "province.recruit_discount")
+            if discount > 0:
+                cost = {r: n - math.floor(n * discount) for r, n in cost.items()}
+        return Counter({r: n for r, n in cost.items() if n})
     if order.kind == "build":
         assert order.building is not None
         return Counter(ruleset.building_cost(order.building, faction))
     return Counter()
 
 
-def reserved_resources(ruleset: Ruleset, faction: str, book: SeatOrders) -> dict[str, int]:
-    """Resources held by recruit/build orders plus reserve already forfeited in P2."""
+def reserved_resources(ruleset: Ruleset, faction: StatKey, book: SeatOrders,
+                       state: GameState | None = None) -> dict[str, int]:
+    """Resources held by recruit/build orders plus reserve already forfeited in P2. Pass the seat's stat key and
+    the state (`seat_reserved` does both) for techs, artifacts and recruit discounts to count."""
     total: Counter[str] = Counter(book.forfeit)
     for o in book.orders:
-        total.update(order_cost(ruleset, faction, o))
+        total.update(order_cost(ruleset, faction, o, state))
     return dict(sorted((k, v) for k, v in total.items() if v))
+
+
+def seat_reserved(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders) -> dict[str, int]:
+    """reserved_resources with the seat's stat key and recruit discounts."""
+    return reserved_resources(ruleset, stat_key(state, ruleset, seat), book, state)
 
 
 def reserved_units(orders: Iterable[Order], province: str) -> Counter[str]:
@@ -341,6 +377,14 @@ def _rules_problem(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrde
     if player is None or not player.alive:
         return PHASE_LOCKED, "место выбыло из игры"
     others = [o for o in book.orders if exclude is None or o.id != exclude]
+    key = stat_key(state, ruleset, seat)
+    if order.kind in ruleset.gated_orders and f"order:{order.kind}" not in ruleset.unlocks(key):
+        return NOT_AVAILABLE, f"приказ {order.kind} ещё не открыт (нужна технология или артефакт)"
+    if order.kind == "research":
+        assert order.tech is not None
+        if any(o.kind == "research" for o in others):
+            return INVALID, "приказ research уже есть: одна активная технология (отмени прежний приказ)"
+        return tech_problem(state, ruleset, seat, order.tech)
     target = order.src if order.kind == "move" else order.province
     if target not in state.provinces:
         return UNKNOWN_ID, f"неизвестная провинция {target!r}"
@@ -350,8 +394,9 @@ def _rules_problem(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrde
     if order.kind == "move":
         if order.dst not in state.provinces:
             return UNKNOWN_ID, f"неизвестная провинция {order.dst!r}"
-        if not ruleset.map.adjacent(target, order.dst):
-            return NOT_ADJACENT, f"{order.dst} не соседствует с {target}"
+        far = move_problem(state, ruleset, seat, target, order.dst, (order.units or {}).keys(), key)
+        if far is not None:
+            return NOT_ADJACENT, far
         busy = reserved_units(others, target)
         for unit, n in (order.units or {}).items():
             free = prov.units.get(unit, 0) - busy.get(unit, 0)
@@ -365,14 +410,20 @@ def _rules_problem(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrde
     if order.kind == "recruit":
         if not any(ruleset.buildings[b].recruit for b in prov.buildings):
             return NO_RECRUIT_BUILDING, f"в {target} нет здания для найма"
+        locked = unit_problem(state, ruleset, seat, order.unit, target, key)
+        if locked:
+            return NOT_AVAILABLE, locked
     if order.kind == "build":
         b = order.building
+        locked = building_problem(state, ruleset, seat, b, key)
+        if locked:
+            return NOT_AVAILABLE, locked
         pending = any(p.province == target and p.building == b for p in state.pending_builds)
         ordered = any(o.kind == "build" and o.province == target and o.building == b for o in others)
         if b in prov.buildings or pending or ordered:
             return ALREADY_BUILT, f"{ruleset.short(b)} в {target} уже есть или строится"
-    need = order_cost(ruleset, player.faction, order)
-    held = reserved_resources(ruleset, player.faction, replace(book, orders=others))
+    need = order_cost(ruleset, key, order, state)
+    held = reserved_resources(ruleset, key, replace(book, orders=others), state)
     for res, n in sorted(need.items()):
         free = player.resources.get(res, 0) - held.get(res, 0)
         if n > free:
@@ -380,7 +431,7 @@ def _rules_problem(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrde
     return None
 
 
-def _new_order_cp(ruleset: Ruleset, faction: str, order: Order, phase: str) -> tuple[str, str] | int:
+def _new_order_cp(ruleset: Ruleset, faction: StatKey, order: Order, phase: str) -> tuple[str, str] | int:
     if phase in FREE_PHASES:
         return 0
     if phase == P1:
@@ -389,6 +440,8 @@ def _new_order_cp(ruleset: Ruleset, faction: str, order: Order, phase: str) -> t
         return PHASE_LOCKED, "приказы сейчас не принимаются"
     if order.kind in ("recruit", "build"):
         return PHASE_LOCKED, "найм и стройка в П2 запрещены"
+    if order.kind == "research":
+        return PHASE_LOCKED, "исследование выбирают только в фазе Д"
     if order.kind == "fortify":
         return CP_FORTIFY
     return int(ruleset.stat("p2.cost.new_attack", faction))
@@ -397,7 +450,7 @@ def _new_order_cp(ruleset: Ruleset, faction: str, order: Order, phase: str) -> t
 def _check(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders, order: Order, phase: str) -> Check:
     if seat not in state.players:
         return Check(False, UNKNOWN_ID, f"неизвестное место {seat!r}", order=order)
-    priced = _new_order_cp(ruleset, state.players[seat].faction, order, phase)
+    priced = _new_order_cp(ruleset, stat_key(state, ruleset, seat), order, phase)
     if isinstance(priced, tuple):
         return Check(False, *priced, order=order)
     problem = _rules_problem(state, ruleset, seat, book, order)
@@ -475,7 +528,7 @@ def check_order(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders,
     return submit_orders(state, ruleset, seat, book, [item], phase).results[0]
 
 
-def _forfeit(ruleset: Ruleset, faction: str, removed: Counter[str]) -> Counter[str]:
+def _forfeit(ruleset: Ruleset, faction: StatKey, removed: Counter[str]) -> Counter[str]:
     refund = ruleset.stat("p2.cancel_refund", faction)
     return Counter({r: n - math.floor(n * refund) for r, n in removed.items() if n - math.floor(n * refund)})
 
@@ -506,8 +559,8 @@ def cancel_order(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders
         return EditResult(True, replace(book, orders=rest))
     if CP_CANCEL > cp_left(state, seat, book):
         return EditResult(False, book, NOT_ENOUGH_CP, "нужно 1 ОК", CP_CANCEL)
-    faction = state.players[seat].faction
-    forfeit = Counter(book.forfeit) + _forfeit(ruleset, faction, order_cost(ruleset, faction, order))
+    faction = stat_key(state, ruleset, seat)
+    forfeit = Counter(book.forfeit) + _forfeit(ruleset, faction, order_cost(ruleset, faction, order, state))
     return EditResult(True, SeatOrders(rest, book.cp_spent + CP_CANCEL, dict(sorted(forfeit.items()))),
                       cp_cost=CP_CANCEL)
 
@@ -530,7 +583,7 @@ def amend_order(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders,
     if not isinstance(patch, Mapping):
         return EditResult(False, book, INVALID, f"patch должен быть объектом, получено {_shown(patch)}")
     patch = {k: v for k, v in patch.items() if v is not None}     # null-filling clients: null = not changed
-    allowed = {"move": {"units", "to", "pact"}, "recruit": {"count"}}.get(old.kind, set())
+    allowed = {"move": {"units", "to", "pact"}, "recruit": {"count"}, "research": {"tech"}}.get(old.kind, set())
     accepted = allowed | ({"unit", "count"} if old.kind == "move" else set())   # move: the flat form too
     extra = set(patch) - accepted
     if not patch or extra:
@@ -538,13 +591,15 @@ def amend_order(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders,
         if old.kind == "move":
             what += f" (или плоско unit+count: {FLAT_PATCH_EXAMPLE})"
         return EditResult(False, book, INVALID, f"у приказа {old.kind} можно менять: {what}")
-    faction = state.players[seat].faction
+    faction = stat_key(state, ruleset, seat)
     try:
         if old.kind == "move":
             moved = any(k in patch for k in ("units", "unit", "count"))
             new = replace(old, units=_move_units(ruleset, patch, patch=True) if moved else old.units,
                           dst=_require_str(patch, "to") if "to" in patch else old.dst,
                           pact=_pact_flag(patch["pact"]) if "pact" in patch else old.pact)
+        elif old.kind == "research":
+            new = replace(old, tech=_research_order(ruleset, patch, old.id, old.phase_added).tech)
         else:
             new = replace(old, count=_positive_int(patch["count"], "count"))
     except OrderRejected as exc:
@@ -557,7 +612,7 @@ def amend_order(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders,
             return EditResult(False, book, exc.reason, exc.message)
         if hasty:
             new = replace(new, phase_added=P2)
-        removed = order_cost(ruleset, faction, old) - order_cost(ruleset, faction, new)
+        removed = order_cost(ruleset, faction, old, state) - order_cost(ruleset, faction, new, state)
         forfeit = _forfeit(ruleset, faction, removed)
     work = SeatOrders([new if o.id == order_id else o for o in book.orders], book.cp_spent,
                       dict(Counter(book.forfeit) + forfeit))
@@ -571,8 +626,10 @@ def amend_order(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders,
     return EditResult(True, work, cp_cost=cost, order=new, warning=pact_warning(state, seat, new))
 
 
-def _amend_price(ruleset: Ruleset, faction: str, old: Order, new: Order) -> tuple[int, bool]:
+def _amend_price(ruleset: Ruleset, faction: StatKey, old: Order, new: Order) -> tuple[int, bool]:
     """(CP cost, becomes hasty) of a P2 amendment. Raises OrderRejected."""
+    if old.kind == "research":
+        raise OrderRejected(PHASE_LOCKED, "исследование выбирают только в фазе Д")
     if old.kind == "recruit":
         assert old.count is not None and new.count is not None
         if new.count > old.count:

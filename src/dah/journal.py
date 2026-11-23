@@ -15,6 +15,9 @@ EVENT_TYPES = frozenset({
     # diplomacy (CONCEPT.md section 7): gifts and pacts
     "gift", "pact_proposed", "pact_accepted", "pact_rejected", "pact_withdrawn", "pact_left", "pact_broken",
     "pact_expired", "pact_ended", "pact_lapsed",
+    # stage 2 (TECH_AND_SETUP.md): setup phase and research. `setup_choice` (seat, kind, prefs/artifacts) is private
+    # until `setup_closed`; the artifacts in `setup_closed` stay hidden from players and spectators until game_over.
+    "setup_choice", "setup_closed", "research_started", "tech_completed",
 })
 
 

@@ -155,7 +155,34 @@ def amend_order(game: Game, seat: str, request: Request, body: dict[str, Any]) -
 
 
 def estimate(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
-    return game.estimate(body)
+    return game.estimate(body, seat)
+
+
+def _first(body: dict[str, Any], *names: str) -> Any:
+    """The first of several accepted spellings of one argument (prefs / factions / faction ...)."""
+    return next((body[n] for n in names if body.get(n) is not None), None)
+
+
+def get_setup(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.get_setup(seat)
+
+
+def choose_faction(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.choose_faction(seat, _first(body, "prefs", "factions", "faction"))
+
+
+def choose_artifacts(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.choose_artifacts(seat, _first(body, "ids", "artifacts", "artifact"))
+
+
+def list_techs(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.list_techs(seat)
+
+
+def describe(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    q = request.query_params
+    ref = next((q[n] for n in ("id", "ref", "name") if q.get(n)), None)
+    return game.describe(seat, ref)
 
 
 def send_message(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
@@ -229,6 +256,11 @@ SEAT_ROUTES: list[tuple[str, str, Handler]] = [
     ("DELETE", "/v1/orders/{order_id}", cancel_order),
     ("PATCH", "/v1/orders/{order_id}", amend_order),
     ("POST", "/v1/estimate", estimate),
+    ("GET", "/v1/setup", get_setup),
+    ("POST", "/v1/setup/faction", choose_faction),
+    ("POST", "/v1/setup/artifacts", choose_artifacts),
+    ("GET", "/v1/techs", list_techs),
+    ("GET", "/v1/describe", describe),
     ("POST", "/v1/messages", send_message),
     ("GET", "/v1/inbox", inbox),
     ("POST", "/v1/gifts", send_gift),

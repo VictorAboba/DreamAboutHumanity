@@ -17,7 +17,8 @@ from dah.bridge.client import GameClient
 from dah.bridge.tools import TOOLS, Bridge
 from dah.engine import SeatOrders, amend_order, build_ruleset, new_game_state, orders_hash, rules_text, submit_orders
 from dah.engine.model import P2
-from dah.game import Game, make_config, replay
+from dah.game import Game, replay
+from slice_helpers import slice_config
 from dah.server import create_app
 from dah.store import init_game_dir
 
@@ -136,7 +137,7 @@ def test_amend_empty_units_explains_patch_workarounds(st, rs):
 
 class Env:
     def __init__(self, tmp_path) -> None:
-        config = make_config(game_id="g1", scenario="core:slice2", seats=SEATS, seed=7)
+        config = slice_config(game_id="g1", scenario="core:slice2", seats=SEATS, seed=7)
         self.gdir, keys = init_game_dir(tmp_path, config)
         self.now = 1_700_000_000.0
         Game.create(self.gdir, lambda: self.now)
@@ -252,7 +253,7 @@ def test_bridge_end_to_end_against_the_real_server(tmp_path):
 # ---------------------------------------------------------------- journal / replay
 
 def _play(tmp_path, items) -> tuple[Game, object]:
-    config = make_config(game_id="g1", scenario="core:slice2", seats=SEATS, seed=7)
+    config = slice_config(game_id="g1", scenario="core:slice2", seats=SEATS, seed=7)
     gdir, _ = init_game_dir(tmp_path, config)
     clock = {"now": 1_700_000_000.0}
     game = Game.create(gdir, lambda: clock["now"])

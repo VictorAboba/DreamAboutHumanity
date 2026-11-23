@@ -9,12 +9,26 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-# Numbers of the `core` pack (0.2.0) the bots plan with (SLICE.md section 3); the server stays the authority.
+# Numbers of the `core` pack (0.3.0) the bots plan with (SLICE.md section 3, TECH_AND_SETUP.md section 8); the
+# server stays the authority (faction modifiers, e.g. cheaper buildings, only make the bots plan conservatively).
 # tests/test_bots_logic.py checks they match content/packs/core.
-UNIT_COST_ALLOY: dict[str, int] = {"assault": 12, "armor": 25, "artillery": 15}
-UNIT_UPKEEP_FOOD: dict[str, int] = {"assault": 1, "armor": 1, "artillery": 1}
-BUILDING_COST_ALLOY: dict[str, int] = {"mine": 10, "farm": 8, "barracks": 30}
-RECRUIT_BUILDINGS: frozenset[str] = frozenset({"barracks"})
+UNIT_COST_ALLOY: dict[str, int] = {"assault": 12, "armor": 25, "artillery": 15, "militia": 8, "outriders": 10,
+                                   "dreamwalker": 14, "mortar": 22, "titan": 45,
+                                   "throne_warden": 14, "faceless": 13, "ash_cantor": 12, "devourer": 10,
+                                   "rift_corsair": 12}
+UNIT_UPKEEP_FOOD: dict[str, int] = {"assault": 1, "armor": 1, "artillery": 1, "militia": 1, "outriders": 1,
+                                    "dreamwalker": 1, "mortar": 1, "titan": 2,
+                                    "throne_warden": 1, "faceless": 1, "ash_cantor": 1, "devourer": 2,
+                                    "rift_corsair": 1}
+# Costs beyond alloy (short resource id -> amount); units not listed cost only alloy.
+UNIT_COST_OTHER: dict[str, dict[str, int]] = {}    # costs beyond alloy (none in core 0.3.0: creed is for techs)
+# The faction's unique unit (stage 2): faction short id -> unit short id.
+UNIQUE_UNITS: dict[str, str] = {"litany": "throne_warden", "synclite": "faceless", "ash_choir": "ash_cantor",
+                                "growth": "devourer", "captains": "rift_corsair"}
+BUILDING_COST_ALLOY: dict[str, int] = {"mine": 10, "farm": 8, "barracks": 30, "temple": 15, "smithy": 25,
+                                       "citadel": 40, "warehouse": 20, "hq": 35}
+RESEARCH_BUILDING = "temple"  # +research income
+RECRUIT_BUILDINGS: frozenset[str] = frozenset({"barracks", "hq"})
 FARM_SITE = "agri"  # province type a farm prefers
 BUILD_RESOURCE = "alloy"
 FOOD_RESOURCE = "provisions"
@@ -60,6 +74,25 @@ class StateView:
     pacts: tuple[dict[str, Any], ...] = ()  # active pacts: {seats: [a, b], id?: own pacts only, ...}
     pact_proposals: tuple[dict[str, Any], ...] = ()  # own open proposals: {id, from, to, turns}
     net_income: dict[str, int] | None = None  # short resource id -> income minus upkeep; None if not sent
+    faction: str = ""  # own faction, short id ("" when not sent)
+    techs: tuple[str, ...] | None = None  # own researched techs (short ids); None: the game has no techs
+    researching: str | None = None  # own active tech (short id)
+    artifacts: tuple[str, ...] = ()  # own artifacts (short ids)
+
+    @property
+    def research_enabled(self) -> bool:
+        return self.techs is not None
+
+    @property
+    def unique_unit(self) -> str | None:
+        """The own faction's unique unit (short id), if the bots know one."""
+        return UNIQUE_UNITS.get(self.faction)
+
+    def affordable(self, unit: str, alloy: int) -> int:
+        """How many `unit` `alloy` and the other stocks pay for."""
+        counts = [alloy // UNIT_COST_ALLOY[unit]] if UNIT_COST_ALLOY.get(unit) else []
+        counts += [self.resource(r) // n for r, n in UNIT_COST_OTHER.get(unit, {}).items() if n]
+        return max(0, min(counts)) if counts else 0
 
     def is_mine(self, province: Province) -> bool:
         return province.owner is not None and province.owner in self.me
@@ -150,7 +183,17 @@ def parse_state(payload: dict[str, Any], me: set[str] | frozenset[str]) -> State
         pacts=tuple(dict(p) for p in state.get("pacts") or [] if isinstance(p, dict)),
         pact_proposals=tuple(dict(p) for p in state.get("pact_proposals") or [] if isinstance(p, dict)),
         net_income=_net_income(player.get("net_income")),
+        faction=short_id(str(player.get("faction") or "")),
+        techs=tuple(short_id(str(t)) for t in player["techs"]) if isinstance(player.get("techs"), list) else None,
+        researching=_researching(player.get("researching")),
+        artifacts=tuple(short_id(str(a)) for a in player.get("artifacts") or []),
     )
+
+
+def _researching(raw: Any) -> str | None:
+    if isinstance(raw, dict):
+        raw = raw.get("tech")
+    return short_id(str(raw)) if raw else None
 
 
 def _net_income(raw: Any) -> dict[str, int] | None:

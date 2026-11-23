@@ -8,7 +8,8 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from dah.game import Game, make_config
+from dah.game import Game
+from slice_helpers import slice_config
 from dah.journal import read_events
 from dah.server import create_app
 from dah.store import init_game_dir
@@ -28,7 +29,7 @@ class FakeClock:
 class Env:
     def __init__(self, tmp_path) -> None:
         self.clock = FakeClock()
-        config = make_config(game_id="g1", scenario="core:slice2", seats=SEATS, seed=7)
+        config = slice_config(game_id="g1", scenario="core:slice2", seats=SEATS, seed=7)
         self.gdir, keys = init_game_dir(tmp_path, config)
         Game.create(self.gdir, self.clock)
         self.tmp_path = tmp_path
@@ -247,7 +248,7 @@ def test_restart_restores_game(env):
 
 
 def test_background_tick_runs_with_lifespan(tmp_path):
-    config = make_config(game_id="g2", scenario="core:slice2", seats=SEATS, seed=1,
+    config = slice_config(game_id="g2", scenario="core:slice2", seats=SEATS, seed=1,
                          phase_limits={"negotiation_1": 1, "actions": 60, "negotiation_2": 60})
     gdir, keys = init_game_dir(tmp_path, config)
     Game.create(gdir)
@@ -320,7 +321,7 @@ def test_calls_counted_in_the_phase_they_arrived_in(env):
 
 def test_server_opens_first_phase_of_unstarted_game(tmp_path):
     clock = FakeClock()
-    config = make_config(game_id="g3", scenario="core:slice2", seats=SEATS, seed=7)
+    config = slice_config(game_id="g3", scenario="core:slice2", seats=SEATS, seed=7)
     gdir, keys = init_game_dir(tmp_path, config)
     Game.create(gdir, clock, start=False)
     clock.now += 3600

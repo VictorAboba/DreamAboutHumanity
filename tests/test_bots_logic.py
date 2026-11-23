@@ -316,9 +316,12 @@ def test_bot_numbers_match_the_core_pack():
     from dah.engine import build_ruleset
 
     rs = build_ruleset(None, "slice3")
-    assert bv.UNIT_COST_ALLOY == {u.split(":")[1]: rs.unit_cost(u)["core:alloy"] for u in rs.units}
-    assert bv.UNIT_UPKEEP_FOOD == {u.split(":")[1]: rs.unit_upkeep(u)["core:provisions"] for u in rs.units}
-    assert bv.BUILDING_COST_ALLOY == {b.split(":")[1]: rs.building_cost(b)["core:alloy"] for b in rs.buildings}
+    # since core 0.3.0 the pack has more units and buildings (techs, factions); the bots know the slice ones
+    assert {"assault", "armor", "artillery"} <= set(bv.UNIT_COST_ALLOY)
+    assert bv.UNIT_COST_ALLOY == {u: rs.unit_cost(f"core:{u}")["core:alloy"] for u in bv.UNIT_COST_ALLOY}
+    assert bv.UNIT_UPKEEP_FOOD == {u: rs.unit_upkeep(f"core:{u}")["core:provisions"] for u in bv.UNIT_UPKEEP_FOOD}
+    assert {"mine", "farm", "barracks"} <= set(bv.BUILDING_COST_ALLOY)
+    assert bv.BUILDING_COST_ALLOY == {b: rs.building_cost(f"core:{b}")["core:alloy"] for b in bv.BUILDING_COST_ALLOY}
 
 
 def test_bot_registry_names():

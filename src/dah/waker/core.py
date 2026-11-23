@@ -19,7 +19,7 @@ from dah.bridge.client import GameApiError, GameClient
 from dah.waker.dreamteam import DreamTeamClient, DtResponse
 from dah.waker.text import wake_text, wrap_up_text
 
-ACTIVE_PHASES = frozenset({"negotiation_1", "actions", "negotiation_2"})
+ACTIVE_PHASES = frozenset({"setup", "negotiation_1", "actions", "negotiation_2"})  # setup: stage 2
 POLL_SECONDS = 45
 REMINDER_SECONDS = 60
 RETRY_DELAYS = (10, 30, 60)

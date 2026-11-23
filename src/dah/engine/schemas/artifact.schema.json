@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dah.local/schemas/artifact.schema.json",
+  "type": "object",
+  "required": [
+    "id",
+    "name",
+    "power",
+    "effects"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "name": {
+      "$ref": "common.schema.json#/$defs/lname"
+    },
+    "power": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10
+    },
+    "cost": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10
+    },
+    "factions": {
+      "$ref": "common.schema.json#/$defs/refs"
+    },
+    "exclusive_with": {
+      "$ref": "common.schema.json#/$defs/refs"
+    },
+    "effects": {
+      "$ref": "common.schema.json#/$defs/effects"
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 1000
+    },
+    "lore": {
+      "$ref": "common.schema.json#/$defs/lore"
+    }
+  }
+}

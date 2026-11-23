@@ -10,13 +10,15 @@ from typing import Any, Callable, Protocol
 
 import httpx
 
+from dah.bots.choices import faction_prefs, pick_artifacts, pick_research
 from dah.bots.client import ApiClient, ApiError
 from dah.bots.view import StateView, parse_state
 
 log = logging.getLogger(__name__)
 
 NEGOTIATION_PHASES = ("negotiation_1", "negotiation_2")
-PLAYABLE_PHASES = ("negotiation_1", "actions", "negotiation_2")
+SETUP_PHASE = "setup"  # stage 2: before turn 1 (TECH_AND_SETUP.md section 2)
+PLAYABLE_PHASES = (SETUP_PHASE, "negotiation_1", "actions", "negotiation_2")
 WAIT_SECONDS = 10  # short long-poll so a stop request is noticed quickly
 RETRY_SECONDS = 1.0
 
@@ -36,7 +38,16 @@ class Api(Protocol):
         self, attacker: dict[str, int], defender: dict[str, int], province_type: str, fortified: bool, hasty: bool
     ) -> float: ...
     def send_message(self, to: list[str] | str, text: str) -> dict[str, Any]: ...
-    def ready(self, confirm_hash: str) -> dict[str, Any]: ...
+    def ready(self, confirm_hash: str | None) -> dict[str, Any]: ...
+
+
+class StageTwoApi(Api, Protocol):
+    """Setup phase and techs (used only when the game has them: a setup phase, `you.techs` in the state)."""
+
+    def get_setup(self) -> dict[str, Any]: ...
+    def choose_faction(self, prefs: list[str]) -> dict[str, Any]: ...
+    def choose_artifacts(self, ids: list[str]) -> dict[str, Any]: ...
+    def list_techs(self) -> dict[str, Any]: ...
 
 
 class DiplomacyApi(Api, Protocol):
@@ -56,6 +67,11 @@ class Bot:
     """Decision hooks are pure functions of a StateView; `run` drives them against the server."""
 
     name = "base"
+    # Stage-2 style (TECH_AND_SETUP.md section 4); empty: the bot makes no such choice (defaults, no research).
+    faction_style: tuple[str, ...] = ()  # faction short ids, best first
+    artifact_likes: tuple[str, ...] = ()  # artifact short ids valued above their power
+    branch_priority: tuple[str, ...] = ()  # tech branch short ids, first researched first
+    tech_first: tuple[str, ...] = ()  # techs taken before the branch order whenever available
 
     def __init__(self, seat: str, seed: int) -> None:
         self.seat = seat
@@ -77,6 +93,20 @@ class Bot:
     def p2_orders(self, view: StateView, current: list[Order], cp_left: int, estimate: Estimator) -> list[Order]:
         """Extra orders for negotiation_2 (submitted with mode append)."""
         return []
+
+    def setup_choices(self, setup: dict[str, Any]) -> tuple[list[str] | None, list[str] | None]:
+        """(faction preferences, artifacts) for the setup phase; None leaves that choice to the defaults."""
+        if not self.faction_style:
+            return None, None
+        prefs = faction_prefs(setup, self.faction_style)
+        return prefs or None, pick_artifacts(setup, prefs[0] if prefs else None, self.artifact_likes)
+
+    def research_order(self, view: StateView, techs: dict[str, Any]) -> Order | None:
+        """A research order when nothing is being researched (the active tech stays active between turns)."""
+        if not self.branch_priority or view.researching is not None:
+            return None
+        tech = pick_research(techs, self.branch_priority, self.tech_first)
+        return {"kind": "research", "tech": tech} if tech else None
 
     # --- server loop ---
 
@@ -107,7 +137,24 @@ class Bot:
                 status = None
                 stop_event.wait(RETRY_SECONDS)
 
+    def play_setup(self, api: StageTwoApi) -> None:
+        """Setup phase: faction preferences and artifacts by the bot's style, then ready (no hash needed)."""
+        setup = api.get_setup()
+        if setup.get("enabled") and setup.get("open"):
+            prefs, artifacts = self.setup_choices(setup)
+            try:
+                if prefs:
+                    api.choose_faction(prefs)
+                if artifacts is not None:
+                    api.choose_artifacts(artifacts)
+            except ApiError as exc:  # a refused choice leaves the default: not worth failing the phase over
+                log.info("bot %s: setup choice rejected: %s", self.seat, exc)
+        api.ready(None)
+
     def play_phase(self, api: Api, phase: str, me: set[str]) -> None:
+        if phase == SETUP_PHASE:
+            self.play_setup(api)  # type: ignore[arg-type]
+            return
         view = parse_state(api.state(), me)
         estimate = _qualified_estimator(api, view)
         confirm_hash: str | None = None
@@ -125,7 +172,16 @@ class Bot:
                 except ApiError as exc:  # message limits are not worth failing the phase over
                     log.info("bot %s: message rejected: %s", self.seat, exc)
         if phase == "actions":
-            confirm_hash = api.submit_orders(self.action_orders(view, estimate), "replace_all").get("orders_hash")
+            orders = self.action_orders(view, estimate)
+            if self.branch_priority and view.research_enabled and view.researching is None:
+                try:
+                    research = self.research_order(view, api.list_techs())  # type: ignore[attr-defined]
+                except ApiError as exc:
+                    log.info("bot %s: list_techs failed: %s", self.seat, exc)
+                    research = None
+                if research is not None:
+                    orders.append(research)
+            confirm_hash = api.submit_orders(orders, "replace_all").get("orders_hash")
         elif phase == "negotiation_2":
             current = api.orders()
             confirm_hash = current.get("orders_hash")

@@ -1,0 +1,7 @@
+# Minimal stage-2 fixture pack for engine tests (TECH_AND_SETUP.md): 2 factions, a few techs, artifacts.
+id: t2
+version: 0.1.0
+title: Тестовый пак этапа 2
+author: tests
+requires: []
+engine_api: "^1"

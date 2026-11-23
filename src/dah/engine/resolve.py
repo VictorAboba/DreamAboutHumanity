@@ -9,10 +9,12 @@ from typing import Any, Mapping, Sequence, Union
 
 from . import diplomacy as dip
 from .combat import Force, fight, pick_losses, round_half_up, strength
-from .content import Ruleset
+from .content import Ruleset, StatKey
 from .model import BREAK, GameState, Order, PendingBuild, Player, Province, SeatOrders
 from .orders import executable_orders, order_cost
 from .rng import stream
+from .techs import (grant_tech, province_defense_mul, province_stat, research_complete, research_transfer,
+                    stat_key, tech_counts)
 
 OrdersInput = Mapping[str, Union[SeatOrders, Sequence[Order]]]
 
@@ -24,9 +26,12 @@ class SetupError(ValueError):
 # ---------------------------------------------------------------- setup
 
 def new_game_state(ruleset: Ruleset, seats: Sequence[Mapping[str, Any]], seed: int | str) -> GameState:
-    """Initial state. ``seats``: [{seat, nick, faction?}]; starts are dealt to seats by a seeded shuffle.
+    """Initial state. ``seats``: [{seat, nick, faction?, artifacts?}]; starts are dealt to seats by a seeded
+    shuffle (independent of factions and artifacts, so a setup phase never moves a start).
 
-    Unused starts stay neutral and empty.
+    Unused starts stay neutral and empty. Artifacts (full ids, from the setup phase) apply their one-off effects now
+    (resources, units and buildings in the capital, flags, techs); their passive effects count through the seat's
+    stat key for the whole game.
     """
     starts = list(ruleset.map.starts)
     if not 1 <= len(seats) <= len(starts):
@@ -54,13 +59,26 @@ def new_game_state(ruleset: Ruleset, seats: Sequence[Mapping[str, Any]], seed: i
         player = Player(seat, seat_cfg["nick"], faction_id, resources,
                         command_points=int(ruleset.stat("command_points", faction_id)))
         for eff in faction.start_effects:
-            _apply_start_effect(eff, player, capital)
+            _apply_start_effect(eff, player, capital, ruleset)
+        for art in seat_cfg.get("artifacts") or ():
+            if art not in ruleset.artifacts:
+                raise SetupError(f"artifact {art!r} is not in the ruleset")
+            if art not in player.artifacts:
+                player.artifacts.append(art)
+                for eff in ruleset.artifacts[art].effects:
+                    _apply_start_effect(eff, player, capital, ruleset)
         players[seat] = player
-    return GameState(turn=1, phase="negotiation_1", provinces=provinces, players=dict(sorted(players.items())))
+    state = GameState(turn=1, phase="negotiation_1", provinces=provinces, players=dict(sorted(players.items())))
+    for seat, player in state.players.items():
+        player.command_points = int(ruleset.stat("command_points", stat_key(state, ruleset, seat)))
+    return state
 
 
-def _apply_start_effect(eff: Mapping[str, Any], player: Player, capital: Province) -> None:
+def _apply_start_effect(eff: Mapping[str, Any], player: Player, capital: Province,
+                        ruleset: Ruleset | None = None) -> None:
     kind = eff["type"]
+    if kind == "grant_tech" and ruleset is not None:
+        grant_tech(ruleset, player, eff["tech"])
     if kind == "add_resource":
         player.resources[eff["resource"]] = player.resources.get(eff["resource"], 0) + eff["amount"]
     elif kind == "grant_units":
@@ -73,18 +91,25 @@ def _apply_start_effect(eff: Mapping[str, Any], player: Player, capital: Provinc
 
 # ---------------------------------------------------------------- economy helpers (also used by view)
 
-def income_of(state: GameState, ruleset: Ruleset, seat: str) -> dict[str, int]:
-    faction = state.players[seat].faction
-    total: Counter[str] = Counter(ruleset.factions[faction].income)
+def income_of(state: GameState, ruleset: Ruleset, seat: str, key: StatKey = ...) -> dict[str, int]:
+    """Income per turn: flat faction/tech/artifact income plus, per own province, (type + buildings) x
+    `province.income_mul.<res>`; all x `resource.<res>.income_mul`, rounded half up."""
+    if key is ...:
+        key = stat_key(state, ruleset, seat)
+    total: dict[str, float] = {r: float(n) for r, n in ruleset.passive_income(key).items()}
     for prov in state.owned(seat):
-        total.update(ruleset.province_types[prov.type].income)
+        here: Counter[str] = Counter(ruleset.province_types[prov.type].income)
         for b in prov.buildings:
-            total.update(ruleset.buildings[b].income)
-    return {r: round_half_up(total[r] * ruleset.stat(f"resource.{r}.income_mul", faction)) for r in ruleset.resources}
+            here.update(ruleset.buildings[b].income)
+        for r, n in here.items():
+            mul = province_stat(state, ruleset, prov.id, f"province.income_mul.{r}", key)
+            total[r] = total.get(r, 0.0) + (n if mul == 1.0 else n * mul)
+    return {r: round_half_up(total.get(r, 0) * ruleset.stat(f"resource.{r}.income_mul", key))
+            for r in ruleset.resources}
 
 
-def upkeep_of(state: GameState, ruleset: Ruleset, seat: str) -> dict[str, int]:
-    faction = state.players[seat].faction
+def upkeep_of(state: GameState, ruleset: Ruleset, seat: str, key: StatKey = ...) -> dict[str, int]:
+    faction = stat_key(state, ruleset, seat) if key is ... else key
     total: Counter[str] = Counter()
     for prov in state.owned(seat):
         for unit, n in prov.units.items():
@@ -148,7 +173,8 @@ class _Resolution:
         self.seed = seed
         self.turn = state.turn
         self.events: list[dict[str, Any]] = []
-        self.factions: dict[str | None, str | None] = {seat: p.faction for seat, p in state.players.items()}
+        # each seat's stat key at the start of the resolution (techs researched now count from the next turn)
+        self.factions: dict[str | None, StatKey] = {seat: stat_key(state, ruleset, seat) for seat in state.players}
         self.retreats: list[tuple[str | None, list[str], dict[str, int], str]] = []
         self.pacts: dict[frozenset[str], dict[str, Any]] = {}     # pacts in force in this resolution, by pair
         self.broken: dict[frozenset[str], set[str]] = {}          # pair -> seats whose "break" orders broke it
@@ -196,6 +222,7 @@ class _Resolution:
         s.pending_builds = [b for b in s.pending_builds if s.provinces[b.province].owner == b.seat]
         self.economy(alive)
         self.builds()
+        self.research(alive)
         eliminated = self.eliminate(alive)
         self.end_pacts(eliminated)
         sc = scores(s, self.rs)
@@ -207,9 +234,11 @@ class _Resolution:
                               and e["kind"] not in _PRIVATE_KINDS)]
                    for seat in alive}
         public_diplomacy = [dip.public_event(e) for e in self.events if e["kind"] in dip.PUBLIC_KINDS]
-        report = TurnReport(self.turn, self.events, by_seat,
-                            {"ownership_changes": changes, "eliminated": eliminated, "scores": sc,
-                             "result": s.result, "diplomacy": public_diplomacy}, idle)
+        public = {"ownership_changes": changes, "eliminated": eliminated, "scores": sc, "result": s.result,
+                  "diplomacy": public_diplomacy}
+        if self.rs.techs:
+            public["techs_count"] = tech_counts(s, self.rs)   # public: how many (not which; no artifact grants)
+        report = TurnReport(self.turn, self.events, by_seat, public, idle)
         return s, report
 
     # 0. pacts: notices to leave take effect; the pacts in force; who breaks one with an explicit "break" order
@@ -274,9 +303,14 @@ class _Resolution:
             for res, n in book.forfeit.items():
                 player.resources[res] = max(0, player.resources.get(res, 0) - n)
             for o in valid:
-                for res, n in order_cost(self.rs, player.faction, o).items():
+                for res, n in order_cost(self.rs, self.factions[seat], o, start).items():
                     player.resources[res] -= n
-                if o.kind == "move":
+                if o.kind == "research":
+                    if player.researching != o.tech:
+                        player.researching = o.tech
+                        self.ev("research_started", [seat], None, tech=o.tech,
+                                progress=player.research.get(o.tech, 0))
+                elif o.kind == "move":
                     moves.append((seat, o))
                 elif o.kind == "fortify":
                     fortify.add(o.province)
@@ -420,7 +454,8 @@ class _Resolution:
             for i, champion in enumerate(group):
                 snap = (dict(champion.units), dict(defender.units))
                 res = fight(self.rs, champion, defender, rng, b_defending=True, factions=self.factions,
-                            defense_mul=self.rs.province_types[prov.type].defense_mul, fortified=fortified)
+                            defense_mul=province_defense_mul(self.s, self.rs, pid, self.factions.get(prov.owner)),
+                            fortified=fortified)
                 self.ev("battle", [champion.owner, defender.owner], pid, stage="defense", fortified=fortified,
                         sides=[_side(champion, snap[0], res.losses_a, res.a_won, res.strength_a),
                                _side(defender, snap[1], res.losses_b, not res.a_won, res.strength_b)])
@@ -477,15 +512,29 @@ class _Resolution:
         food = self.rs.roles["upkeep_food"]
         for seat in alive:
             player = self.s.players[seat]
-            income = income_of(self.s, self.rs, seat)
-            upkeep = upkeep_of(self.s, self.rs, seat)
+            key = self.factions[seat]
+            income = income_of(self.s, self.rs, seat, key)
+            upkeep = upkeep_of(self.s, self.rs, seat, key)
             for res in self.rs.resources:
                 player.resources[res] = player.resources.get(res, 0) + income[res] - upkeep[res]
             self.ev("economy", [seat], None, income=income, upkeep=upkeep)
+            event = self.events[-1]
             if player.resources[food] < 0:
                 self.starve(seat)
             for res in self.rs.resources:
                 player.resources[res] = max(0, player.resources[res])
+            moved = research_transfer(self.rs, player, key)
+            if moved is not None:
+                event["research"] = {"tech": player.researching, **moved}
+
+    # 8. research: the active tech is done when its points reach its cost; effects count from the next turn
+    def research(self, alive: list[str]) -> None:
+        if not self.rs.techs:
+            return
+        for seat in alive:
+            done = research_complete(self.rs, self.s.players[seat], self.factions[seat])
+            if done is not None:
+                self.ev("tech_completed", [seat], None, tech=done, techs_count=len(self.s.players[seat].techs))
 
     def starve(self, seat: str) -> None:
         owned = self.s.owned(seat)
@@ -541,13 +590,13 @@ class _Resolution:
         else:
             s.turn += 1
             s.phase = "negotiation_1"
-        for p in s.players.values():
-            p.command_points = int(self.rs.stat("command_points", p.faction)) if p.alive else 0
+        for seat, p in s.players.items():
+            p.command_points = int(self.rs.stat("command_points", stat_key(s, self.rs, seat))) if p.alive else 0
 
 
 # Events only their seats see: they would reveal resources or orders (fortify_broken reveals a fortify order).
 _PRIVATE_KINDS = frozenset({"order_rejected", "economy", "starvation", "build_started", "recruited",
-                            "fortify_broken"}) | dip.PRIVATE_KINDS
+                            "fortify_broken", "research_started", "tech_completed"}) | dip.PRIVATE_KINDS
 
 
 def _as_seen(event: dict[str, Any], seat: str) -> dict[str, Any]:

@@ -6,7 +6,7 @@ import math
 from datetime import datetime, timezone
 from typing import Any
 
-PHASE_NAMES = {"negotiation_1": "ПЕРЕГОВОРЫ 1", "actions": "ДЕЙСТВИЯ", "negotiation_2": "ПЕРЕГОВОРЫ 2"}
+PHASE_NAMES = {"setup": "СТАРТ", "negotiation_1": "ПЕРЕГОВОРЫ 1", "actions": "ДЕЙСТВИЯ", "negotiation_2": "ПЕРЕГОВОРЫ 2"}
 
 
 def _deadline_hhmm(deadline: Any) -> str | None:
@@ -26,6 +26,10 @@ def _deadline_hhmm(deadline: Any) -> str | None:
 
 def _hint(phase: str, turn: int) -> str:
     since = f"since_turn={turn - 1}" if turn > 1 else ""
+    if phase == "setup":
+        return ("Фаза старта перед ходом 1: посмотри dah.get_setup(), выбери фракции по предпочтению "
+                "(dah.choose_faction) и артефакт (dah.choose_artifacts), подробности — dah.describe(id) и "
+                'dah.rules(topic="setup"); нажми dah.ready() (confirm_hash не нужен).')
     if phase == "negotiation_1":
         return (f"Посмотри dah.get_state({since}) и dah.inbox(), договорись с соседями (dah.send_message, "
                 "пакты и подношения), приказы можно только проверить (dah.validate_orders), "

@@ -5,7 +5,7 @@ from __future__ import annotations
 from statistics import median
 from typing import Any
 
-PHASE_SHORT = {"negotiation_1": "П1", "actions": "Д", "negotiation_2": "П2"}
+PHASE_SHORT = {"setup": "СТАРТ", "negotiation_1": "П1", "actions": "Д", "negotiation_2": "П2"}
 PHASE_ORDER = ("negotiation_1", "actions", "negotiation_2")
 # Seat events counted in the phase open when they were written (a `call` names its own phase).
 # `for_phase` of a spend figure taken after game_over (dah-waker, while the session wraps up).
@@ -29,7 +29,7 @@ def _seat_total() -> dict[str, Any]:
             "spent_after_game_usd": None, "in_game_s": None, "after_game_s": None, "post_game_watch_s": None,
             "wakes_sent": 0, "wakes_answered": 0, "wakes_unanswered": 0, "wake_answer_median_s": None,
             "pacts_signed": 0, "pacts_kept": 0, "pacts_broken": 0, "gifts_sent": 0, "gifts_received": 0,
-            "gifted_resources": {}, "received_resources": {}}
+            "gifted_resources": {}, "received_resources": {}, "setup_choices": 0, "techs": []}
 
 
 def _phase_wake(kind: str, detail: Any) -> bool:
@@ -72,9 +72,14 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
     Wakes (dah-waker): `wakes_sent` phase wakes delivered (the wrap-up not counted), `wakes_answered` /
     `wakes_unanswered` from its `wake_answered` / `wake_unanswered`, `wake_answer_median_s` the median seconds from a
     wake to the player's first game call after it.
+    Stage 2 (TECH_AND_SETUP.md section 4): each seat's `faction` and `artifacts` (from `setup_closed`; without a
+    setup phase the faction of the config, if any), `auto_faction` / `faction_conflict`; `setup_choices` counts
+    a seat's choice calls; `techs` per seat are [turn, tech] in order of completion, and each turn lists
+    `techs_completed {seat: [tech]}` and `research_started {seat: tech}`. The report is the host's (and the
+    revealed spectator's) view: it shows artifacts, which the players see only after game_over.
     """
     report: dict[str, Any] = {"game_id": None, "scenario": None, "rules_chars": None, "seats": {}, "phases": [],
-                              "turns": [], "totals": {}, "result": None}
+                              "turns": [], "totals": {}, "result": None, "setup": None}
     phase: dict[str, Any] | None = None
     phase_by_key: dict[tuple[Any, Any], dict[str, Any]] = {}
     turns: dict[int, dict[str, Any]] = {}
@@ -90,7 +95,8 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
 
     def turn_entry(turn: int) -> dict[str, Any]:
         return turns.setdefault(turn, {"turn": turn, "scores": {}, "idle_resources": {}, "idle_units": {},
-                                       "no_orders": [], "spent_usd": {}})
+                                       "no_orders": [], "spent_usd": {}, "techs_completed": {},
+                                       "research_started": {}})
 
     ready_now: set[str] = set()
     first_open_ts: float | None = None
@@ -108,9 +114,28 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
             cfg = ev["config"]
             report.update(game_id=cfg["game_id"], scenario=cfg["scenario"], rules_chars=ev.get("rules_chars"),
                           ruleset_hash=ev.get("ruleset_hash"), turn_limit=cfg.get("turn_limit"))
+            report["setup"] = ({"artifacts": cfg["setup"].get("artifacts"), "closed": None}
+                               if cfg.get("setup") else None)
             for s in cfg["seats"]:
-                report["seats"][s["seat"]] = {"nick": s["nick"], "kind": s["kind"], "declared": s.get("declared")}
+                report["seats"][s["seat"]] = {"nick": s["nick"], "kind": s["kind"], "declared": s.get("declared"),
+                                              "faction": s.get("faction"), "artifacts": []}
                 report["totals"][s["seat"]] = _seat_total()
+        elif kind == "setup_choice" and totals is not None:
+            totals["setup_choices"] += 1
+        elif kind == "setup_closed":
+            if report.get("setup") is not None:
+                report["setup"]["closed"] = ev.get("reason")
+            for s, res in (ev.get("results") or {}).items():
+                if s in report["seats"]:
+                    report["seats"][s].update(faction=res.get("faction"), artifacts=list(res.get("artifacts") or []),
+                                              auto_faction=res.get("auto_faction"),
+                                              faction_conflict=res.get("faction_conflict"))
+        elif kind == "research_started":
+            turn_entry(ev["turn"])["research_started"][seat] = ev.get("tech")
+        elif kind == "tech_completed":
+            turn_entry(ev["turn"])["techs_completed"].setdefault(seat, []).append(ev.get("tech"))
+            if totals is not None:
+                totals["techs"].append([ev["turn"], ev.get("tech")])
         elif kind == "phase_open":
             current_turn = ev["turn"]
             if first_open_ts is None:
@@ -311,6 +336,23 @@ def _wakes(t: dict[str, Any]) -> str:
             f"{t['wakes_unanswered']}, медиана до хода {_secs(t.get('wake_answer_median_s'))}")
 
 
+def _short(full_id: Any) -> str:
+    return str(full_id).rsplit(":", 1)[-1]
+
+
+def _seat_setup(info: dict[str, Any], t: dict[str, Any]) -> str:
+    """`, фракция litany, артефакты ore_vein; технологии 4: deep_drilling (х2), ...` when there is stage-2 data."""
+    out = ""
+    if info.get("faction"):
+        out += f", фракция {_short(info['faction'])}" + (" (по умолчанию)" if info.get("auto_faction") else "") + (
+            " (уступил при совпадении)" if info.get("faction_conflict") else "")
+    if info.get("artifacts"):
+        out += ", артефакты " + ", ".join(_short(a) for a in info["artifacts"])
+    if t.get("techs"):
+        out += f"; технологии {len(t['techs'])}: " + ", ".join(f"{_short(x)} (х{n})" for n, x in t["techs"])
+    return out
+
+
 def render_report(report: dict[str, Any]) -> str:
     """Russian text version of build_report()."""
     nick = {s: info["nick"] for s, info in report["seats"].items()}
@@ -322,6 +364,10 @@ def render_report(report: dict[str, Any]) -> str:
         lines.append(f"Итог: ход {result['turn']}, {result['reason']}, победители: {winners}")
     else:
         lines.append("Итог: партия не окончена")
+    if report.get("setup"):
+        st = report["setup"]
+        lines.append(f"Фаза старта: артефакты {st.get('artifacts')}, закрыта "
+                     f"{st.get('closed') or 'ещё открыта'}")
     lines.append("")
     lines.append("МЕСТА:")
     for seat, t in report["totals"].items():
@@ -332,7 +378,7 @@ def render_report(report: dict[str, Any]) -> str:
         money = "—" if t["spent_usd"] is None else f"${t['spent_usd']:.2f}"
         telemetry = ", ".join(f"{k} {n}" for k, n in sorted(t["telemetry"].items())) or "нет"
         lines.append(
-            f"{seat} {info['nick']} ({info['kind']}): вызовов {t['calls']}, запрос {t['req_chars']} / ответ "
+            f"{seat} {info['nick']} ({info['kind']}{_seat_setup(info, t)}): вызовов {t['calls']}, запрос {t['req_chars']} / ответ "
             f"{t['resp_chars']} симв.; служебных вызовов (waker) {t['host_calls']}; подач {t['submits']} "
             f"(подач в П1 / Д / П2: {by_phase}), правок "
             f"{t['edits']}, изменений в П2 {t['p2_edits']}; отклонено: validate "
@@ -356,5 +402,8 @@ def render_report(report: dict[str, Any]) -> str:
     for t in report["turns"]:
         sc = ", ".join(f"{nick.get(s, s)} {n}" for s, n in sorted(t["scores"].items()))
         money = ", ".join(f"{nick.get(s, s)} ${v:.2f}" for s, v in sorted(t["spent_usd"].items()))
-        lines.append(f"ход {t['turn']}: {sc or '—'}" + (f"; деньги: {money}" if money else ""))
+        techs = "; ".join(f"{nick.get(s, s)} {', '.join(_short(x) for x in v)}"
+                          for s, v in sorted(t.get("techs_completed", {}).items()))
+        lines.append(f"ход {t['turn']}: {sc or '—'}" + (f"; изучено: {techs}" if techs else "")
+                     + (f"; деньги: {money}" if money else ""))
     return "\n".join(lines)

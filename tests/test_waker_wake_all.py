@@ -12,7 +12,7 @@ from test_waker_loop import KEY, SESSION, T0, TOKEN, Clock, FakeDreamTeam, FakeG
 
 from dah.bridge.client import GameClient
 from dah.cli import goal_text
-from dah.game import make_config
+from slice_helpers import slice_config
 from dah.report import build_report, render_report
 from dah.waker.core import Waker
 from dah.waker.dreamteam import DreamTeamClient
@@ -385,7 +385,7 @@ def test_report_counts_wakes_per_seat():
 
 
 def test_goal_text_says_dah_reaches_every_member():
-    config = make_config(game_id="g1", scenario="core:slice2", seats=SEATS, seed=7)
+    config = slice_config(game_id="g1", scenario="core:slice2", seats=SEATS, seed=7)
     text = goal_text(config, "A")
     assert ("Сообщения [DAH] о смене фазы приходят всем участникам роя. Кто бы ни был дежурным, при [DAH] кто-то "
             "из вас должен сразу сделать ход в игре; если вы делите ходы по сменам — передайте [DAH] дежурному "
