@@ -107,6 +107,8 @@ match from it after a server restart.
 | `private/reports/turn_<N>.json` | the full report of turn N |
 | `private/messages.jsonl` | full message texts, and the game's own inbox entries (`system: true`) |
 | `private/bot_keys.json` | keys of bot seats, for `dah bots run` |
+| `private/books_d/turn_<N>.json` | espionage: the order books at the close of actions of turn N (what recon read) |
+| `private/recon/turn_<N>.json` | espionage: the recon of turn N — every roll, the reports with `facts` and `truth`, captures, strikes |
 
 The server never gives `private/` to players. The journal holds message sizes, not texts.
 
@@ -119,7 +121,10 @@ The server never gives `private/` to players. The journal holds message sizes, n
 | `game_created` | config (no keys), `ruleset_hash`, `seed`, `rules_chars` |
 | `seat_info` | seat, kind, declared, `dreamteam_session_id`; a later link adds `update: true`, `previous`, `source` (`cli` or `waker`) |
 | `phase_open` / `phase_close` | turn, phase, deadline / reason `all_ready` or `deadline`, `not_ready` (living seats that had not pressed ready) |
-| `recon` | turn (the empty intel slice) |
+| `recon` | turn; with espionage on also `state_hash` (after recon), `recon_hash`, missions, successes, captures |
+| `shade_hired` / `mission_started` / `spy_round` / `intel_report` / `intel_read` / `shade_captured` / `mission_end` / `mission_rejected` | espionage (stage 3): Shades, missions, every round's rolls, reports (`facts_hash`, `truth_hash`, informativeness), what a seat opened (`via` get_state or get_intel), captures |
+| `sabotage` / `strike_cancelled` / `feint` / `feint_exposed` | strikes, false entries (`order_id`; `converted_in_p2`), their exposure (`order_id`, `index`, `report_id`) |
+| `province_captured` / `disposition` / `policy_set` / `policy_unaffordable` / `dispose_failed` / `occupation_revolt` / `claim_created` / `claim_ended` / `ruin_ended` | conquest (stage 3): captures with `mode` and `status`, fates with price, loot and source, policies, revolts, claims, ruins |
 | `call` | seat, route, `req_chars`, `resp_chars`, `ms`, status, turn, phase, `host` for host traffic |
 | `first_call_in_phase` | seat, turn, phase |
 | `orders_validated` / `orders_submitted` | seat, accepted or ok count, rejected with reasons, `orders_hash`, phase |
@@ -164,7 +169,8 @@ The journal records it in every `turn_resolved` event.
 2. creates the initial state from the seed; with a setup phase, turn 1 is built from the `results` of the
    `setup_closed` event (each seat's faction and artifacts);
 3. applies each turn's diplomacy ops from `private/diplomacy/` and resolves the turn with the orders saved in
-   `private/orders/`;
+   `private/orders/`; with espionage on, it applies the ops of N1, runs recon on `private/books_d/` and checks the
+   `recon` event's `state_hash`, then applies the ops of N2 and resolves;
 4. compares each turn's `state_hash` and the final winners and scores with the journal.
 
 A mismatch means the rules or content changed, or resolution is not deterministic. The command exits with code 1.

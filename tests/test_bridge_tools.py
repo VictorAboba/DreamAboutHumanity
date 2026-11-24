@@ -98,6 +98,13 @@ MAPPING = [
     ("submit_orders", {"orders": {"kind": "research", "tech": "smithing"}}, "POST", "/v1/orders", {},
      {"orders": [{"kind": "research", "tech": "smithing"}], "mode": "replace_all"}),
     ("amend_order", {"id": "o2", "patch": '{"tech": "drills"}'}, "PATCH", "/v1/orders/o2", {}, {"tech": "drills"}),
+    # stage 3 (SPY_AND_CONQUEST.md 6.1)
+    ("list_spies", {}, "GET", "/v1/spies", {}, None),
+    ("get_intel", {}, "GET", "/v1/intel", {}, None),
+    ("get_intel", {"turn": 3, "shade": "s1", "report_id": "r4"}, "GET", "/v1/intel",
+     {"turn": "3", "shade": "s1", "report": "r4"}, None),
+    ("estimate_mission", {"mission": "observe", "target": "P07", "rounds": 2}, "POST", "/v1/estimate/mission", {},
+     {"mission": "observe", "target": "P07", "rounds": 2}),
 ]
 
 

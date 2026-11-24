@@ -104,6 +104,13 @@
       "description": "inline text, or a path to a Markdown file of the pack (lore/x.md)",
       "type": "string",
       "maxLength": 1000
+    },
+    "system": {
+      "description": "a switchable stage-3 system: the entity is hidden while it is off",
+      "enum": [
+        "espionage",
+        "conquest"
+      ]
     }
   }
 }

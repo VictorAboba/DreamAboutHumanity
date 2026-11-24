@@ -1,0 +1,34 @@
+- id: tri_conquest
+  name: Треугольник с завоеванием
+  map: tri
+  factions: [iron, ash]
+  turn_limit: 12
+  phase_limits: {negotiation_1: 60s, actions: 60s, negotiation_2: 60s}
+  systems: {conquest: true}
+- id: tri_plain
+  name: Треугольник без систем
+  map: tri
+  factions: [iron, ash]
+  turn_limit: 12
+  phase_limits: {negotiation_1: 60s, actions: 60s, negotiation_2: 60s}
+- id: tri_off
+  name: Треугольник, системы явно выключены
+  map: tri
+  factions: [iron, ash]
+  turn_limit: 12
+  phase_limits: {negotiation_1: 60s, actions: 60s, negotiation_2: 60s}
+  systems: {espionage: false, conquest: false}
+- id: tri_spy
+  name: Треугольник со шпионажем
+  map: tri
+  factions: [iron, ash]
+  turn_limit: 6
+  phase_limits: {negotiation_1: 60s, actions: 60s, negotiation_2: 60s}
+  systems: {espionage: true}
+- id: tri_all
+  name: Треугольник, всё включено
+  map: tri
+  factions: [iron, ash]
+  turn_limit: 12
+  phase_limits: {negotiation_1: 60s, actions: 60s, negotiation_2: 60s}
+  systems: {espionage: true, conquest: true}

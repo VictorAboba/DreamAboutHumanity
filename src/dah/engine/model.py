@@ -47,6 +47,9 @@ class Province:
     units: dict[str, int] = field(default_factory=dict)   # owner's units, full unit id -> count
     buildings: list[str] = field(default_factory=list)
     fortified: bool = False         # fortified during the last resolved turn
+    # stage 3 (SPY_AND_CONQUEST.md 1.3; engine/conquest.py): {"occupied": {by, from, since}, "ruined_until",
+    # "ravaged_until", "looted_turn", "sabotaged": {...}}; left out of state_hash while empty
+    status: dict[str, Any] = field(default_factory=dict)
 
     def unit_total(self) -> int:
         return sum(self.units.values())
@@ -66,9 +69,17 @@ class Player:
     research: dict[str, int] = field(default_factory=dict)  # tech -> points put in so far (kept when switching)
     researching: str | None = None                          # the active tech (persists until done or switched)
     artifacts: list[str] = field(default_factory=list)      # chosen at setup (hidden from others until game end)
+    # stage 3 (SPY_AND_CONQUEST.md 1.3): left out of state_hash while empty
+    home: str | None = None                                 # start capital; set at turn 1 when a stage-3 system is on
+    shades: list[dict[str, Any]] = field(default_factory=list)   # own Shades (espionage)
+    spy_seq: dict[str, int] = field(default_factory=dict)        # per-seat counters: shade, report
+    conquest_policy: str | None = None                      # default disposition of captures (kept between turns)
 
 
 PLAYER_STAGE2_FIELDS = ("techs", "research", "researching", "artifacts")
+PLAYER_STAGE3_FIELDS = ("home", "shades", "spy_seq", "conquest_policy")
+PROVINCE_STAGE3_FIELDS = ("status",)
+STATE_STAGE3_FIELDS = ("claims", "origins")
 
 
 @dataclass
@@ -91,6 +102,10 @@ class GameState:
     # Pacts and pact proposals, oldest first (engine/diplomacy.py); excluded from state_hash while empty, so states
     # of games without diplomacy hash as they did before pacts existed.
     pacts: list[dict[str, Any]] = field(default_factory=list)
+    # stage 3 (SPY_AND_CONQUEST.md 1.3, 3.5), left out of state_hash while empty: public claims [{seat, province,
+    # until_turn}], and the start regions {province: seat} (filled at turn 1 only when conquest is on)
+    claims: list[dict[str, Any]] = field(default_factory=list)
+    origins: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -106,6 +121,8 @@ class GameState:
             seq=dict(data.get("seq") or {}),
             result=data.get("result"),
             pacts=[dict(p) for p in data.get("pacts") or []],
+            claims=[dict(c) for c in data.get("claims") or []],
+            origins=dict(data.get("origins") or {}),
         )
 
     def owned(self, seat: str) -> list[Province]:
@@ -117,10 +134,17 @@ def state_hash(state: GameState) -> str:
     data.pop("seq")
     if not data.get("pacts"):
         data.pop("pacts", None)
+    for key in STATE_STAGE3_FIELDS:
+        if not data.get(key):
+            data.pop(key, None)
     for player in data["players"].values():
-        for key in PLAYER_STAGE2_FIELDS:
+        for key in PLAYER_STAGE2_FIELDS + PLAYER_STAGE3_FIELDS:
             if not player.get(key):
                 player.pop(key, None)
+    for prov in data["provinces"].values():
+        for key in PROVINCE_STAGE3_FIELDS:
+            if not prov.get(key):
+                prov.pop(key, None)
     return sha256_json(data)
 
 
@@ -144,6 +168,15 @@ class Order:
     building: str | None = None
     pact: str = HONOR                # move: "honor" (keep pacts) | "break" (fight a pact partner, ending the pact)
     tech: str | None = None          # research: the tech to make active
+    # stage 3 (SPY_AND_CONQUEST.md 1.4): written by to_dict only for their own kinds (`feint` only when true), so
+    # orders_hash of older books does not change
+    feint: bool = False              # move: a false entry (espionage)
+    shade: str | None = None         # spy, recall
+    mission: str | None = None       # spy
+    target: str | None = None        # spy: a province or a seat
+    rounds: int | None = None        # spy
+    disposition: str | None = None   # dispose; policy (None: no policy)
+    to: str | None = None            # dispose (release): the recipient seat
 
     @property
     def hasty(self) -> bool:
@@ -153,24 +186,42 @@ class Order:
         out: dict[str, Any] = {"id": self.id, "kind": self.kind, "phase_added": self.phase_added}
         if self.kind == "move":
             out.update({"from": self.src, "to": self.dst, "units": dict(self.units or {}), "pact": self.pact})
+            if self.feint:
+                out["feint"] = True
         elif self.kind == "recruit":
             out.update({"province": self.province, "unit": self.unit, "count": self.count})
         elif self.kind == "build":
             out.update({"province": self.province, "building": self.building})
         elif self.kind == "research":
             out["tech"] = self.tech
-        else:
+        elif self.kind == "hire_shade":
+            pass
+        elif self.kind == "spy":
+            out.update({"shade": self.shade, "mission": self.mission, "target": self.target, "rounds": self.rounds})
+        elif self.kind == "recall":
+            out["shade"] = self.shade
+        elif self.kind == "dispose":
+            out.update({"province": self.province, "disposition": self.disposition})
+            if self.to is not None:
+                out["to"] = self.to
+        elif self.kind == "policy":
+            out["disposition"] = self.disposition
+        else:       # fortify, ward
             out["province"] = self.province
         return out
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Order:
+        recipient = data["kind"] == "dispose"       # "to" is a dispose's recipient, a move's target otherwise
         return cls(
             id=data["id"], kind=data["kind"], phase_added=data.get("phase_added", ACTIONS),
-            src=data.get("from"), dst=data.get("to"),
+            src=data.get("from"), dst=None if recipient else data.get("to"),
             units=dict(data["units"]) if data.get("units") is not None else None,
             province=data.get("province"), unit=data.get("unit"), count=data.get("count"),
             building=data.get("building"), pact=data.get("pact") or HONOR, tech=data.get("tech"),
+            feint=bool(data.get("feint", False)), shade=data.get("shade"), mission=data.get("mission"),
+            target=data.get("target"), rounds=data.get("rounds"), disposition=data.get("disposition"),
+            to=data.get("to") if recipient else None,
         )
 
 

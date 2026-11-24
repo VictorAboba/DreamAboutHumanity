@@ -99,3 +99,20 @@
   description: Только для Хора Пепла. +2 Кредо каждый ход.
   effects:
     - {effect: income, resource: creed, amount: 2}
+# Stage 3 (SPY_AND_CONQUEST.md section 5): espionage only; without it they leave the draft pool and the points list.
+- id: faceless_mask
+  name: {ru: Маска Безликого, en: Faceless Mask}
+  power: 1
+  cost: 1
+  requires_system: espionage
+  description: Шёпот +1 на всю партию.
+  effects:
+    - {effect: modify, target: spy.whisper, op: add, value: 1}
+- id: crooked_mirror
+  name: {ru: Кривое зеркало, en: Crooked Mirror}
+  power: 1
+  cost: 1
+  requires_system: espionage
+  description: Зеркала +1 на всю партию.
+  effects:
+    - {effect: modify, target: spy.mirrors, op: add, value: 1}

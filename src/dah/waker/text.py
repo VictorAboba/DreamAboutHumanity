@@ -31,7 +31,17 @@ def _ready_call(orders_hash: Any) -> str:
     return "dah.ready(confirm_hash=orders_hash из dah.phase() или dah.list_orders())"
 
 
-def _hint(phase: str, turn: int, orders_hash: Any = None) -> str:
+def _intel(intel: Any) -> str:
+    """Espionage games, negotiation_2: «донесений: N; поймано у тебя: M» from the phase info's `intel`."""
+    if not isinstance(intel, dict):
+        return ""
+    text = f"Донесений: {int(intel.get('reports') or 0)}"
+    if intel.get("caught"):
+        text += f"; поймано у тебя: {int(intel['caught'])}"
+    return f" {text} — dah.get_intel()."
+
+
+def _hint(phase: str, turn: int, orders_hash: Any = None, intel: Any = None) -> str:
     since = f"since_turn={turn - 1}" if turn > 1 else ""
     if phase == "setup":
         return ("Фаза старта перед ходом 1: посмотри dah.get_setup(), выбери фракции по предпочтению "
@@ -45,7 +55,7 @@ def _hint(phase: str, turn: int, orders_hash: Any = None) -> str:
     if phase == "negotiation_2":
         return ("Посмотри dah.inbox() и dah.list_orders(), при нужде поправь приказы "
                 "(dah.amend_order / dah.cancel_order); как только сказать и сделать больше нечего — "
-                f"{_ready_call(orders_hash)} (после правки хэш новый).")
+                f"{_ready_call(orders_hash)} (после правки хэш новый).{_intel(intel)}")
     # actions: the hash of the phase's start is stale once orders are given; the submit answer has the new one
     return (f"Посмотри dah.get_state({since}), подай приказы (dah.submit_orders), затем "
             "dah.ready(confirm_hash=orders_hash из ответа dah.submit_orders).")
@@ -67,7 +77,7 @@ def wake_text(phase_info: dict[str, Any], *, reminder: bool = False) -> str:
     head = ", ".join(parts) + (", " + " ".join(timing) if timing else "")
     prefix = "[DAH] Напоминание: фаза скоро закроется, ты ещё не нажал ready. " if reminder else "[DAH] "
     ready = f" Готово {phase_info['ready']}." if phase_info.get("ready") else ""
-    return f"{prefix}{head}.{ready} {_hint(phase, turn, phase_info.get('orders_hash'))}"
+    return f"{prefix}{head}.{ready} {_hint(phase, turn, phase_info.get('orders_hash'), phase_info.get('intel'))}"
 
 
 

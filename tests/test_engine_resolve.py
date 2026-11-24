@@ -8,14 +8,18 @@ AS, AR, AT = "core:assault", "core:armor", "core:artillery"
 ALLOY, FOOD, CREED = "core:alloy", "core:provisions", "core:creed"
 
 
+# The slice rules: core 0.4.0 turns espionage and conquest on in slice2/slice3; these tests are about the slice.
+OFF = {"espionage": False, "conquest": False}
+
+
 @pytest.fixture(scope="module")
 def rs2():
-    return build_ruleset(None, "slice2")
+    return build_ruleset(None, "slice2", OFF)
 
 
 @pytest.fixture(scope="module")
 def rs3():
-    return build_ruleset(None, "slice3")
+    return build_ruleset(None, "slice3", OFF)
 
 
 def layout(rs, nseats, owners):

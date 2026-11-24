@@ -18,6 +18,12 @@ EVENT_TYPES = frozenset({
     # stage 2 (TECH_AND_SETUP.md): setup phase and research. `setup_choice` (seat, kind, prefs/artifacts) is private
     # until `setup_closed`; the artifacts in `setup_closed` stay hidden from players and spectators until game_over.
     "setup_choice", "setup_closed", "research_started", "tech_completed",
+    # stage 3 (SPY_AND_CONQUEST.md 8). Conquest: fates of captured provinces, policies, claims, revolts, ruins.
+    "province_captured", "disposition", "policy_set", "policy_unaffordable", "dispose_failed", "occupation_revolt",
+    "claim_created", "claim_ended", "ruin_ended",
+    # espionage (private to their seats; full level only)
+    "shade_hired", "mission_started", "spy_round", "intel_report", "intel_read", "shade_captured", "mission_end",
+    "sabotage", "strike_cancelled", "feint", "feint_exposed", "mission_rejected",
 })
 
 

@@ -129,6 +129,8 @@ WARN  mymod/factions/f.yaml: lore: text looks like an instruction to agents
 | `--artifact-offer N` | драфт: сколько артефактов предложить месту (1..10; по умолчанию из сценария, в `core` 3) |
 | `--artifact-points N` | очки: бюджет места (0..50; по умолчанию из сценария, в `core` 3) |
 | `--setup-limit T` | длительность фазы старта, например `5m`; по умолчанию из сценария, иначе 5m |
+| `--espionage on\|off` | этап 3: шпионаж (Тени, разведсрез, ложные записи) в этой партии; по умолчанию из сценария (включён в `slice3`, `slice2`, `quad4`, `blitz_spy`) |
+| `--conquest on\|off` | этап 3: завоевание (оккупация, судьбы, притязания) в этой партии; по умолчанию из сценария |
 | `--games-dir DIR` | где создать партию (по умолчанию `games`) |
 
 - `KIND` — `swarm`, `agent`, `human` или бот: `bot-passive`, `bot-builder`, `bot-rush`, `bot-diplomat`.

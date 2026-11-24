@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dah.local/schemas/espionage.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "shade": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "$ref": "common.schema.json#/$defs/lname"
+            },
+            "cost": {
+              "$ref": "common.schema.json#/$defs/amounts"
+            },
+            "upkeep": {
+              "$ref": "common.schema.json#/$defs/amounts"
+            }
+          }
+        },
+        "ward": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cost": {
+              "$ref": "common.schema.json#/$defs/amounts"
+            }
+          }
+        }
+      }
+    },
+    "missions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/mission"
+      }
+    }
+  },
+  "$defs": {
+    "mission": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "behavior",
+        "target",
+        "difficulty",
+        "rounds"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "common.schema.json#/$defs/id"
+        },
+        "name": {
+          "$ref": "common.schema.json#/$defs/lname"
+        },
+        "behavior": {
+          "type": "string",
+          "pattern": "^[a-z_]{1,32}$"
+        },
+        "target": {
+          "enum": [
+            "province",
+            "owned_province",
+            "seat"
+          ]
+        },
+        "difficulty": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 6
+        },
+        "rounds": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8
+          }
+        },
+        "requires": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "whisper": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 5
+            },
+            "tech": {
+              "$ref": "common.schema.json#/$defs/refs"
+            }
+          }
+        },
+        "cost": {
+          "$ref": "common.schema.json#/$defs/amounts"
+        },
+        "cost_per_round": {
+          "$ref": "common.schema.json#/$defs/amounts"
+        },
+        "params": {
+          "type": "object"
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 1000
+        }
+      }
+    }
+  }
+}

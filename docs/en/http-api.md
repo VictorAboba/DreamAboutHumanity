@@ -55,7 +55,7 @@ Submitting and validating orders answer 200 even when some orders are refused: t
 | POST | `/v1/orders/validate` | `{"orders": [...]}` | `results[{ok, cp_cost, reason?, message?, warning?}]`, `ok_count` |
 | POST | `/v1/orders` | `{"orders": [...], "mode"}` | `accepted[]`, `rejected[]`, `orders_hash`, `cp_left`, `warnings[]?` |
 | DELETE | `/v1/orders/{id}` | | `order_id`, `cp_cost`, `orders_hash`, `cp_left` |
-| PATCH | `/v1/orders/{id}` | `{"units"?, "unit"?, "count"?, "to"?, "pact"?}` | the same plus the changed `order`, `warning?` |
+| PATCH | `/v1/orders/{id}` | `{"units"?, "unit"?, "count"?, "to"?, "pact"?, "feint"?, "disposition"?}` | the same plus the changed `order`, `warning?` |
 | POST | `/v1/estimate` | see [Estimate](#estimate) | `win_prob`, average losses |
 | POST | `/v1/messages` | `{"to": [nick, ...] \| "all", "text"}` | `message_id` (count of own sent), `inbox_id` (number in the inbox, for `since`), `left{}` |
 | GET | `/v1/inbox` | `?since=` | `messages[]`, `last_id`, `text` |
@@ -72,6 +72,9 @@ Submitting and validating orders answer 200 even when some orders are refused: t
 | POST | `/v1/setup/artifacts` | `{"ids": [artifact, ...]}` (also `artifacts`, `artifact`) | `artifacts[]`, `confirm_hash`, `text` |
 | GET | `/v1/techs` | `?full=true` | see [Techs](#techs) |
 | GET | `/v1/describe` | `?id=` (or `name=`) | `kind`, `id`, `name`, the entity's fields, `text`; `also[]` when several match |
+| GET | `/v1/spies` | | `text` (≤ 600), see [Espionage and conquest](#espionage-and-conquest) |
+| GET | `/v1/intel` | `?turn=&shade=&report=` (also `report_id`) | `turn`, `text` (≤ 1500; one report ≤ 1200) |
+| POST | `/v1/estimate/mission` | `{"mission", "target", "rounds"?, "shade"?, "assume_mirrors"?}` | `text` (≤ 400), `per_round[{success, detect}]`, `survive`, `any`, `S`, `C_loc`, `D`, `V`, `rounds`, `place` |
 
 ### Setup phase
 
@@ -123,7 +126,7 @@ too): submitted in A, only checked in N1, `PHASE_LOCKED` in N2; one per turn; ch
 `INVALID`.
 
 `GET /v1/rules` without `topic` is the short core (at most 6000 characters) with a table of contents;
-`?topic=techs|factions|artifacts|setup|pacts|combat|units|buildings|abilities|...` is that section in full, built
+`?topic=techs|factions|artifacts|setup|pacts|spying|conquest|combat|units|buildings|abilities|...` is that section in full, built
 from the match's content; a content id or name gives its description; an unknown topic lists the topics only.
 
 ### Phase and waiting
@@ -215,6 +218,55 @@ another player's army as `attacker`, gives `defender`, otherwise `attacker`) and
 `province_type`, also that province's defense from buildings), the other side gets the public faction of the
 player `opponent` (a nick), without it the faction of the owner of another player's province given by id, or base
 numbers. The answer also has `side` and `note` (which side got your stats and why).
+
+### Espionage and conquest
+
+The stage-3 systems ([SPY_AND_CONQUEST.md](../SPY_AND_CONQUEST.md), in Russian) are switched on by the scenario or the
+host (`dah game create --espionage on|off --conquest on|off`). While a system is off its orders answer
+`NOT_AVAILABLE` and the espionage routes `409 NOT_AVAILABLE`; no other answer changes.
+
+**Espionage.** `list_spies`, `get_intel` and `estimate_mission` are in `allowed` of every phase except setup.
+- `GET /v1/spies` — `text`: `S1 C1 · Теней 1/2, на заданиях 1/1 · найм 25 Сплав, +1 Провиант/ход`, a line per Shade
+  (`s1 Наблюдение → P07 1/2 K1 V0 — последнее: #r4`; one lost this turn — `s3: нет связи, потеряна`), the missions on
+  one line and, in N2 of a capture, `ПОЙМАНА У ТЕБЯ: …`.
+- `GET /v1/intel` — the reports of the recon step of turn `turn` (default: the last one held), compact; `shade` —
+  one Shade's; `report` — one report in full. Each call journals `intel_read` (`via: get_intel`). `format=json`
+  (programs and bots) gives the same as data: `intel: {turn, reports [{id, shade, mission, behavior, target, round,
+  rounds, turn, facts}], rounds [{shade, mission, target, outcome, report_id?}], caught [{province, mission, target,
+  owner}], lost [id]}` — own reports only (the `facts` intervals, never the truth), Shades caught at the seat (the
+  owner only when attributed) and its own lost ones; the journal writes `intel_read` with `format: json`.
+- `POST /v1/estimate/mission` — the exact chances of a mission (no Monte Carlo). The mission is an id or a name, the
+  target a province or a nick; a term out of bounds is trimmed and the text says so. Another seat's C is hidden:
+  without `assume_mirrors` the ruleset's base is used; an army in a province out of sight is assumed. Bad arguments —
+  `400 INVALID`.
+- Orders: `{"kind":"hire_shade"}` (actions only), `{"kind":"spy","shade":"s1","mission":"observe","target":"P07",
+  "rounds":2}`, `{"kind":"recall","shade":"s1"}`, a `move` with `"feint": true` (a false entry, actions only). Other
+  spellings are accepted: kinds `hire`/`hire_spy`, `mission`/`spy_mission`, `recall_shade`; fields `shade_id`,
+  `type` (mission), `province`/`player`/`seat` (target), `turns`/`duration` (term); a Shade is `"s1"`, `"1"` or `1`.
+  Reasons: `NO_CAPITAL`, `SHADE_LIMIT`, `SHADE_BUSY`, `TOO_MANY_MISSIONS`, `MISSION_LOCKED`, `BAD_TARGET`,
+  `BAD_ROUNDS`. The recon step at the close of actions carries out the actions entries `hire_shade`/`spy`/`recall`:
+  in N2 their `DELETE` and `PATCH` are `409 PHASE_LOCKED`. In N2 a new `spy` costs `p2.cost.spy` CP, a `recall`
+  `p2.cost.recall`; `PATCH {"feint": false}` makes a false entry real at the price of a new attack.
+- When N2 opens, each seat the recon step touched gets one inbox entry `[ИГРА] Разведсрез хода N: …`
+  (`event: "recon"`, ≤ 200 characters); `/v1/state` in N2 adds a `ДОНЕСЕНИЯ:` line (journaling `intel_read` with
+  `via: get_state`), and `/v1/phase` and `/v1/wait_phase` in N2 add `intel: {reports, caught}` (this turn's reports,
+  Shades caught at the seat) and the tail `донесений: N` to `text`.
+
+**Conquest.** No route of its own.
+- Orders `{"kind":"dispose","province":"P07","disposition":"subjugate","to"?:nick}` and
+  `{"kind":"policy","disposition":"subjugate" | null}` go through `/v1/orders` (actions and N2, 0 CP; in N1 —
+  validation only). A disposition is an id, a short id or a name; `to` is a nick or a seat. Other spellings: kinds
+  `fate`/`decision`/`disposition`, `conquest_policy`; fields `fate`/`decision` (disposition), `target` (province),
+  `recipient`/`player` (recipient), for a policy `policy`. `PATCH` changes `disposition` and `to` of a `dispose` and
+  `disposition` of a `policy` (`null` clears the policy). Reasons: `BAD_TARGET`, `NOT_OCCUPIED`, `OCCUPIED`,
+  `RUINED`, `NO_RECIPIENT`.
+- `/v1/state`: the text has tags `[оккуп. Ник]`, `[пепелище до хN]`, `[разорена]` and sections `ОККУПАЦИЯ`,
+  `ПРИТЯЗАНИЯ`, `ПОЛИТИКА`; JSON has `provinces[].status` (`occupied`, `ruined_until`, `ravaged_until`),
+  `provinces[].origin` (the seat that started with it), `you.conquest_policy`, `claims[]`. With espionage the JSON
+  has `you.espionage`: own S, C, `shades_max`, `active_limit` and own Shades (`shades[]`: id, xp, status, hired_turn,
+  mission); never another seat's.
+- Turn report: `captured` (`status`; its sides also see `mode`), `disposition`, `occupation_revolt`, `claim_created`,
+  `claim_ended`, `ruin_ended` are public; `policy_set`, `policy_unaffordable`, `dispose_failed` only for the seat.
 
 ### Ready
 

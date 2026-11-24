@@ -1,0 +1,28 @@
+# Mystery: stats and flags only for now; espionage comes later (TECH_AND_SETUP.md section 3).
+- id: dream_lore
+  name: {ru: Сонное знание, en: Dream Lore}
+  branch: mystery
+  tier: 1
+  cost: 10
+  unlocks: [dreamwalker]
+  effects:
+    - {effect: income, resource: creed, amount: 1}
+- id: whisper_veil
+  name: {ru: Завеса шёпота, en: Whisper Veil}
+  branch: mystery
+  tier: 1
+  cost: 10
+  effects:
+    - {effect: modify, target: resource.creed.income_mul, op: mul, value: 1.2}
+    - {effect: set_flag, flag: whisper_veil}
+- id: mirror_halls
+  name: {ru: Зеркальные залы, en: Mirror Halls}
+  branch: mystery
+  tier: 2
+  cost: 22
+  requires_tier: {tier: 1, count: 2}
+  effects:
+    - {effect: income, resource: creed, amount: 2}
+    - {effect: modify, target: unit.dreamwalker.attack, op: add, value: 1}
+    - {effect: set_flag, flag: mirror_halls}
+  lore: lore/mirror_halls.md

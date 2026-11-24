@@ -52,3 +52,12 @@
   effects:
     - {effect: modify, target: p2.cancel_refund, op: add, value: 0.25, scope: owner}
     - {effect: modify, target: province.defense_mul, op: add, value: 0.1, scope: province}
+- id: mirror_hall
+  name: {ru: Зеркальный зал, en: Hall of Mirrors}
+  cost: {alloy: 15}
+  build_turns: 1
+  requires: {tech: [mirror_wards]}
+  requires_system: espionage
+  effects:
+    - {effect: modify, target: province.mirrors, op: add, value: 1, scope: province}
+  lore: Чужая Тень видит в залах себя раньше, чем цель. Под Оккупацией залы слепы.

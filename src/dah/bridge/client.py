@@ -109,6 +109,18 @@ class GameClient:
         body.update({k: v for k, v in (("side", side), ("opponent", opponent)) if v is not None})
         return self.request("POST", "/v1/estimate", body=body)
 
+    def list_spies(self) -> dict[str, Any]:
+        return self.request("GET", "/v1/spies")
+
+    def get_intel(self, turn: Any = None, shade: Any = None, report_id: Any = None) -> dict[str, Any]:
+        return self.request("GET", "/v1/intel", params={"turn": turn, "shade": shade, "report": report_id})
+
+    def estimate_mission(self, mission: Any, target: Any, rounds: Any = None, shade: Any = None,
+                         assume_mirrors: Any = None) -> dict[str, Any]:
+        body = {"mission": mission, "target": target, "rounds": rounds, "shade": shade,
+                "assume_mirrors": assume_mirrors}
+        return self.request("POST", "/v1/estimate/mission", body={k: v for k, v in body.items() if v is not None})
+
     def get_setup(self) -> dict[str, Any]:
         return self.request("GET", "/v1/setup")
 

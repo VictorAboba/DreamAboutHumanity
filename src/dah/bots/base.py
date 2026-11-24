@@ -50,6 +50,12 @@ class StageTwoApi(Api, Protocol):
     def list_techs(self) -> dict[str, Any]: ...
 
 
+class SpyApi(Api, Protocol):
+    """Stage 3: the seat's own intel as data (`GET /v1/intel?format=json`; only games with espionage)."""
+
+    def intel(self) -> dict[str, Any]: ...
+
+
 class DiplomacyApi(Api, Protocol):
     """Gifts and pacts (only the bots that override `Bot.diplomacy` use these)."""
 
@@ -77,6 +83,8 @@ class Bot:
         self.seat = seat
         self.rng = random.Random(seed)
         self.renewals_asked: set[tuple[str, int]] = set()   # (pact id, turn) renewals proposed
+        from dah.bots.spy import SpyMemory
+        self.memory = SpyMemory()       # stage 3: what the bot keeps of its reports and of Shades caught at it
 
     # --- decision hooks (overridden by concrete bots) ---
 
@@ -196,11 +204,25 @@ class Bot:
                 log.info("bot %s: pact answer rejected: %s", self.seat, exc)
         api.ready(api.orders().get("orders_hash", ""))
 
+    def read_intel(self, api: Api, view: StateView, phase: str) -> StateView:
+        """Espionage games: in negotiation_2 (and in actions when that was missed) absorb the seat's own reports of
+        the last recon step into `self.memory`; the view gets the remembered armies of hidden provinces."""
+        if view.espionage is None:
+            return view
+        from dah.bots.spy import apply_memory
+        last = view.turn if phase == "negotiation_2" else view.turn - 1
+        if phase in ("negotiation_2", "actions") and last >= 1 and self.memory.seen_turn != last:
+            try:
+                self.memory.absorb((api.intel() or {}).get("intel"))  # type: ignore[attr-defined]
+            except (ApiError, AttributeError) as exc:
+                log.info("bot %s: intel not read: %s", self.seat, exc)
+        return apply_memory(view, self.memory)
+
     def play_phase(self, api: Api, phase: str, me: set[str]) -> None:
         if phase == SETUP_PHASE:
             self.play_setup(api)  # type: ignore[arg-type]
             return
-        view = parse_state(api.state(), me)
+        view = self.read_intel(api, parse_state(api.state(), me), phase)
         estimate = _qualified_estimator(api, view)
         confirm_hash: str | None = None
         if phase in NEGOTIATION_PHASES:

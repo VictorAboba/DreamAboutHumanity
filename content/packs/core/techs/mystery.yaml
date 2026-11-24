@@ -1,4 +1,5 @@
-# Mystery: stats and flags only for now; espionage comes later (TECH_AND_SETUP.md section 3).
+# Mystery: creed, Dreamwalkers and espionage (attack side, SPY_AND_CONQUEST.md section 5). The spy.* lines drop
+# out while espionage is off; whisper_veil keeps its creed x1.2.
 - id: dream_lore
   name: {ru: Сонное знание, en: Dream Lore}
   branch: mystery
@@ -15,6 +16,8 @@
   effects:
     - {effect: modify, target: resource.creed.income_mul, op: mul, value: 1.2}
     - {effect: set_flag, flag: whisper_veil}
+    - {effect: modify, target: spy.whisper, op: add, value: 1}
+    - {effect: modify, target: spy.shades_max, op: add, value: 1}
 - id: mirror_halls
   name: {ru: Зеркальные залы, en: Mirror Halls}
   branch: mystery
@@ -26,3 +29,14 @@
     - {effect: modify, target: unit.dreamwalker.attack, op: add, value: 1}
     - {effect: set_flag, flag: mirror_halls}
   lore: lore/mirror_halls.md
+- id: long_leash
+  name: {ru: Длинный поводок, en: Long Leash}
+  branch: mystery
+  tier: 2
+  cost: 18
+  requires_tier: {tier: 1, count: 2}
+  requires_system: espionage
+  effects:
+    - {effect: modify, target: spy.whisper, op: add, value: 1}
+    - {effect: modify, target: spy.rounds_bonus, op: add, value: 1}
+    - {effect: modify, target: spy.shades_max, op: add, value: 1}

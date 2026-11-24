@@ -26,6 +26,16 @@ _STAT_TEXT = {
     "combat.fortify_bonus": "бонус укрепления", "combat.counter_mul": "множитель контрюнита",
     "starvation.loss_frac": "потери от голода", "province.defense_mul": "оборона провинции",
     "province.recruit_discount": "скидка на найм в провинции",
+    "conquest.claim_turns": "срок притязания (ходов)", "conquest.claim_bonus": "бонус атаки по притязанию",
+    "conquest.loot_cooldown": "перерыв между добычей с провинции (ходов)",
+    # espionage (SPY_AND_CONQUEST.md 1.2)
+    "spy.whisper": "Шёпот (S)", "spy.mirrors": "Зеркала (C)", "province.mirrors": "Зеркала в провинции (C_лок)",
+    "spy.shades_max": "Теней всего", "spy.active_base": "Теней на заданиях (база)",
+    "spy.rounds_bonus": "срок заданий (раундов)", "spy.detect.army": "армия в провинции к C_лок",
+    "spy.attribution.base": "шанс узнать хозяина пойманной Тени", "spy.intel.width": "ширина интервалов донесений",
+    "spy.xp_max": "опыт Тени (предел)", "spy.cover_max": "прикрытие Тени (предел)",
+    "spy.ward.bonus": "Застава к C_лок", "p2.cost.spy": "цена задания в П2 (ОК)",
+    "p2.cost.recall": "цена отзыва в П2 (ОК)", "feint.cp_cost": "цена ложной записи (ОК)",
 }
 
 
@@ -55,6 +65,22 @@ def stat_text(ruleset: Ruleset, path: str) -> str:
         return f"доход «{_name(ruleset, segs[1])}»"
     if segs[0] == "province" and len(segs) == 3:
         return f"доход «{_name(ruleset, segs[2])}» провинции"
+    if segs[0] == "spy" and len(segs) == 4 and segs[1] == "mission":
+        m = ruleset.missions.get(segs[2])
+        what = {"difficulty": "сложность", "max_rounds": "наибольший срок"}.get(segs[3], segs[3])
+        return f"{what} миссии «{m.name if m else segs[2].split(':')[-1]}»"
+    if segs[0] == "spy" and len(segs) == 4 and segs[1] in ("shade", "ward"):
+        who = "Тени" if segs[1] == "shade" else "Заставы"
+        what = {"cost": "цена", "upkeep": "содержание"}.get(segs[2], segs[2])
+        return f"{what} {who} ({_name(ruleset, segs[3])})"
+    if segs[0] == "spy" and len(segs) == 3:
+        group = {"success": "успех задания", "detect": "поимка Тени", "attribution": "узнать хозяина",
+                 "feint_expose": "разоблачение ложной записи"}.get(segs[1], segs[1])
+        return f"{group}: {segs[2]}"
+    if segs[0] == "disposition" and len(segs) == 3:
+        d = ruleset.dispositions.get(segs[1])
+        what = {"cost_mul": "цена", "loot_mul": "добыча"}.get(segs[2], segs[2])
+        return f"{what} судьбы «{d.name if d else segs[1].split(':')[-1]}»"
     if segs[0] == "tech" and len(segs) == 4:
         return f"цена технологий ветки «{_name(ruleset, segs[2])}»"
     if segs[0] == "tech" and len(segs) == 3:

@@ -188,6 +188,34 @@ Stats added in stage 2:
 | `province.income_mul.<res>` | float 0..5 | 1.0 | income multiplier of a province |
 | `province.recruit_discount` | float 0..0.9 | 0 | recruit discount, per unit, rounded in the seat's favour |
 
+## Stage-3 content: espionage and conquest
+
+The authoritative description is sections 1, 2.2, 3.3 and 5 of the [stage-3 specification](../SPY_AND_CONQUEST.md)
+(in Russian); `content/packs/core` 0.4.0 uses every field below. Everything here is optional: a pack without it, or a
+scenario with both systems off, hashes and plays as before stage 3.
+
+- **Switches.** A scenario's `systems: {espionage: bool, conquest: bool}` (default both off); the host may override
+  them per match (`dah game create --espionage/--conquest`). While a system is off, entities with
+  `requires_system: espionage|conquest` (branches, techs, buildings, artifacts) are dropped from the ruleset (a hidden
+  branch hides its techs), and `modify` lines aimed at the system's stats are dropped from techs, artifacts,
+  buildings and factions.
+- **`espionage/*.yaml`** (needed when espionage is on): an optional `config` — `shade {name, cost, upkeep}` and
+  `ward {cost}` (3b) — and `missions: [...]`. A mission has `id`, `name`, `behavior` (`observe_province`,
+  `read_ledger`, `read_orders`, `sabotage`), `target` (`province`, `owned_province`, `seat`), `difficulty`,
+  `rounds: [min, max]`, `requires: {whisper, tech?}`, `cost` (once), `cost_per_round`, `params` (sabotage:
+  `deny_fortify`, `defense_mul`, `income_mul`), `description`.
+- **`dispositions/*.yaml`** (needed when conquest is on): the fates of a captured province — `id`, `name`,
+  `behavior` (`annex`, `raze` with `params.ruin_turns`, `raid` with `params.ravage_turns`, `release`), `cost`,
+  `loot`, `description`.
+- **`conquest_value`** (1..5, default 1) on a province type multiplies fate prices and loot (the capital is 3 in
+  `core`).
+- **Stats** (only while their system is on): `spy.*` (`spy.whisper`, `spy.mirrors`, `spy.shades_max`,
+  `spy.rounds_bonus`, `spy.detect.army`, `spy.attribution.base`, `spy.mission.<id>.difficulty|max_rounds`,
+  `spy.shade.cost|upkeep.<res>`, ...), `province.mirrors`, `p2.cost.spy`, `p2.cost.recall`, `feint.cp_cost`,
+  `disposition.<id>.cost_mul|loot_mul`, `conquest.claim_turns`, `conquest.claim_bonus`, `conquest.loot_cooldown`. The
+  full table with ranges is section 1.2 of the specification; `rules(topic="spying")` and `rules(topic="conquest")`
+  show a match's numbers.
+
 ## Validation
 
 ```sh

@@ -131,6 +131,8 @@ Creates `games/<id>/` and prints the seat keys once.
 | `--artifact-offer N` | draft: artifacts offered to each seat (1..10; default from the scenario, 3 in `core`) |
 | `--artifact-points N` | points: each seat's budget (0..50; default from the scenario, 3 in `core`) |
 | `--setup-limit T` | length of the setup phase, e.g. `5m`; default from the scenario, else 5m |
+| `--espionage on\|off` | stage 3: espionage (Shades, recon, false entries) for this match; default from the scenario (on in `slice3`, `slice2`, `quad4`, `blitz_spy`) |
+| `--conquest on\|off` | stage 3: conquest (occupation, fates, claims) for this match; default from the scenario |
 | `--games-dir DIR` | where to create the match (default `games`) |
 
 - `KIND` is `swarm`, `agent`, `human`, or a bot: `bot-passive`, `bot-builder`, `bot-rush`, `bot-diplomat`.

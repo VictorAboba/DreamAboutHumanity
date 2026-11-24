@@ -9,20 +9,30 @@ from dataclasses import dataclass, replace
 from itertools import count as _counter
 from typing import Any, Callable, Iterable, Mapping
 
+from . import conquest as cq
+from . import espionage as esp
 from .content import Ruleset, StatKey
 from .diplomacy import pact_between
+from .registry import ORDER_KINDS, ORDER_PHASE_RULES, ORDER_SYSTEMS
 from .model import ACTIONS, BREAK, HONOR, INT_BOUND, P2, GameState, Order, SeatOrders, as_int, sha256_json
 from .techs import (ALREADY_RESEARCHED, NOT_AVAILABLE, building_problem, move_problem, province_stat,
                     resolve_tech_ref, stat_key, tech_problem, unit_problem)
 
-KINDS = ("move", "recruit", "build", "fortify", "research")
+KINDS = ORDER_KINDS
 PACT_FLAGS = (HONOR, BREAK)
 FREE_PHASES = (ACTIONS,)    # orders are given in actions (free) and edited in negotiation_2 (priced in CP)
 P1 = "negotiation_1"
 P1_LOCKED_HINT = "в П1 приказы можно только проверить через validate_orders; подавать — в фазе Д"
 CP_CANCEL = 1
 CP_REDUCE = 1
-CP_FORTIFY = 1
+CP_FORTIFY = ORDER_PHASE_RULES["fortify"]["p2_new"]
+# Why a kind is PHASE_LOCKED in negotiation_2 (the rules themselves are registry.ORDER_PHASE_RULES)
+P2_LOCKED_NEW = {"recruit": "найм и стройка в П2 запрещены", "build": "найм и стройка в П2 запрещены",
+                 "research": "исследование выбирают только в фазе Д",
+                 "hire_shade": "Тень нанимают только в фазе Д", "ward": "заставу ставят только в фазе Д"}
+P2_LOCKED_EDIT = {"research": "исследование выбирают только в фазе Д"}
+P2_LOCKED_RECON = "эту запись уже исполнил разведсрез (конец Д): в П2 её не изменить и не отменить"
+SYSTEM_NAMES = {"espionage": "шпионаж", "conquest": "завоевание"}
 
 NOT_ADJACENT = "NOT_ADJACENT"
 NOT_OWNER = "NOT_OWNER"
@@ -37,6 +47,26 @@ INVALID = "INVALID"          # malformed order or patch (not in SLICE's list; ne
 # stage 2 (TECH_AND_SETUP.md, from engine/techs.py): NOT_AVAILABLE (a unit, building or tech locked by techs,
 # faction or a missing building), ALREADY_RESEARCHED (research of a tech the seat has)
 STAGE2_REASONS = (NOT_AVAILABLE, ALREADY_RESEARCHED)
+# stage 3 (SPY_AND_CONQUEST.md 1.4)
+SHADE_BUSY = "SHADE_BUSY"
+SHADE_LIMIT = "SHADE_LIMIT"
+TOO_MANY_MISSIONS = "TOO_MANY_MISSIONS"
+MISSION_LOCKED = "MISSION_LOCKED"
+BAD_TARGET = "BAD_TARGET"
+BAD_ROUNDS = "BAD_ROUNDS"
+NO_CAPITAL = "NO_CAPITAL"
+NOT_OCCUPIED = "NOT_OCCUPIED"
+OCCUPIED = "OCCUPIED"
+RUINED = "RUINED"
+NO_RECIPIENT = "NO_RECIPIENT"
+STAGE3_REASONS = (SHADE_BUSY, SHADE_LIMIT, TOO_MANY_MISSIONS, MISSION_LOCKED, BAD_TARGET, BAD_ROUNDS, NO_CAPITAL,
+                  NOT_OCCUPIED, OCCUPIED, RUINED, NO_RECIPIENT)
+CONQUEST_REASONS = (BAD_TARGET, NOT_OCCUPIED, OCCUPIED, RUINED, NO_RECIPIENT)
+
+
+def recon_consumed(order: Order) -> bool:
+    """An entry of the actions book the recon step carries out and pays for (registry.ORDER_PHASE_RULES)."""
+    return bool(ORDER_PHASE_RULES.get(order.kind, {}).get("recon_consumed")) and order.phase_added == ACTIONS
 
 
 class OrderRejected(Exception):
@@ -268,6 +298,35 @@ def decode_json_arg(value: Any) -> Any:
     return value
 
 
+# Lenient spellings of the stage-3 orders (SPY_AND_CONQUEST.md 6.1): accepted only while their system is on, so the
+# answers of games without it never change. Kind aliases, then field aliases per kind (the canonical field wins).
+KIND_ALIASES = {"hire": "hire_shade", "hire_spy": "hire_shade", "spy_mission": "spy", "mission": "spy",
+                "recall_shade": "recall", "disposition": "dispose", "fate": "dispose", "decision": "dispose",
+                "decide": "dispose", "conquest_policy": "policy"}
+FIELD_ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
+    "dispose": {"disposition": ("fate", "decision", "choice"), "province": ("target", "province_id"),
+                "to": ("recipient", "player", "seat")},
+    "policy": {"disposition": ("policy", "fate", "decision", "choice")},
+    "spy": {"shade": ("shade_id", "spy"), "mission": ("mission_id", "type"), "target": ("province", "seat", "player"),
+            "rounds": ("turns", "duration", "term")},
+    "recall": {"shade": ("shade_id", "spy")},
+}
+
+
+def _with_aliases(kind: str, data: Mapping[str, Any]) -> Mapping[str, Any]:
+    """`data` with each canonical field of `kind` filled from its first present alias (by key: a null counts)."""
+    aliases = FIELD_ALIASES.get(kind)
+    if not aliases:
+        return data
+    out = dict(data)
+    for field_name, alts in aliases.items():
+        if field_name not in out:
+            hit = next((a for a in alts if a in out), None)
+            if hit is not None:
+                out[field_name] = out[hit]
+    return out
+
+
 def parse_order(ruleset: Ruleset, data: Mapping[str, Any], order_id: str, phase: str) -> Order:
     """Normalize a JSON order into the canonical Order. Raises OrderRejected.
 
@@ -281,14 +340,35 @@ def parse_order(ruleset: Ruleset, data: Mapping[str, Any], order_id: str, phase:
     kind = data.get("kind")
     if isinstance(kind, str):
         kind = kind.strip().lower()
+    shown = [k for k in KINDS if k not in ORDER_SYSTEMS or ruleset.system(ORDER_SYSTEMS[k])]
+    if kind in KIND_ALIASES and KIND_ALIASES[kind] in shown:
+        kind = KIND_ALIASES[kind]
+    if kind in ORDER_SYSTEMS and ruleset.system(ORDER_SYSTEMS[kind]):
+        data = _with_aliases(kind, data)
     if kind not in KINDS:
-        raise OrderRejected(INVALID, f"kind должен быть одним из {', '.join(KINDS)}")
+        raise OrderRejected(INVALID, f"kind должен быть одним из {', '.join(shown)}")
+    if kind in ORDER_SYSTEMS and not ruleset.system(ORDER_SYSTEMS[kind]):
+        raise OrderRejected(NOT_AVAILABLE, f"приказ {kind}: {SYSTEM_NAMES[ORDER_SYSTEMS[kind]]} выключен в этой "
+                                           f"партии; приказы: {', '.join(shown)}")
     added = P2 if phase == P2 else ACTIONS
     if kind == "research":
         return _research_order(ruleset, data, order_id, added)
     if kind == "move":
+        feint = _feint_flag(ruleset, data.get("feint"))
         return Order(order_id, kind, added, src=_require_str(data, "from"), dst=_require_str(data, "to"),
-                     units=_move_units(ruleset, data), pact=_pact_flag(data.get("pact")))
+                     units=_move_units(ruleset, data), pact=_pact_flag(data.get("pact")), feint=feint)
+    if kind == "dispose":
+        return _dispose_order(ruleset, data, order_id, added)
+    if kind == "policy":
+        return _policy_order(ruleset, data, order_id, added)
+    if kind == "hire_shade":
+        return Order(order_id, kind, added)
+    if kind == "spy":
+        return _spy_order(ruleset, data, order_id, added)
+    if kind == "recall":
+        return Order(order_id, kind, added, shade=_shade_field(data, RECALL_EXAMPLE))
+    if kind in ORDER_SYSTEMS:     # ward: the outpost comes with stage 3b (SPY_AND_CONQUEST.md 2.8)
+        raise OrderRejected(NOT_AVAILABLE, f"приказ {kind} пока не поддерживается")
     province = _require_str(data, "province")
     if kind == "recruit":
         unit = resolve_unit_ref(ruleset, _require_str(data, "unit"))
@@ -305,6 +385,84 @@ def parse_order(ruleset: Ruleset, data: Mapping[str, Any], order_id: str, phase:
 
 
 RESEARCH_EXAMPLE = '{"kind":"research","tech":"<id технологии>"}'
+DISPOSE_EXAMPLE = '{"kind":"dispose","province":"P07","disposition":"subjugate"}'
+POLICY_EXAMPLE = '{"kind":"policy","disposition":"subjugate"} (или null — без политики)'
+
+
+SPY_EXAMPLE = '{"kind":"spy","shade":"s1","mission":"observe","target":"P07","rounds":2}'
+RECALL_EXAMPLE = '{"kind":"recall","shade":"s1"}'
+
+
+def _shade_field(data: Mapping[str, Any], example: str) -> str:
+    sid = esp.shade_id(data.get("shade"))
+    if sid is None:
+        raise OrderRejected(INVALID, f"поле 'shade' — Тень (\"s1\" или 1), получено {_shown(data.get('shade'))}. "
+                                     f"Пример: {example}")
+    return sid
+
+
+def _spy_order(ruleset: Ruleset, data: Mapping[str, Any], order_id: str, added: str) -> Order:
+    shade = _shade_field(data, SPY_EXAMPLE)
+    ref = data.get("mission")
+    mission = esp.resolve_mission_ref(ruleset, ref)
+    if mission is None:
+        if not isinstance(ref, str) or not ref.strip():
+            raise OrderRejected(INVALID, f"поле 'mission' обязательно: {SPY_EXAMPLE}")
+        raise OrderRejected(UNKNOWN_ID, f"неизвестная миссия {str(ref)[:40]!r}; миссии: {esp.mission_list(ruleset)}")
+    target = data.get("target")
+    if not isinstance(target, str) or not target.strip():
+        raise OrderRejected(INVALID, f"поле 'target' — провинция или игрок (ник), получено {_shown(target)}. "
+                                     f"Пример: {SPY_EXAMPLE}")
+    rounds = data.get("rounds")
+    if rounds is None:
+        raise OrderRejected(INVALID, f"поле 'rounds' (срок задания в раундах) обязательно: {SPY_EXAMPLE}")
+    return Order(order_id, "spy", added, shade=shade, mission=mission, target=target.strip(),
+                 rounds=_positive_int(rounds, "rounds"))
+
+
+def _feint_flag(ruleset: Ruleset, value: Any) -> bool:
+    """`feint` of a move: absent, null or false — a real move; true — a false entry (espionage only)."""
+    if value is None or value is False:
+        return False
+    if value is not True:
+        raise OrderRejected(INVALID, f"feint — true или false, получено {_shown(value)}")
+    if not ruleset.system("espionage"):
+        raise OrderRejected(INVALID, "feint (ложная запись) — только в партиях со шпионажем; здесь он выключен")
+    return True
+
+
+def _disposition_ref(ruleset: Ruleset, ref: Any, example: str) -> str:
+    did = cq.resolve_disposition_ref(ruleset, ref)
+    if did is None:
+        if not isinstance(ref, str) or not ref.strip():
+            raise OrderRejected(INVALID, f"поле 'disposition' обязательно: {example}")
+        raise OrderRejected(UNKNOWN_ID, f"неизвестная судьба {str(ref)[:40]!r}; варианты: "
+                                        f"{cq.disposition_list(ruleset)}")
+    return did
+
+
+def _dispose_order(ruleset: Ruleset, data: Mapping[str, Any], order_id: str, added: str) -> Order:
+    province = _require_str(data, "province")
+    did = _disposition_ref(ruleset, data.get("disposition"), DISPOSE_EXAMPLE)
+    to = data.get("to")
+    if to is not None and (not isinstance(to, str) or not to.strip()):
+        to = None if to == "" else to
+        if to is not None:
+            raise OrderRejected(INVALID, f"to — место или ник получателя, получено {_shown(to)}")
+    return Order(order_id, "dispose", added, province=province, disposition=did,
+                 to=to.strip() if isinstance(to, str) else None)
+
+
+def _policy_order(ruleset: Ruleset, data: Mapping[str, Any], order_id: str, added: str) -> Order:
+    if data.get("to") is not None:
+        raise OrderRejected(INVALID, "у политики нет получателя (to): освобождение в пользу игрока — приказом "
+                                     "dispose")
+    if "disposition" not in data:
+        raise OrderRejected(INVALID, f"поле 'disposition' обязательно: {POLICY_EXAMPLE}")
+    ref = data.get("disposition")
+    if ref is None or (isinstance(ref, str) and ref.strip().lower() in ("", "none", "null")):
+        return Order(order_id, "policy", added, disposition=None)
+    return Order(order_id, "policy", added, disposition=_disposition_ref(ruleset, ref, POLICY_EXAMPLE))
 
 
 def _research_order(ruleset: Ruleset, data: Mapping[str, Any], order_id: str, added: str) -> Order:
@@ -337,15 +495,31 @@ def order_cost(ruleset: Ruleset, faction: StatKey, order: Order, state: GameStat
     if order.kind == "build":
         assert order.building is not None
         return Counter(ruleset.building_cost(order.building, faction))
+    if order.kind == "dispose":
+        return Counter(dispose_cost(ruleset, faction, order))
+    if order.kind in ("hire_shade", "spy"):
+        return Counter(esp.order_cost(ruleset, faction, order))
     return Counter()
+
+
+def dispose_cost(ruleset: Ruleset, faction: StatKey, order: Order, state: GameState | None = None) -> dict[str, int]:
+    """The price a dispose order holds: its disposition's cost for the province (by the map's province type)."""
+    prov = ruleset.map.provinces.get(order.province or "")
+    if prov is None or order.disposition not in ruleset.dispositions:
+        return {}
+    return cq.disposition_cost(ruleset, order.disposition, prov, faction)
 
 
 def reserved_resources(ruleset: Ruleset, faction: StatKey, book: SeatOrders,
                        state: GameState | None = None) -> dict[str, int]:
     """Resources held by recruit/build orders plus reserve already forfeited in P2. Pass the seat's stat key and
-    the state (`seat_reserved` does both) for techs, artifacts and recruit discounts to count."""
+    the state (`seat_reserved` does both) for techs, artifacts and recruit discounts to count. After the recon step
+    (state in negotiation_2 or resolution) the actions book's recon-consumed entries hold nothing: recon paid them."""
     total: Counter[str] = Counter(book.forfeit)
+    after_recon = state is not None and state.phase in (P2, "resolution")
     for o in book.orders:
+        if after_recon and recon_consumed(o):
+            continue
         total.update(order_cost(ruleset, faction, o, state))
     return dict(sorted((k, v) for k, v in total.items() if v))
 
@@ -387,6 +561,24 @@ def _rules_problem(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrde
         if any(o.kind == "research" for o in others):
             return INVALID, "приказ research уже есть: одна активная технология (отмени прежний приказ)"
         return tech_problem(state, ruleset, seat, order.tech)
+    if order.kind in ORDER_SYSTEMS and not ruleset.system(ORDER_SYSTEMS[order.kind]):
+        return NOT_AVAILABLE, f"{SYSTEM_NAMES[ORDER_SYSTEMS[order.kind]]} выключен в этой партии"
+    if order.kind == "policy":
+        if any(o.kind == "policy" for o in others):
+            return INVALID, "приказ policy уже есть (одна политика): поправь или отмени прежний"
+        if order.disposition is not None and order.disposition not in ruleset.dispositions:
+            return UNKNOWN_ID, f"неизвестная судьба {order.disposition!r}"
+        return None
+    if order.kind == "dispose":
+        if any(o.kind == "dispose" and o.province == order.province for o in others):
+            return INVALID, f"судьба {order.province} уже задана (одна запись на провинцию): поправь или отмени её"
+        problem = cq.dispose_problem(state, ruleset, seat, order)
+        return problem or _resources_problem(state, ruleset, seat, book, order, others, key)
+    if order.kind in ("hire_shade", "spy", "recall"):
+        problem = esp.order_problem(state, ruleset, seat, order, others, key)
+        return problem or _resources_problem(state, ruleset, seat, book, order, others, key)
+    if order.kind in ORDER_SYSTEMS:
+        return NOT_AVAILABLE, f"приказ {order.kind} пока не поддерживается"
     target = order.src if order.kind == "move" else order.province
     if target not in state.provinces:
         return UNKNOWN_ID, f"неизвестная провинция {target!r}"
@@ -409,6 +601,13 @@ def _rules_problem(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrde
         if any(o.kind == "fortify" and o.province == target for o in others):
             return INVALID, f"{target} уже укрепляется"
         return None
+    if order.kind in ("recruit", "build") and prov.status:
+        occ = cq.occupied(prov)
+        if occ is not None:
+            return OCCUPIED, (f"{target} оккупирована: стройка и найм — после подчинения (dispose, "
+                              f"{cq.disposition_list(ruleset)})")
+        if cq.is_ruined(prov, state.turn):
+            return RUINED, f"{target} — пепелище до хода {prov.status['ruined_until']}: стройка и найм запрещены"
     if order.kind == "recruit":
         if not any(ruleset.buildings[b].recruit for b in prov.buildings):
             return NO_RECRUIT_BUILDING, f"в {target} нет здания для найма"
@@ -424,6 +623,12 @@ def _rules_problem(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrde
         ordered = any(o.kind == "build" and o.province == target and o.building == b for o in others)
         if b in prov.buildings or pending or ordered:
             return ALREADY_BUILT, f"{ruleset.short(b)} в {target} уже есть или строится"
+    return _resources_problem(state, ruleset, seat, book, order, others, key)
+
+
+def _resources_problem(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders, order: Order,
+                       others: list[Order], key: StatKey) -> tuple[str, str] | None:
+    player = state.players[seat]
     need = order_cost(ruleset, key, order, state)
     held = reserved_resources(ruleset, key, replace(book, orders=others), state)
     for res, n in sorted(need.items()):
@@ -433,25 +638,45 @@ def _rules_problem(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrde
     return None
 
 
+def normalize_order(state: GameState, order: Order) -> Order:
+    """State-dependent canonical form: a dispose's recipient and a spy's target given by nick become seat ids."""
+    if order.kind == "dispose" and order.to is not None:
+        seat = cq.seat_ref(state, order.to)
+        if seat is not None and seat != order.to:
+            return replace(order, to=seat)
+    if order.kind == "spy" and order.target is not None and order.target not in state.provinces:
+        seat = cq.seat_ref(state, order.target)
+        if seat is not None and seat != order.target:
+            return replace(order, target=seat)
+    return order
+
+
+def feint_cp(ruleset: Ruleset, faction: StatKey) -> int:
+    """CP of this turn one false entry costs (SPY_AND_CONQUEST.md 2.9): spent in the actions phase on `cp_spent`."""
+    return int(ruleset.stat("feint.cp_cost", faction))
+
+
 def _new_order_cp(ruleset: Ruleset, faction: StatKey, order: Order, phase: str) -> tuple[str, str] | int:
     if phase in FREE_PHASES:
-        return 0
+        return feint_cp(ruleset, faction) if order.feint else 0
     if phase == P1:
         return PHASE_LOCKED, P1_LOCKED_HINT
     if phase != P2:
         return PHASE_LOCKED, "приказы сейчас не принимаются"
-    if order.kind in ("recruit", "build"):
-        return PHASE_LOCKED, "найм и стройка в П2 запрещены"
-    if order.kind == "research":
-        return PHASE_LOCKED, "исследование выбирают только в фазе Д"
-    if order.kind == "fortify":
-        return CP_FORTIFY
-    return int(ruleset.stat("p2.cost.new_attack", faction))
+    if order.feint:
+        return PHASE_LOCKED, "ложную запись подают только в фазе Д"
+    price = ORDER_PHASE_RULES[order.kind]["p2_new"]
+    if price == "locked":
+        return PHASE_LOCKED, P2_LOCKED_NEW.get(order.kind, f"приказ {order.kind} в П2 не подаётся")
+    if isinstance(price, int):
+        return price
+    return int(ruleset.stat(price, faction))
 
 
 def _check(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders, order: Order, phase: str) -> Check:
     if seat not in state.players:
         return Check(False, UNKNOWN_ID, f"неизвестное место {seat!r}", order=order)
+    order = normalize_order(state, order)
     priced = _new_order_cp(ruleset, stat_key(state, ruleset, seat), order, phase)
     if isinstance(priced, tuple):
         return Check(False, *priced, order=order)
@@ -518,7 +743,7 @@ def submit_orders(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrder
             continue
         check = _check(state, ruleset, seat, work, order, phase)
         if check.ok:
-            work.orders.append(order)
+            work.orders.append(check.order or order)
             work.cp_spent += check.cp_cost
         results.append(check)
     return SubmitResult(work, results)
@@ -557,11 +782,18 @@ def cancel_order(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders
     order = book.find(order_id)
     if order is None:
         return EditResult(False, book, UNKNOWN_ID, f"нет приказа {order_id!r}")
-    if phase == P2 and order.kind == "research":
-        # The research choice is fixed after Д: cancelling it in П2 would switch back to the previous tech.
-        return EditResult(False, book, PHASE_LOCKED, "исследование выбирают только в фазе Д")
+    rule = ORDER_PHASE_RULES[order.kind]["p2_edit"]
+    if phase == P2 and recon_consumed(order):
+        return EditResult(False, book, PHASE_LOCKED, P2_LOCKED_RECON)
+    if phase == P2 and rule == "locked":
+        # e.g. the research choice is fixed after Д: cancelling it in П2 would switch back to the previous tech
+        return EditResult(False, book, PHASE_LOCKED, P2_LOCKED_EDIT.get(order.kind, f"приказ {order.kind} в П2 не "
+                                                                                    "меняется"))
     rest = [o for o in book.orders if o.id != order_id]
-    if phase != P2:
+    if phase != P2 and order.feint:        # a false entry taken back in actions gives its CP back
+        spent = max(0, book.cp_spent - feint_cp(ruleset, stat_key(state, ruleset, seat)))
+        return EditResult(True, replace(book, orders=rest, cp_spent=spent), cp_cost=spent - book.cp_spent)
+    if phase != P2 or rule == "free":      # a free P2 edit: no CP, the reserve comes back in full
         return EditResult(True, replace(book, orders=rest))
     if CP_CANCEL > cp_left(state, seat, book):
         return EditResult(False, book, NOT_ENOUGH_CP, "нужно 1 ОК", CP_CANCEL)
@@ -588,8 +820,19 @@ def amend_order(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders,
     patch = decode_json_arg(patch)
     if not isinstance(patch, Mapping):
         return EditResult(False, book, INVALID, f"patch должен быть объектом, получено {_shown(patch)}")
-    patch = {k: v for k, v in patch.items() if v is not None}     # null-filling clients: null = not changed
-    allowed = {"move": {"units", "to", "pact"}, "recruit": {"count"}, "research": {"tech"}}.get(old.kind, set())
+    if old.kind == "policy" and any(k in patch for k in FIELD_ALIASES["policy"]["disposition"] + ("disposition",)):
+        patch = _with_aliases("policy", patch)       # policy: null is a value (no policy), not "unchanged"
+        patch = {k: v for k, v in patch.items() if v is not None or k == "disposition"}
+        patch = {k: v for k, v in patch.items() if k == "disposition" or k not in FIELD_ALIASES["policy"]["disposition"]}
+    else:
+        if old.kind in ("dispose", "spy", "recall"):
+            patch = {k: v for k, v in _with_aliases(old.kind, patch).items()
+                     if k not in {a for alts in FIELD_ALIASES[old.kind].values() for a in alts}}
+        patch = {k: v for k, v in patch.items() if v is not None}     # null-filling clients: null = not changed
+    allowed = {"move": {"units", "to", "pact", "feint"}, "recruit": {"count"}, "research": {"tech"},
+               "dispose": {"disposition", "to"}, "policy": {"disposition"}}.get(old.kind, set())
+    if phase == P2 and recon_consumed(old):
+        return EditResult(False, book, PHASE_LOCKED, P2_LOCKED_RECON)
     accepted = allowed | ({"unit", "count"} if old.kind == "move" else set())   # move: the flat form too
     extra = set(patch) - accepted
     if not patch or extra:
@@ -603,15 +846,28 @@ def amend_order(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders,
             moved = any(k in patch for k in ("units", "unit", "count"))
             new = replace(old, units=_move_units(ruleset, patch, patch=True) if moved else old.units,
                           dst=_require_str(patch, "to") if "to" in patch else old.dst,
-                          pact=_pact_flag(patch["pact"]) if "pact" in patch else old.pact)
+                          pact=_pact_flag(patch["pact"]) if "pact" in patch else old.pact,
+                          feint=_feint_flag(ruleset, patch["feint"]) if "feint" in patch else old.feint)
         elif old.kind == "research":
             new = replace(old, tech=_research_order(ruleset, patch, old.id, old.phase_added).tech)
+        elif old.kind == "dispose":
+            merged = {"province": old.province, "disposition": old.disposition, "to": old.to, **patch}
+            new = replace(old, **{k: getattr(_dispose_order(ruleset, merged, old.id, old.phase_added), k)
+                                  for k in ("disposition", "to")})
+            new = normalize_order(state, new)
+        elif old.kind == "policy":
+            new = replace(old, disposition=_policy_order(ruleset, patch, old.id, old.phase_added).disposition)
         else:
             new = replace(old, count=_positive_int(patch["count"], "count"))
     except OrderRejected as exc:
         return EditResult(False, book, exc.reason, exc.message)
     cost, forfeit = 0, Counter[str]()
-    if phase == P2:
+    if phase != P2 and new.feint != old.feint:     # actions: a false entry costs its CP, a real one gives it back
+        cost = feint_cp(ruleset, faction) * (1 if new.feint else -1)
+    if phase == P2 and ORDER_PHASE_RULES[old.kind]["p2_edit"] == "free":
+        if new == old:
+            return EditResult(False, book, INVALID, "ничего не изменилось")
+    elif phase == P2:
         try:
             cost, hasty = _amend_price(ruleset, faction, old, new)
         except OrderRejected as exc:
@@ -634,8 +890,12 @@ def amend_order(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders,
 
 def _amend_price(ruleset: Ruleset, faction: StatKey, old: Order, new: Order) -> tuple[int, bool]:
     """(CP cost, becomes hasty) of a P2 amendment. Raises OrderRejected."""
-    if old.kind == "research":
-        raise OrderRejected(PHASE_LOCKED, "исследование выбирают только в фазе Д")
+    if ORDER_PHASE_RULES[old.kind]["p2_edit"] == "locked":
+        raise OrderRejected(PHASE_LOCKED, P2_LOCKED_EDIT.get(old.kind, f"приказ {old.kind} в П2 не меняется"))
+    if new.feint and not old.feint:
+        raise OrderRejected(INVALID, "в П2 настоящий ход ложным не сделать (ложные записи — только в фазе Д)")
+    if old.feint and not new.feint:      # a false entry made real: priced as a new attack, and hasty
+        return int(ruleset.stat("p2.cost.new_attack", faction)), True
     if old.kind == "recruit":
         assert old.count is not None and new.count is not None
         if new.count > old.count:
@@ -658,6 +918,8 @@ def executable_orders(state: GameState, ruleset: Ruleset, seat: str,
     valid = SeatOrders([], 0, dict(book.forfeit))
     rejected = []
     for order in book.orders:
+        if recon_consumed(order):      # carried out and paid for by the recon step when actions closed
+            continue
         problem = _rules_problem(state, ruleset, seat, valid, order)
         if problem:
             rejected.append((order, problem[0]))

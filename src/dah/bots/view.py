@@ -6,8 +6,9 @@ decision logic. Every guess about JSON field names lives here, so a contract mis
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
+import math
+from dataclasses import dataclass, field
+from typing import Any, Mapping
 
 # Numbers of the `core` pack (0.3.0) the bots plan with (SLICE.md section 3, TECH_AND_SETUP.md section 8); the
 # server stays the authority (faction modifiers, e.g. cheaper buildings, only make the bots plan conservatively).
@@ -33,6 +34,19 @@ FARM_SITE = "agri"  # province type a farm prefers
 BUILD_RESOURCE = "alloy"
 FOOD_RESOURCE = "provisions"
 
+# Stage 3 (docs/SPY_AND_CONQUEST.md sections 5, 7): the numbers of core 0.4.0 the bots plan espionage and conquest
+# with; tests/test_bots_logic.py checks them against content/packs/core, the simulator re-reads them from its pack.
+SHADE_COST_ALLOY = 25
+SHADE_UPKEEP_FOOD = 1
+# mission short id -> (whisper needed, rounds_max, alloy once, provisions per round)
+MISSIONS: dict[str, tuple[int, int, int, int]] = {"observe": (1, 5, 0, 1), "ledger": (1, 3, 0, 1),
+                                                  "read_orders": (2, 3, 0, 2), "sabotage": (2, 4, 8, 1)}
+# disposition short id -> provisions per point of conquest value (before the faction multiplier)
+DISPOSITION_FOOD: dict[str, int] = {"subjugate": 5, "exterminate": 0, "raid": 0, "liberate": 0}
+CONQUEST_VALUE: dict[str, int] = {"capital": 3}     # province type short id -> value (others 1)
+# faction short id -> disposition short id -> cost multiplier
+DISPOSITION_COST_MUL: dict[str, dict[str, float]] = {"growth": {"subjugate": 1.2}}
+
 
 def short_id(full_id: str) -> str:
     """`core:assault` -> `assault`; short IDs pass through unchanged."""
@@ -49,6 +63,13 @@ class Province:
     buildings: tuple[str, ...]  # short building ids
     neighbors: tuple[str, ...]
     fortified: bool
+    status: Mapping[str, Any] = field(default_factory=dict)  # public conquest status (occupied, ruined_until, ...)
+    origin: str | None = None  # the seat that started with it (conquest games)
+
+    @property
+    def occupied_by(self) -> str | None:
+        occ = self.status.get("occupied") if self.status else None
+        return str(occ.get("by")) if isinstance(occ, Mapping) and occ.get("by") else None
 
     @property
     def kind(self) -> str:
@@ -78,6 +99,43 @@ class StateView:
     techs: tuple[str, ...] | None = None  # own researched techs (short ids); None: the game has no techs
     researching: str | None = None  # own active tech (short id)
     artifacts: tuple[str, ...] = ()  # own artifacts (short ids)
+    # stage 3: None when the system is off in this game
+    espionage: Mapping[str, Any] | None = None  # you.espionage: whisper, mirrors, shades_max, active_limit, shades
+    conquest_policy: str | None = None
+    conquest: bool = False
+    claims: tuple[Mapping[str, Any], ...] = ()
+    scores: Mapping[str, int] = field(default_factory=dict)  # seat -> public score
+
+    @property
+    def whisper(self) -> int:
+        return int((self.espionage or {}).get("whisper", 0))
+
+    @property
+    def shades(self) -> list[Mapping[str, Any]]:
+        return list((self.espionage or {}).get("shades") or [])
+
+    def turns_left(self) -> int:
+        """Turns still to play, this one included (0 when the server did not say the limit)."""
+        return max(0, self.turn_limit - self.turn + 1) if self.turn_limit else 0
+
+    def free_food(self) -> int:
+        """Provisions free to spend: the stock less two turns of a food deficit (never starve the army for it)."""
+        deficit = -min(0, (self.net_income or {}).get(FOOD_RESOURCE, 0))
+        return max(0, self.resource(FOOD_RESOURCE) - 2 * deficit)
+
+    def disposition_food(self, disposition: str, province: Province) -> int:
+        """Provisions a disposition of `province` costs this seat (rounded half up, as the engine does)."""
+        base = DISPOSITION_FOOD.get(disposition, 0) * CONQUEST_VALUE.get(province.kind, 1)
+        mul = DISPOSITION_COST_MUL.get(self.faction, {}).get(disposition, 1.0)
+        return int(math.floor(base * mul + 0.5))
+
+    def full_provinces(self) -> list[Province]:
+        """Own provinces where building and recruiting work: not in Occupation, not ruins (conquest games)."""
+        return [p for p in self.own_provinces() if p.occupied_by is None and not (p.status or {}).get("ruined_until")]
+
+    def own_occupations(self) -> list[Province]:
+        """Own provinces held in Occupation (taken from a seat, no fate decided yet)."""
+        return [p for p in self.own_provinces() if p.occupied_by is not None and p.occupied_by in self.me]
 
     @property
     def research_enabled(self) -> bool:
@@ -131,7 +189,7 @@ class StateView:
 
 def farm_site(view: StateView) -> Province | None:
     """Where a new farm goes (an agri world first), or None when every own province has one."""
-    sites = [p for p in view.own_provinces() if "farm" not in p.buildings]
+    sites = [p for p in view.full_provinces() if "farm" not in p.buildings]
     preferred = [p for p in sites if p.kind == FARM_SITE]
     return (preferred or sites or [None])[0]
 
@@ -163,6 +221,8 @@ def parse_state(payload: dict[str, Any], me: set[str] | frozenset[str]) -> State
             buildings=tuple(short_id(b) for b in buildings),
             neighbors=tuple(sorted(neighbors)),
             fortified=bool(record.get("fortified", False)),
+            status=dict(record.get("status") or {}),
+            origin=str(record["origin"]) if record.get("origin") else None,
         )
 
     resources = _resources(player.get("resources", state.get("resources", {})))
@@ -187,6 +247,12 @@ def parse_state(payload: dict[str, Any], me: set[str] | frozenset[str]) -> State
         techs=tuple(short_id(str(t)) for t in player["techs"]) if isinstance(player.get("techs"), list) else None,
         researching=_researching(player.get("researching")),
         artifacts=tuple(short_id(str(a)) for a in player.get("artifacts") or []),
+        espionage=dict(player["espionage"]) if isinstance(player.get("espionage"), dict) else None,
+        conquest_policy=short_id(str(player["conquest_policy"])) if player.get("conquest_policy") else None,
+        conquest="conquest_policy" in player or "claims" in state,
+        claims=tuple(dict(c) for c in state.get("claims") or [] if isinstance(c, dict)),
+        scores={str(p.get("seat")): int(p.get("score") or 0) for p in state.get("players") or []
+                if isinstance(p, dict) and p.get("seat") is not None},
     )
 
 

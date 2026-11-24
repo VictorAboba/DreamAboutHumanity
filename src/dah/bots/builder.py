@@ -9,12 +9,26 @@ Stage 2: it prefers economic factions (litany, ash_choir, growth) and artifacts 
 (then war: fortification), lays one temple once it has a mine (when the game has techs), recruits one of its faction's
 unique unit per turn before assault, and puts a citadel in its capital once fortification is known and alloy is
 plenty.
+Stage 3 (docs/SPY_AND_CONQUEST.md section 7): after the economy techs it researches the «Зеркала» branch
+(mirror_wards, watch_drill); from turn 3 it hires one Shade (with 35 alloy, before building) and reads the ledger of its
+strongest neighbour. Fates: the policy is subjugate while 15 provisions are free; it subjugates the occupations it can
+pay for and holds the rest (one unit stays in each) until it can.
 """
 
 from __future__ import annotations
 
+from dah.bots import conquest as cq
+from dah.bots import spy
 from dah.bots.base import Bot, DiplomacyApi, Estimator, Order
-from dah.bots.tactics import capital_of, fortify_orders, garrison, plan_moves, recruit_site, unique_recruit
+from dah.bots.tactics import (
+    capital_of,
+    fortify_orders,
+    garrison,
+    merge_reserved,
+    plan_moves,
+    recruit_site,
+    unique_recruit,
+)
 from dah.bots.view import (
     BUILD_RESOURCE,
     BUILDING_COST_ALLOY,
@@ -43,13 +57,16 @@ UNIQUE_PER_TURN = 1
 CITADEL = "citadel"
 CITADEL_TECH = "fortification"
 CITADEL_SPARE = 12  # alloy left after a citadel (one assault)
+SHADE_FROM_TURN = 3
+SHADE_MIN_ALLOY = 35
+LEDGER_ROUNDS = 2
 
 
 class BuilderBot(Bot):
     name = "builder"
     faction_style = ("litany", "ash_choir", "growth", "captains", "synclite")
     artifact_likes = ("ore_vein", "tithe_chalice", "citadel_keystone", "ancient_blueprint", "smith_relic")
-    branch_priority = ("industry", "war", "mystery", "logistics")
+    branch_priority = ("industry", "mirrors", "war", "mystery", "logistics")
     tech_first = ("deep_drilling", "agro_vats", "fortification")
 
     def __init__(self, seat: str, seed: int) -> None:
@@ -73,6 +90,9 @@ class BuilderBot(Bot):
                 api.respond_pact(str(prop["id"]), "accept")
 
     def action_orders(self, view: StateView, estimate: Estimator) -> list[Order]:
+        extra, food_held, alloy_held = self._stage3(view)
+        full = view
+        view = spy.food_view(view, food_held, alloy_held)
         orders: list[Order] = []
         alloy = view.resource(BUILD_RESOURCE)
         upkeep = total_upkeep(view)
@@ -105,9 +125,36 @@ class BuilderBot(Bot):
             )
 
         threshold = LATE_WIN if late else SURE_WIN
-        moves = plan_moves(view, estimate, threshold, self.rng, garrison(capital_of(view), self.garrison),
-                           lambda target: not view.is_partner(target.owner))
-        return orders + moves + fortify_orders(view, moves)
+        keep = garrison(capital_of(view), self.garrison)
+        if view.conquest:
+            keep = merge_reserved(keep, cq.occupation_garrison(view))
+        moves = plan_moves(view, estimate, threshold, self.rng, keep, lambda target: not view.is_partner(target.owner))
+        return orders + moves + fortify_orders(full, moves) + extra
+
+    def _stage3(self, view: StateView) -> tuple[list[Order], int, int]:
+        """Fates, policy, the Shade and its ledger mission: (orders, provisions held, alloy held)."""
+        out: list[Order] = []
+        food, alloy = view.free_food(), view.resource(BUILD_RESOURCE)
+        if view.conquest:
+            fates, spent = cq.occupation_orders(view, food)
+            food -= spent
+            policy = cq.policy_order(view, food)
+            out += fates + ([policy] if policy else [])
+        if view.espionage is not None:
+            hire = spy.hire_order(view, self.memory, from_turn=SHADE_FROM_TURN, max_shades=1, alloy=alloy,
+                                  min_alloy=SHADE_MIN_ALLOY)
+            if hire is not None:
+                out.append(hire)
+                alloy -= spy.shade_cost()
+            idle = spy.idle_shades(view)
+            target = spy.strongest_neighbour(view)
+            if idle and target is not None and spy.can_start(view):
+                got = spy.spy_order(view, idle[0], "ledger", target, LEDGER_ROUNDS, alloy, food)
+                if got is not None:
+                    out.append(got[0])
+                    alloy -= got[1]
+                    food -= got[2]
+        return out, view.free_food() - food, view.resource(BUILD_RESOURCE) - alloy
 
     def _choose_build(self, view: StateView, upkeep: int) -> tuple[Province, str] | None:
         return choose_build(view, upkeep, temple=True)
@@ -127,7 +174,7 @@ def choose_build(view: StateView, upkeep: int, *, temple: bool = False) -> tuple
     and the stock below 2 x FOOD_TURNS turns of upkeep; without net income known: the stock below FOOD_TURNS turns of
     upkeep, or farms lag behind mines), else a mine. With `temple` (and techs in the game), one temple comes before
     the next mine once the seat has a mine and food is not short."""
-    own = view.own_provinces()
+    own = view.full_provinces()
     if (temple and view.research_enabled and not any(RESEARCH_BUILDING in p.buildings for p in own)
             and any("mine" in p.buildings for p in own)):
         hungry_now = view.resource(FOOD_RESOURCE) < upkeep * FOOD_TURNS

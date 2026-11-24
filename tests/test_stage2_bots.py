@@ -108,7 +108,9 @@ def test_core_names_the_bots_use_exist():
         assert set(cls.faction_style) <= shorts["factions"]
         assert set(cls.artifact_likes) <= shorts["artifacts"]
         assert set(cls.tech_first) <= shorts["techs"]
-        assert set(cls.branch_priority) == shorts["branches"]
+        # core 0.4.0: «Зеркала» exists only with espionage; every branch without it must be ranked
+        plain = {b.split(":")[-1] for b in build_ruleset(None, "blitz_test").branches}
+        assert plain <= set(cls.branch_priority) <= shorts["branches"]
 
 
 # ---------------------------------------------------------------- stage-2 orders from a state

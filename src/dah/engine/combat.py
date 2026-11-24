@@ -138,7 +138,7 @@ def effective_defense_mul(ruleset: Ruleset, defense_mul: float, attacker_units: 
 
 def strength(ruleset: Ruleset, force: Force, enemy_units: Mapping[str, int], *, defending: bool,
              faction: Any = None, defense_mul: float = 1.0, fortified: bool = False,
-             enemy_faction: Any = None) -> float:
+             enemy_faction: Any = None, attack_mul: float = 1.0) -> float:
     """Deterministic part of the formula (without the random factor). `faction`/`enemy_faction` are stat keys
     (faction id or techs.Profile). A defender owned by a seat counts `garrison` (+defense in its own province);
     the attacker's `siege` and `ignore_fortify` units weaken the province multiplier and the fortify bonus."""
@@ -161,6 +161,8 @@ def strength(ruleset: Ruleset, force: Force, enemy_units: Mapping[str, int], *, 
             ignore, _ = attack_shares(ruleset, enemy_units, enemy_faction)
             bonus = ruleset.stat("combat.fortify_bonus", faction)
             total *= 1.0 + (bonus if ignore == 0 else bonus * (1.0 - ignore))
+    elif attack_mul != 1.0:      # a claim on the province attacked (SPY_AND_CONQUEST.md 3.5), next to "hasty"
+        total *= attack_mul
     return total
 
 
@@ -182,12 +184,14 @@ def pick_losses(ruleset: Ruleset, units: Mapping[str, int], n: int) -> dict[str,
 
 
 def fight(ruleset: Ruleset, a: Force, b: Force, rng: random.Random, *, b_defending: bool,
-          factions: Mapping[str | None, str | None], defense_mul: float = 1.0, fortified: bool = False) -> FightResult:
-    """Resolve one battle; `a` always attacks. Applies losses to both forces in place."""
-    sa = strength(ruleset, a, b.units, defending=False, faction=factions.get(a.owner))
+          factions: Mapping[str | None, str | None], defense_mul: float = 1.0, fortified: bool = False,
+          a_mul: float = 1.0, b_mul: float = 1.0) -> FightResult:
+    """Resolve one battle; `a` always attacks. Applies losses to both forces in place. `a_mul`/`b_mul`: attack
+    multipliers of the sides (claims; `b_mul` only when `b` attacks too)."""
+    sa = strength(ruleset, a, b.units, defending=False, faction=factions.get(a.owner), attack_mul=a_mul)
     sb = strength(ruleset, b, a.units, defending=b_defending, faction=factions.get(b.owner),
                   defense_mul=defense_mul if b_defending else 1.0, fortified=fortified and b_defending,
-                  enemy_faction=factions.get(a.owner))
+                  enemy_faction=factions.get(a.owner), attack_mul=b_mul)
     sa *= rng.uniform(0.9, 1.1)
     sb *= rng.uniform(0.9, 1.1)
     a_won = sa > sb

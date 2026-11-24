@@ -55,7 +55,7 @@
 | POST | `/v1/orders/validate` | `{"orders": [...]}` | `results[{ok, cp_cost, reason?, message?, warning?}]`, `ok_count` |
 | POST | `/v1/orders` | `{"orders": [...], "mode"}` | `accepted[]`, `rejected[]`, `orders_hash`, `cp_left`, `warnings[]?` |
 | DELETE | `/v1/orders/{id}` | | `order_id`, `cp_cost`, `orders_hash`, `cp_left` |
-| PATCH | `/v1/orders/{id}` | `{"units"?, "unit"?, "count"?, "to"?, "pact"?}` | то же, изменённый `order`, `warning?` |
+| PATCH | `/v1/orders/{id}` | `{"units"?, "unit"?, "count"?, "to"?, "pact"?, "feint"?, "disposition"?}` | то же, изменённый `order`, `warning?` |
 | POST | `/v1/estimate` | см. [Estimate](#estimate) | `win_prob`, средние потери |
 | POST | `/v1/messages` | `{"to": [ник, ...] \| "all", "text"}` | `message_id` (счёт своих отправленных), `inbox_id` (номер во входящих, для `since`), `left{}` |
 | GET | `/v1/inbox` | `?since=` | `messages[]`, `last_id`, `text` |
@@ -72,6 +72,9 @@
 | POST | `/v1/setup/artifacts` | `{"ids": [артефакт, ...]}` (также `artifacts`, `artifact`) | `artifacts[]`, `confirm_hash`, `text` |
 | GET | `/v1/techs` | `?full=true` | см. [Технологии](#технологии) |
 | GET | `/v1/describe` | `?id=` (или `name=`) | `kind`, `id`, `name`, поля сущности, `text`; `also[]` при нескольких совпадениях |
+| GET | `/v1/spies` | | `text` (≤ 600), см. [Шпионаж и завоевание](#шпионаж-и-завоевание) |
+| GET | `/v1/intel` | `?turn=&shade=&report=` (также `report_id`) | `turn`, `text` (≤ 1500; одно донесение — ≤ 1200) |
+| POST | `/v1/estimate/mission` | `{"mission", "target", "rounds"?, "shade"?, "assume_mirrors"?}` | `text` (≤ 400), `per_round[{success, detect}]`, `survive`, `any`, `S`, `C_loc`, `D`, `V`, `rounds`, `place` |
 
 ### Фаза старта
 
@@ -121,7 +124,7 @@ missing[], requires[], requires_any[], requires_tier, factions[], effects[], unl
 `PATCH /v1/orders/{id}` с `{"tech": "..."}`. Отказы: `NOT_AVAILABLE`, `ALREADY_RESEARCHED`, `UNKNOWN_ID`, `INVALID`.
 
 `GET /v1/rules` без `topic` — краткое ядро (≤ 6000 символов) с оглавлением; `?topic=techs|factions|artifacts|setup|
-pacts|combat|units|buildings|abilities|...` — раздел целиком из контента партии; ID или название контента — его
+pacts|spying|conquest|combat|units|buildings|abilities|...` — раздел целиком из контента партии; ID или название контента — его
 описание; неизвестная тема — только список тем.
 
 ### Фаза и ожидание
@@ -210,6 +213,54 @@ pacts|combat|units|buildings|abilities|...` — раздел целиком из
 своей провинции в `province_type` — ещё её оборона от зданий), на другой — публичная фракция игрока `opponent` (ник),
 без него — фракция владельца чужой провинции, заданной ID, или базовые числа. В ответе ещё `side` и `note` (за
 какую сторону учтены твои характеристики и почему).
+
+### Шпионаж и завоевание
+
+Подсистемы этапа 3 ([SPY_AND_CONQUEST.md](../SPY_AND_CONQUEST.md)) включаются сценарием или хостом (`dah game create
+--espionage on|off --conquest on|off`). Пока подсистема выключена, её приказы отвечают `NOT_AVAILABLE`, а маршруты
+шпионажа — `409 NOT_AVAILABLE` («шпионаж выключен в этой партии»); ответы прочих маршрутов не меняются.
+
+**Шпионаж.** `list_spies`, `get_intel`, `estimate_mission` есть в `allowed` всех фаз, кроме фазы старта.
+- `GET /v1/spies` — `text`: `S1 C1 · Теней 1/2, на заданиях 1/1 · найм 25 Сплав, +1 Провиант/ход`, строка на Тень
+  (`s1 Наблюдение → P07 1/2 K1 V0 — последнее: #r4`; потерянная в этом ходу — `s3: нет связи, потеряна`), миссии
+  одной строкой, в П2 хода поимки — `ПОЙМАНА У ТЕБЯ: …`.
+- `GET /v1/intel` — донесения разведсреза хода `turn` (по умолчанию последнего прошедшего), свёрнуто; `shade` —
+  одной Тени; `report` — одно донесение целиком. Каждый вызов пишет в журнал `intel_read` (`via: get_intel`).
+  `format=json` (для программ и ботов) отдаёт то же данными: `intel: {turn, reports [{id, shade, mission, behavior,
+  target, round, rounds, turn, facts}], rounds [{shade, mission, target, outcome, report_id?}], caught [{province,
+  mission, target, owner}], lost [id]}` — только свои донесения (интервалы `facts`, правды нет), пойманные у себя Тени
+  (хозяин — лишь при атрибуции) и свои потерянные; журнал пишет `intel_read` с `format: json`.
+- `POST /v1/estimate/mission` — точные шансы задания (без Монте-Карло). Миссия — ID или название, цель — провинция
+  или ник; срок вне границ обрезается, текст говорит об этом. Чужое C скрыто: без `assume_mirrors` берётся база
+  набора; армия в непросматриваемой провинции считается присутствующей. Неверные аргументы — `400 INVALID`.
+- Приказы: `{"kind":"hire_shade"}` (только Д), `{"kind":"spy","shade":"s1","mission":"observe","target":"P07",
+  "rounds":2}`, `{"kind":"recall","shade":"s1"}`, `move` с `"feint": true` (ложная запись, только Д). Принимаются
+  и другие написания: вид `hire`/`hire_spy`, `mission`/`spy_mission`, `recall_shade`; поля `shade_id`, `type`
+  (миссия), `province`/`player`/`seat` (цель), `turns`/`duration` (срок); Тень — `"s1"`, `"1"` или `1`. Причины
+  отказа: `NO_CAPITAL`, `SHADE_LIMIT`, `SHADE_BUSY`, `TOO_MANY_MISSIONS`, `MISSION_LOCKED`, `BAD_TARGET`,
+  `BAD_ROUNDS`. Записи `hire_shade`/`spy`/`recall` из Д исполняет разведсрез на закрытии Д: в П2 их `DELETE` и
+  `PATCH` — `409 PHASE_LOCKED`. В П2 новый `spy` стоит `p2.cost.spy` ОК, `recall` — `p2.cost.recall`; `PATCH`
+  `{"feint": false}` превращает ложную запись в настоящую по цене новой атаки.
+- При открытии П2 каждое затронутое место получает одну запись входящих `[ИГРА] Разведсрез хода N: …`
+  (`event: "recon"`, ≤ 200 символов); `/v1/state` в П2 добавляет строку `ДОНЕСЕНИЯ:` (и пишет `intel_read` с
+  `via: get_state`), а `/v1/phase` и `/v1/wait_phase` в П2 — `intel: {reports, caught}` (донесений этого хода, Теней,
+  пойманных у места) и хвост `донесений: N` в `text`.
+
+**Завоевание.** Отдельного маршрута нет.
+- Приказы `{"kind":"dispose","province":"P07","disposition":"subjugate","to"?:ник}` и
+  `{"kind":"policy","disposition":"subjugate" | null}` идут через `/v1/orders` (Д и П2, 0 ОК; в П1 — только
+  проверка). Судьба — ID, короткий ID или название; `to` — ник или место. Другие написания: вид
+  `fate`/`decision`/`disposition`, `conquest_policy`; поля `fate`/`decision` (судьба), `target` (провинция),
+  `recipient`/`player` (получатель), у политики — `policy`. `PATCH` правит `disposition` и `to` у `dispose` и
+  `disposition` у `policy` (`null` снимает политику). Причины: `BAD_TARGET`, `NOT_OCCUPIED`, `OCCUPIED`, `RUINED`,
+  `NO_RECIPIENT`.
+- `/v1/state`: текст — метки `[оккуп. Ник]`, `[пепелище до хN]`, `[разорена]` и разделы `ОККУПАЦИЯ`, `ПРИТЯЗАНИЯ`,
+  `ПОЛИТИКА`; JSON — `provinces[].status` (`occupied`, `ruined_until`, `ravaged_until`), `provinces[].origin`
+  (чья провинция исконно), `you.conquest_policy`, `claims[]`. При шпионаже JSON даёт `you.espionage` — свои S, C,
+  `shades_max`, `active_limit` и свои Тени (`shades[]`: id, xp, status, hired_turn, mission); чужих — никогда.
+- Отчёт хода: `captured` (`status`; своим сторонам ещё `mode`), `disposition`, `occupation_revolt`,
+  `claim_created`, `claim_ended`, `ruin_ended` — публично; `policy_set`, `policy_unaffordable`, `dispose_failed` —
+  только своему месту.
 
 ### Ready
 

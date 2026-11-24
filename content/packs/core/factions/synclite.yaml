@@ -9,6 +9,7 @@ bonuses:
   - {effect: modify, target: command_points, op: add, value: 1}
   - {effect: modify, target: p2.cancel_refund, op: add, value: 0.15}
   - {effect: modify, target: tech.branch.mystery.cost_mul, op: mul, value: 0.6}
+  - {effect: modify, target: spy.whisper, op: add, value: 1}        # espionage only: Read Orders from turn 1
 penalties:
   - {effect: modify, target: unit.armor.attack, op: add, value: -1}
   - {effect: modify, target: unit.artillery.attack, op: add, value: -1}

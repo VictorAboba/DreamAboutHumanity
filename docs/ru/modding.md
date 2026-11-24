@@ -188,6 +188,33 @@ engine_api: "^1"        # версия API движка — 1
 | `province.income_mul.<рес>` | float 0..5 | 1.0 | множитель дохода провинции |
 | `province.recruit_discount` | float 0..0.9 | 0 | скидка найма, на единицу, округление в пользу игрока |
 
+## Контент этапа 3: шпионаж и завоевание
+
+Точное описание — разделы 1, 2.2, 3.3 и 5 [спецификации этапа 3](../SPY_AND_CONQUEST.md); `content/packs/core` 0.4.0
+использует все поля ниже. Всё необязательно: пак без них или сценарий с выключенными системами хэшируется и
+играется как до этапа 3.
+
+- **Выключатели.** У сценария `systems: {espionage: bool, conquest: bool}` (по умолчанию оба выключены); хост может
+  переключить их для партии (`dah game create --espionage/--conquest`). Пока система выключена, сущности с
+  `requires_system: espionage|conquest` (ветки, технологии, здания, артефакты) убираются из набора правил (скрытая
+  ветка скрывает свои технологии), а строки `modify` по её характеристикам — из технологий, артефактов, зданий и
+  фракций.
+- **`espionage/*.yaml`** (нужен при включённом шпионаже): необязательный `config` — `shade {name, cost, upkeep}` и
+  `ward {cost}` (3b) — и `missions: [...]`. У миссии: `id`, `name`, `behavior` (`observe_province`, `read_ledger`,
+  `read_orders`, `sabotage`), `target` (`province`, `owned_province`, `seat`), `difficulty`, `rounds: [min, max]`,
+  `requires: {whisper, tech?}`, `cost` (разово), `cost_per_round`, `params` (у саботажа: `deny_fortify`,
+  `defense_mul`, `income_mul`), `description`.
+- **`dispositions/*.yaml`** (нужен при включённом завоевании): судьбы захваченной провинции — `id`, `name`,
+  `behavior` (`annex`, `raze` с `params.ruin_turns`, `raid` с `params.ravage_turns`, `release`), `cost`, `loot`,
+  `description`.
+- **`conquest_value`** (1..5, по умолчанию 1) у типа провинции умножает цену и добычу судеб (у столицы в `core` — 3).
+- **Характеристики** (только при включённой системе): `spy.*` (`spy.whisper`, `spy.mirrors`, `spy.shades_max`,
+  `spy.rounds_bonus`, `spy.detect.army`, `spy.attribution.base`, `spy.mission.<id>.difficulty|max_rounds`,
+  `spy.shade.cost|upkeep.<res>` и др.), `province.mirrors`, `p2.cost.spy`, `p2.cost.recall`, `feint.cp_cost`,
+  `disposition.<id>.cost_mul|loot_mul`, `conquest.claim_turns`, `conquest.claim_bonus`, `conquest.loot_cooldown`.
+  Полная таблица с диапазонами — раздел 1.2 спецификации; числа партии — `rules(topic="spying")` и
+  `rules(topic="conquest")`.
+
 ## Проверка
 
 ```sh

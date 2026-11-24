@@ -16,6 +16,7 @@
   short: столица
   income: {alloy: 3, provisions: 2, creed: 3}
   defense_mul: 1.25
+  conquest_value: 3     # stage 3: fates of a captured capital cost and yield x3
 - id: shrine
   name: {ru: Святыня, en: Shrine}
   short: свят.

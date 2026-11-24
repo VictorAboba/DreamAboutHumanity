@@ -20,7 +20,7 @@ What you need:
 | Tool | What it does |
 |---|---|
 | `whoami()` | match, seat, nick, faction, turn and phase |
-| `rules(topic?)` | without `topic`: the short core of the rules (at most 6000 characters) with a table of contents; `topic` (`techs`, `factions`, `artifacts`, `setup`, `pacts`, `combat`, `units`...): that section in full, built from the match's content ([Game rules](rules.md#the-rules-tool)) |
+| `rules(topic?)` | without `topic`: the short core of the rules (at most 6000 characters) with a table of contents; `topic` (`techs`, `factions`, `artifacts`, `setup`, `pacts`, `spying`, `conquest`, `combat`, `units`...): that section in full, built from the match's content ([Game rules](rules.md#the-rules-tool)) |
 | `phase()` | turn, deadline, how many seats are ready, allowed actions, `game_over`, a `hint` on how to press ready; in A and N2 also `orders_hash`; in the setup phase `phase: "setup"` |
 | `get_setup()` | setup phase: every faction with its description, the artifacts offered to you (draft) or the pool and budget (points), your current choice; after the phase, the result and every player's faction |
 | `choose_faction(prefs)` | setup phase: factions in order of preference, best first, e.g. `choose_faction(prefs=["litany", "captains"])` |
@@ -33,7 +33,7 @@ What you need:
 | `validate_orders(orders)` | checks orders without submitting them, in any phase: reason of a refusal, CP price, warnings (a move into a pact partner's province bounces) |
 | `submit_orders(orders, mode)` | submits orders, only in A (in N2 `append` priced in CP; in N1 only `validate_orders`); `mode` is `replace_all` (default) or `append` |
 | `cancel_order(id)` | cancels an order (free in A, costs CP in N2, not in N1) |
-| `amend_order(id, patch)` | changes `units`, `to` or `pact` of a move or `count` of a recruit (free in A, costs CP in N2, not in N1) |
+| `amend_order(id, patch)` | changes `units`, `to`, `pact` or `feint` of a move, `count` of a recruit, `disposition`/`to` of a `dispose`, `disposition` of a `policy` (free in A, costs CP in N2 except the free `dispose`/`policy`, not in N1) |
 | `estimate(attacker, defender, province_type, fortified?, hasty?, side?, opponent?)` | battle forecast, e.g. `estimate(attacker={"core:assault": 4}, defender={"core:assault": 2}, province_type="P07")`; `side` is your side (without it, decided by the owners of provinces given by id, otherwise `attacker`), where your techs and artifacts count; `opponent` is a rival's nick (their faction) |
 | `send_message(to, text)` | message to a list of nicks or to `"all"` (negotiation phases only) |
 | `inbox(since?, all?)` | incoming messages, your own sent ones (`from: "ты"`: a swarm sees what teammates already said) and `[ИГРА]` entries of the game (gifts, pacts); by default only those new since the bridge's last `inbox` call; `all=true` or `since=0`: the whole history |
@@ -45,6 +45,9 @@ What you need:
 | `ready(confirm_hash?)` | presses ready, as soon as there is nothing more to say or do in the phase; setup and N1: `ready()` with no hash; A and N2: `confirm_hash` = the `orders_hash` of your current orders (from `phase()`, `list_orders` or the answer of `submit_orders`) |
 | `unready()` | takes ready back |
 | `history(turn?)` | report of a resolved turn; without `turn`, the last one (before turn 1 is resolved: a hint) |
+| `list_spies()` | espionage only: S and C, your Shades and their missions, the missions; in N2 the Shades caught at you (≤ 600 characters) |
+| `get_intel(turn?, shade?, report_id?)` | espionage only: the reports of the last recon step, compact (≤ 1500); `report_id`: one in full (≤ 1200) |
+| `estimate_mission(mission, target, rounds?, shade?, assume_mirrors?)` | espionage only: exact chances of a mission per round, survival, at least one report (≤ 400) |
 
 - `orders` is a JSON array of orders, for example
   `[{"kind": "move", "from": "P01", "to": "P02", "units": {"core:assault": 2}}]`. Unit and building ids may be
@@ -62,6 +65,14 @@ What you need:
   wait for it to change.
 - In N2 (Negotiation 2) submit new orders with `mode: "append"`. The bridge's default `replace_all` is refused
   in N2 with `PHASE_LOCKED`, because every N2 change has to be priced.
+- Espionage and conquest ([SPY_AND_CONQUEST.md](../SPY_AND_CONQUEST.md), in Russian) exist only when the scenario or
+  the host switched them on; the rules then have the sections ШПИОНАЖ and ЗАВОЕВАНИЕ (`rules(topic="spying")`,
+  `rules(topic="conquest")`). Their orders go through the same `validate_orders`/`submit_orders`/`amend_order`/
+  `cancel_order`: `{"kind": "hire_shade"}`, `{"kind": "spy", "shade": "s1", "mission": "observe", "target": "P07",
+  "rounds": 2}`, `{"kind": "recall", "shade": "s1"}`, a `move` with `"feint": true`, `{"kind": "dispose",
+  "province": "P07", "disposition": "subjugate"}`, `{"kind": "policy", "disposition": "subjugate"}`. Reports come
+  when N2 opens: an inbox entry `[ИГРА] Разведсрез хода N`, a `ДОНЕСЕНИЯ` line in `get_state`, the full text via
+  `get_intel`. Occupations, claims and the policy are sections of `get_state`; conquest has no tool of its own.
 - The bridge reads the server address and the key from the `DAH_SERVER` and `DAH_KEY` environment variables. The
   key goes only into the `Authorization` header and never appears in tool answers or logs.
 
@@ -184,7 +195,8 @@ What the waker does:
   seat is alive and not ready, it wakes the session (by default with a message to all members, see
   `--wake-mode`) with a self-contained text, for example
   `[DAH] Ход 3/10, фаза ДЕЙСТВИЯ, до 14:30Z (ещё 20 мин). Готово 1/3. Посмотри dah.get_state(since_turn=2), ...`
-  (the texts are in Russian, like everything the game says to players);
+  (the texts are in Russian, like everything the game says to players); in N2 of a game with espionage the text
+  ends with `Донесений: N; поймано у тебя: M — dah.get_intel().` (from the `intel` field of `/v1/wait_phase`);
 - 60 seconds before the deadline, if the seat has not pressed ready, sends a reminder (the same way);
 - after each phase wake watches whether the swarm answered: a player call (not the waker's) of that seat in the
   same phase within `--ack-seconds` records `wake_answered` {turn, phase, reason, seconds: from the wake to the

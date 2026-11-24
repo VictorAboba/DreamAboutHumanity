@@ -37,6 +37,13 @@ sees each seat's choice so far). Snapshots taken during the setup phase are of t
 cached (turn 1 is rebuilt when the phase closes). Every level sees each seat's faction once the setup phase has closed
 (as the players do); the full levels also see artifacts, techs, research progress and the active tech, the delayed
 spectator only the number of techs each seat has researched. Setup choices are never shown to the delayed spectator.
+
+Stage 3 (docs/SPY_AND_CONQUEST.md section 8): with conquest on, every level sees the public marks of provinces
+(`status`: occupied {by, from, since}, ruined_until, ravaged_until), the claims and the public fates, revolts, claims
+and ruins in the feed; the full levels also see each seat's conquest policy and the fates with prices, loot and source.
+Espionage is private: the delayed spectator sees only «саботаж в P07» without nicks, never Shades, missions or captures;
+the full levels see each seat's Shades (count, missions) and the turn's captures (`shade_captured` with the owner and
+whether the victim learned it) next to the sabotage with its author.
 """
 
 from __future__ import annotations
@@ -56,6 +63,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, Response
 
 from dah.engine import GameState, TurnReport, scores, stat_key
+from dah.engine import conquest as cq
 from dah.engine import diplomacy as dip
 from dah.engine.techs import public_techs
 from dah.engine.view import PHASE_LABELS, event_text
@@ -69,7 +77,9 @@ TIMINGS_MIN_AGE = 5.0  # seconds: a live game's journal changes on nearly every 
 LEVEL_LABELS = {LIVE: "Админ (вживую)", DELAYED: "Зритель (задержка 1 ход)", REVEALED: "Партия окончена — всё открыто"}
 # Events that concern only their own seat: shown with the seat's nick in front.
 _PERSONAL_KINDS = frozenset({"economy", "starvation", "recruited", "build_started", "build_done", "order_rejected",
-                             "retreat", "retreat_lost", "fortify_broken", "research_started", "tech_completed"})
+                             "retreat", "retreat_lost", "fortify_broken", "research_started", "tech_completed",
+                             "feint", "mission_started", "mission_end", "strike_cancelled", "policy_set",
+                             "policy_unaffordable", "dispose_failed"})
 WATCH_PAGE = Path(__file__).with_name("watch.html")
 _SCRIPT_RE = re.compile(r"<script>(.*?)</script>", re.S)
 
@@ -312,10 +322,46 @@ def _event_entry(e: dict[str, Any], game: Game, state: GameState) -> dict[str, A
 def _public_events(report: dict[str, Any], game: Game, state: GameState) -> list[dict[str, Any]]:
     public = report.get("public", {})
     events = [{"kind": "captured", "province": c["province"], "from": c["from"], "to": c["to"],
+               **({"status": c["status"]} if c.get("status") else {}),
                "seats": sorted(s for s in (c["from"], c["to"]) if s)} for c in public.get("ownership_changes", [])]
     events += [{"kind": "eliminated", "province": None, "seat": s, "seats": [s]} for s in public.get("eliminated", [])]
     events += [dip.public_event(e) for e in public.get("diplomacy", [])]
+    # conquest (SPY_AND_CONQUEST.md 2.7, 8): fates, revolts, claims, ruins in their public form (no prices, loot or
+    # sources); captures are the ownership changes above
+    events += [e for e in public.get("conquest", []) if e.get("kind") != "captured"]
+    # espionage (SPY_AND_CONQUEST.md 8): only «саботаж в P07», without nicks (the strike shows in the broken fortify);
+    # no Shades, missions or captures ever
+    events += [{"kind": "sabotage", "province": e.get("province"), "seats": []}
+               for e in report.get("events", []) if e.get("kind") == "sabotage"]
     return [_event_entry(e, game, state) for e in events]
+
+
+def _capture_events(game: Game, turn: int, state: GameState) -> list[dict[str, Any]]:
+    """Full levels only: the Shades caught at the recon step of `turn` (owner, victim, whether it was attributed)."""
+    rep = game.gdir.load_turn("recon", turn) if game.ruleset.system("espionage") else None
+    nick = {s: p.nick for s, p in state.players.items()}
+    out = []
+    for c in (rep or {}).get("caught", []):
+        victim = nick.get(c.get("victim"), "нейтральная провинция") if c.get("victim") else "нейтральная провинция"
+        known = "хозяин установлен" if c.get("attributed") else "хозяин не установлен"
+        mission = c.get("mission", "?").rsplit(":", 1)[-1]
+        out.append({"kind": "shade_captured", "province": c.get("province"), "seats": sorted(
+                    x for x in (c.get("owner"), c.get("victim")) if x), "owner": c.get("owner"),
+                    "victim": c.get("victim"), "attributed": bool(c.get("attributed")), "mission": c.get("mission"),
+                    "target": c.get("target"),
+                    "text": f"Тень {c.get('shade')} ({nick.get(c.get('owner'), c.get('owner'))}) поймана в "
+                            f"{c.get('province')} у {victim}: {mission} → {c.get('target')}; {known}"})
+    return out
+
+
+def _shades(state: GameState, seat: str) -> list[dict[str, Any]]:
+    out = []
+    for sh in state.players[seat].shades:
+        m = sh.get("mission") or {}
+        out.append({"id": sh["id"], "status": sh.get("status"), "xp": sh.get("xp", 0),
+                    **({"mission": m.get("type"), "target": m.get("target"), "played": m.get("played"),
+                        "rounds": m.get("rounds"), "ended": m.get("ended")} if m else {})})
+    return out
 
 
 def _pacts(state: GameState, full: bool) -> list[dict[str, Any]]:
@@ -356,9 +402,13 @@ def snapshot(game: Game, cache: GameCache, turn: int, level: str) -> dict[str, A
     state = _end_state(game, turn)
     rs = game.ruleset
     sc = scores(state, rs)
+    conquest = rs.system("conquest")
+    statuses = cq.statuses_for(state) if conquest else {}
     provinces = []
     for pid, p in sorted(state.provinces.items()):
         entry: dict[str, Any] = {"id": pid, "owner": p.owner}
+        if pid in statuses:
+            entry["status"] = statuses[pid]      # public marks: occupied, ruined_until, ravaged_until
         if full:
             entry.update(units=dict(p.units), unit_total=p.unit_total(), buildings=list(p.buildings),
                          fortified=p.fortified,
@@ -383,6 +433,10 @@ def snapshot(game: Game, cache: GameCache, turn: int, level: str) -> dict[str, A
                              researching=({"tech": p.researching, "progress": p.research.get(p.researching, 0),
                                            "cost": rs.tech_cost(p.researching, stat_key(state, rs, seat))}
                                           if p.researching in rs.techs else None))
+            if conquest:
+                entry["conquest_policy"] = p.conquest_policy
+            if rs.system("espionage"):
+                entry["shades"] = _shades(state, seat)
         players.append(entry)
     events: list[dict[str, Any]] = []
     orders: dict[str, Any] | None = None
@@ -390,6 +444,7 @@ def snapshot(game: Game, cache: GameCache, turn: int, level: str) -> dict[str, A
         report = cache.report(game, turn) or {}
         if full:
             events = [_event_entry(e, game, state) for e in report.get("events", [])]
+            events += _capture_events(game, turn, state)
             raw_orders = game.gdir.load_turn("orders", turn) or {}
             orders = {s: b.get("orders", []) for s, b in raw_orders.items()}
         else:
@@ -416,6 +471,9 @@ def snapshot(game: Game, cache: GameCache, turn: int, level: str) -> dict[str, A
         "pacts": _pacts(state, full),
         "result": state.result if state.phase == GAME_OVER else None,
     }
+    if conquest:
+        out["claims"] = [{**c, "nick": state.players[c["seat"]].nick if c["seat"] in state.players else c["seat"]}
+                         for c in state.claims]
     if orders is not None:
         out["orders"] = orders
     if full:

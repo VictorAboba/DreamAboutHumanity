@@ -27,7 +27,9 @@ stdio MCP-сервер `dah`, который переводит вызовы и�
 `estimate(attacker, defender, province_type, fortified?, hasty?)`, `send_message(to, text)`, `inbox(since?, all?)`,
 `send_gift(to, resources)`, `propose_pact(to, turns?)`, `respond_pact(id, decision)`, `leave_pact(id)`, `list_pacts`,
 `ready(confirm_hash?)`, `unready`, `history(turn?)`; этап 2 (фаза старта и технологии, [TECH_AND_SETUP.md](TECH_AND_SETUP.md)):
-`get_setup`, `choose_faction(prefs)`, `choose_artifacts(ids)`, `list_techs(full?)`, `describe(id)`.
+`get_setup`, `choose_faction(prefs)`, `choose_artifacts(ids)`, `list_techs(full?)`, `describe(id)`; этап 3 (только
+в партиях со шпионажем, [SPY_AND_CONQUEST.md](SPY_AND_CONQUEST.md)): `list_spies`, `get_intel(turn?, shade?,
+report_id?)`, `estimate_mission(mission, target, rounds?, shade?, assume_mirrors?)`.
 
 - `ready` нажимай в каждой фазе, как только сказать и сделать больше нечего (фаза кончается, когда готовы все): в фазе
   старта и П1 — `ready()` без `confirm_hash` (в П1 приказов нет, хэш не проверяется); в Д и П2 —
@@ -36,8 +38,16 @@ stdio MCP-сервер `dah`, который переводит вызовы и�
 
 - `rules()` — краткое ядро правил (≤ 6000 символов) с оглавлением; `rules(topic="techs")` — раздел целиком, собранный
   из контента партии. Темы: `turn`, `setup`, `resources`, `provinces`, `units`, `abilities`, `buildings`, `orders`,
-  `p2`, `combat`, `victory`, `pacts`, `fog`, `messages`, `techs`, `factions`, `artifacts` (есть только те, что нужны
-  партии); ID или название контента в `topic` даёт его описание.
+  `p2`, `combat`, `victory`, `pacts`, `spying`, `conquest`, `fog`, `messages`, `techs`, `factions`, `artifacts` (есть
+  только те, что нужны партии); ID или название контента в `topic` даёт его описание.
+- Шпионаж и завоевание — только если их включили сценарий или хост (`dah game create --espionage on --conquest on`).
+  Приказы идут через те же `validate_orders`/`submit_orders`/`amend_order`/`cancel_order`: `{"kind": "hire_shade"}`
+  (только Д), `{"kind": "spy", "shade": "s1", "mission": "observe", "target": "P07", "rounds": 2}`,
+  `{"kind": "recall", "shade": "s1"}`, `move` с `"feint": true` (ложная запись, только Д),
+  `{"kind": "dispose", "province": "P07", "disposition": "subjugate"}` и `{"kind": "policy", "disposition":
+  "subjugate"}` (Д и П2, 0 ОК). Разведсрез идёт на закрытии Д; в начале П2 — одна запись `[ИГРА] Разведсрез хода N`
+  во входящих, строка `ДОНЕСЕНИЯ` в `get_state`, хвост «донесений: N» в `phase()` и пробуждении waker'а; тексты —
+  `get_intel`. Оккупации, притязания и политика — разделы `ОККУПАЦИЯ`, `ПРИТЯЗАНИЯ`, `ПОЛИТИКА` в `get_state`.
 - Фаза старта `setup` (если она есть в партии) — до хода 1: `phase()` возвращает `phase: "setup"` и подсказку `hint`.
   `get_setup()` — все фракции с описаниями, твои предложенные артефакты (драфт) или пул и бюджет (очки), твой выбор;
   `choose_faction(prefs=["litany", "captains"])` — фракции по предпочтению; `choose_artifacts(ids=["ancient_blueprint"])`;

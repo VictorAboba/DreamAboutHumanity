@@ -21,9 +21,13 @@ _ORDER_ITEM = {
     "description": "Один приказ. move лучше плоско: unit + count (один тип юнитов на приказ); несколько типов — "
                    "units {юнит: число} или несколько приказов",
     "properties": {
-        "kind": {"type": "string", "enum": ["move", "recruit", "build", "fortify", "research"]},
+        "kind": {"type": "string", "enum": ["move", "recruit", "build", "fortify", "research", "dispose", "policy",
+                                            "hire_shade", "spy", "recall"],
+                 "description": "dispose/policy — только с завоеванием, hire_shade/spy/recall и feint — только со "
+                                "шпионажем (rules покажет разделы ЗАВОЕВАНИЕ и ШПИОНАЖ)"},
         "from": {"type": "string", "description": "move: откуда (P01)"},
-        "to": {"type": "string", "description": "move: куда, соседняя провинция (P04)"},
+        "to": {"type": "string", "description": "move: куда, соседняя провинция (P04); dispose с освобождением: "
+                                                "ник получателя"},
         "unit": {"type": "string", "description": "move/recruit: юнит — короткий ID (assault), полный "
                                                   "(core:assault) или метка из get_state (штурм)"},
         "count": {"type": "integer", "minimum": 1, "description": "move/recruit: сколько юнитов"},
@@ -36,6 +40,16 @@ _ORDER_ITEM = {
                  "description": "move: honor (по умолчанию) — соблюдать пакты: в провинцию союзника войска не "
                                 "войдут, вернутся без боя; break — нарушить пакт с владельцем цели (с ничейной — с "
                                 "союзником, идущим туда же): этот ход бьётся, пакт публично разорван"},
+        "feint": {"type": "boolean", "description": "move, только в Д и со шпионажем: true — ложная запись (войска "
+                                                    "остаются дома, стоит ОК)"},
+        "disposition": {"type": ["string", "null"],
+                        "description": "dispose/policy: судьба провинции — ID или название (subjugate, raze, raid, "
+                                       "release; список — rules(topic=\"conquest\")); policy: null — без политики"},
+        "shade": {"type": ["string", "integer"], "description": "spy/recall: Тень (\"s1\" или 1) из list_spies"},
+        "mission": {"type": "string", "description": "spy: миссия — ID или название (observe, ledger, read_orders, "
+                                                     "sabotage; список — rules(topic=\"spying\"))"},
+        "target": {"type": "string", "description": "spy: цель — провинция (P07) или ник игрока, по миссии"},
+        "rounds": {"type": "integer", "minimum": 1, "description": "spy: срок задания в раундах (по одному за ход)"},
     },
     "required": ["kind"],
 }
@@ -57,7 +71,12 @@ _PATCH = {"type": "object",
           "properties": {"unit": {"type": "string", "description": "move: юнит (плоская форма, вместе с count)"},
                          "count": {"type": "integer", "minimum": 1,
                                    "description": "move: сколько юнитов unit; recruit: новое число"},
-                         "units": _UNITS, "to": {"type": "string", "description": "move: новая цель"},
+                         "units": _UNITS,
+                         "to": {"type": "string", "description": "move: новая цель; dispose: ник получателя"},
+                         "disposition": {"type": ["string", "null"],
+                                         "description": "dispose/policy: другая судьба (policy: null — снять)"},
+                         "feint": {"type": "boolean", "description": "move: false — ложную запись сделать настоящей "
+                                                                     "(в П2 — как новая атака)"},
                          "tech": {"type": "string", "description": "research: другая технология"},
                          "pact": {"type": "string", "enum": ["honor", "break"],
                                   "description": "move: honor или break (в П2 honor→break стоит как новая атака)"}}}
@@ -65,8 +84,11 @@ RESEARCH = '{"kind": "research", "tech": "deep_drilling"}'
 _ORDERS_HINT = (f" Плоская форма move: {FLAT_MOVE}; исследование: {RESEARCH}; если вложенные объекты теряются — "
                 "передай orders одной JSON-строкой.")
 _LIST_OR_STRING = {"anyOf": [{"type": "array", "items": {"type": "string"}}, {"type": "string"}]}
-RULE_TOPICS = ("turn, setup, units, buildings, orders, p2, combat, pacts, fog, messages, techs, factions, artifacts, "
-               "abilities, resources, provinces, victory")
+RULE_TOPICS = ("turn, setup, units, buildings, orders, p2, combat, pacts, spying, conquest, fog, messages, techs, "
+               "factions, artifacts, abilities, resources, provinces, victory")
+DISPOSE = '{"kind": "dispose", "province": "P07", "disposition": "subjugate"}'
+SPY = '{"kind": "spy", "shade": "s1", "mission": "observe", "target": "P07", "rounds": 2}'
+SPY_ONLY = " Только в партиях со шпионажем."
 
 
 @dataclass(frozen=True)
@@ -133,7 +155,8 @@ TOOLS: tuple[ToolSpec, ...] = (
     ToolSpec("cancel_order", "Отменить приказ по ID (в Д бесплатно, в П2 стоит ОК; в П1 нельзя).",
              _schema({"id": _ID}, ["id"])),
     ToolSpec("amend_order", "Изменить приказ (в Д бесплатно, в П2 стоит ОК; в П1 нельзя): у move — юниты (плоско "
-                            "unit+count или units), to и/или pact, у recruit — count. Пример: amend_order(id=\"o3\", "
+                            "unit+count или units), to, pact и/или feint, у recruit — count, у dispose — "
+                            "disposition и/или to, у policy — disposition. Пример: amend_order(id=\"o3\", "
                             "patch={\"unit\": \"assault\", \"count\": 1}); patch можно передать одной JSON-строкой.",
              _schema({"id": _ID, "patch": _PATCH}, ["id", "patch"])),
     ToolSpec("estimate", "Прогноз боя: вероятность победы атакующего и средние потери сторон (200 прогонов). "
@@ -155,6 +178,26 @@ TOOLS: tuple[ToolSpec, ...] = (
                       "opponent": {"type": "string",
                                    "description": "Ник соперника: его фракция (публична) на другой стороне"}},
                      ["attacker", "defender"])),
+    ToolSpec("list_spies", "Твои Тени коротко: S и C, Тени и их задания (раунд, прикрытие K, опыт V, последнее "
+                           f"донесение), миссии (сложность D, срок, нужное S), в П2 — пойманные у тебя.{SPY_ONLY} "
+                           f"Задание — приказ {SPY}.", _schema()),
+    ToolSpec("get_intel", "Донесения Теней (снимок конца Д, числа — интервалы с правдой внутри): без аргументов — "
+                          "свёрнутые донесения последнего разведсреза; report_id — одно донесение целиком; turn — "
+                          f"прошлый ход; shade — одна Тень.{SPY_ONLY} Пример: get_intel(report_id=\"r4\").",
+             _schema({"turn": {"type": ["integer", "string"], "description": "Ход разведсреза (по умолчанию последний)"},
+                      "shade": {"type": ["string", "integer"], "description": "Тень: \"s1\" или 1"},
+                      "report_id": {"type": "string", "description": "ID донесения (r4 или #r4) — полный текст"}})),
+    ToolSpec("estimate_mission", "Шансы задания Тени по точной формуле: по раундам успех/поимка, дожить до конца, "
+                                 "хотя бы одно донесение (удар). Чужое C скрыто: принимается база, если не задать "
+                                 f"assume_mirrors.{SPY_ONLY} Пример: estimate_mission(mission=\"read_orders\", "
+                                 "target=\"Ник\", rounds=3).",
+             _schema({"mission": {"type": "string", "description": "Миссия: ID или название"},
+                      "target": {"type": "string", "description": "Провинция (P07) или ник игрока"},
+                      "rounds": {"type": ["integer", "string"], "description": "Срок в раундах"},
+                      "shade": {"type": ["string", "integer"], "description": "Твоя Тень (её опыт V)"},
+                      "assume_mirrors": {"type": ["integer", "string"],
+                                         "description": "Предполагаемое C владельца цели"}},
+                     ["mission", "target"])),
     ToolSpec("send_message", "Отправить сообщение (только в П1 и П2): to — список ников или \"all\". В ответе "
                              "inbox_id — номер этого сообщения в твоих входящих (message_id — счёт твоих "
                              "отправленных, не номер для inbox(since=)). "
@@ -247,6 +290,8 @@ EXAMPLES = {
     "choose_artifacts": 'choose_artifacts(ids=["ancient_blueprint"])',
     "describe": 'describe(id="throne_warden")',
     "estimate": EST_EXAMPLE,
+    "get_intel": 'get_intel() или get_intel(report_id="r4")',
+    "estimate_mission": 'estimate_mission(mission="observe", target="P07", rounds=2)',
     "send_gift": 'send_gift(to="Ник", resources={"alloy": 10})',
     "propose_pact": 'propose_pact(to="Ник", turns=3) или propose_pact(to="Ник")',
     "respond_pact": 'respond_pact(id="pact-A-B-1", decision="accept")',
@@ -298,6 +343,11 @@ def _first(args: dict[str, Any], *names: str) -> Any:
     raise ToolInputError(f"не указан аргумент {names[0]}")
 
 
+def _any(args: dict[str, Any], *names: str) -> Any:
+    """The documented optional argument or one of its likely spellings; None when none is given."""
+    return next((args[n] for n in names if args.get(n) not in (None, "")), None)
+
+
 class Bridge:
     """Runs one tool call against the game server and turns the answer into text for the model."""
 
@@ -340,6 +390,13 @@ class Bridge:
             "ready": lambda a: client.ready(None if a.get("confirm_hash") in (None, "") else str(a["confirm_hash"])),
             "unready": lambda a: client.unready(),
             "history": lambda a: client.history(a.get("turn")),
+            # espionage reads: the server's text is the whole answer (its JSON repeats it)
+            "list_spies": lambda a: _compact(client.list_spies(), ()),
+            "get_intel": lambda a: _compact(client.get_intel(_any(a, "turn"), _any(a, "shade", "shade_id"),
+                                                             _any(a, "report_id", "report", "id")), ()),
+            "estimate_mission": lambda a: _compact(client.estimate_mission(
+                _first(a, "mission", "type"), _first(a, "target", "province", "seat", "player"),
+                _any(a, "rounds", "turns"), _any(a, "shade"), _any(a, "assume_mirrors", "mirrors")), ()),
         }
 
     def _remember(self, data: dict[str, Any]) -> dict[str, Any]:

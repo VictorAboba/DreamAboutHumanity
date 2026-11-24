@@ -1,5 +1,6 @@
 """Core content of stage 2 (core 0.3.0, TECH_AND_SETUP.md section 3): factions, units, buildings, techs, artifacts,
-the mirror4 map and the scenarios. Everything is pack data; these tests check that it is complete and consistent."""
+the mirror4 map and the scenarios. Everything is pack data; these tests check that it is complete and consistent.
+Core 0.4.0 keeps all of it and adds stage-3 content (tests/test_content_core040.py)."""
 
 from __future__ import annotations
 
@@ -37,11 +38,11 @@ def unique_units(rs, faction):
 
 
 def test_pack_version_and_clean_validation():
-    assert "version: 0.3.0" in (CORE / "pack.yaml").read_text(encoding="utf-8")
+    assert "version: 0.4.0" in (CORE / "pack.yaml").read_text(encoding="utf-8")
     assert validate_packs(default_pack_dirs()) == ([], [])
     for scenario in SCENARIOS:
         built = build_ruleset(None, scenario)
-        assert built.warnings == () and built.packs == {"core": "0.3.0"}
+        assert built.warnings == () and built.packs == {"core": "0.4.0"}
     assert len({build_ruleset(None, s).hash for s in SCENARIOS}) == len(SCENARIOS)
 
 
@@ -187,9 +188,9 @@ def test_every_unit_and_building_is_obtainable_by_every_allowed_faction(rs):
 
 def test_tech_tree_shape(rs):
     assert [rs.branches[b].name for b in sorted(rs.branches, key=lambda b: rs.branches[b].order)] == \
-        ["Промышленность", "Война", "Логистика", "Тайна"]
+        ["Промышленность", "Война", "Логистика", "Тайна", "Зеркала"]     # «Зеркала»: espionage only
     assert all(rs.branches[b].color for b in rs.branches)
-    assert 15 <= len(rs.techs) <= 18
+    assert 15 <= len(build_ruleset(None, "blitz_test").techs) <= 18 and len(rs.techs) <= 22
     tiers = Counter((t.branch, t.tier) for t in rs.techs.values())
     assert {tier for _, tier in tiers} == {1, 2}
     for b in rs.branches:
@@ -203,7 +204,8 @@ def test_tier_two_needs_two_tier_one_techs_of_its_branch(rs):
             assert all(rs.techs[r].branch == t.branch for r in t.requires)
         else:
             assert not t.requires and not t.requires_any and not t.requires_tier, t.id
-        assert t.cost >= (20 if t.tier == 2 else 10)
+        stage3 = t.id in ("core:long_leash", "core:glass_inquest")     # SPY_AND_CONQUEST.md section 5: 18
+        assert t.cost >= (18 if stage3 else 20 if t.tier == 2 else 10)
 
 
 @pytest.mark.parametrize("faction", [*CONCEPT_FACTIONS, NEUTRAL])
@@ -240,7 +242,8 @@ def test_mystery_branch_gives_only_stats_and_flags(rs):
 
 
 def test_artifacts_pool(rs):
-    assert 12 <= len(rs.artifacts) <= 14
+    # core 0.4.0: two espionage artifacts join the pool only while espionage is on
+    assert 12 <= len(build_ruleset(None, "blitz_test").artifacts) <= 14 and len(rs.artifacts) <= 16
     for a in rs.artifacts.values():
         assert 1 <= a.cost <= 3 and 1 <= a.power <= 3, a.id
         assert a.description, a.id

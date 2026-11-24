@@ -8,6 +8,7 @@ bonuses:
   - {effect: modify, target: p2.hasty_penalty, op: set, value: 0}
   - {effect: modify, target: tech.branch.logistics.cost_mul, op: mul, value: 0.7}
   - {effect: income, resource: alloy, amount: 2}
+  - {effect: modify, target: disposition.raid.loot_mul, op: mul, value: 1.5}     # conquest only
 penalties:
   - {effect: modify, target: province.defense_mul, op: mul, value: 0.9}
 starting:

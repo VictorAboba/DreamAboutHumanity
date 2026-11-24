@@ -10,6 +10,11 @@ PHASE_ORDER = ("negotiation_1", "actions", "negotiation_2")
 # Seat events counted in the phase open when they were written (a `call` names its own phase).
 # `for_phase` of a spend figure taken after game_over (dah-waker, while the session wraps up).
 AFTER_GAME_OVER = "after_game_over"
+# Stage 3 (docs/SPY_AND_CONQUEST.md section 8): journal types counted into `report["stage3"]`.
+_STAGE3_EVENTS = frozenset({"shade_hired", "mission_started", "intel_report", "intel_read", "shade_captured",
+                            "mission_end", "sabotage", "strike_cancelled", "feint", "feint_exposed", "mission_rejected",
+                            "province_captured", "disposition", "occupation_revolt", "claim_created",
+                            "policy_unaffordable"})
 _PHASE_SEAT_EVENTS = frozenset({"first_call_in_phase", "orders_validated", "orders_submitted", "order_edit",
                                 "order_edit_p2", "ready"})
 
@@ -30,6 +35,63 @@ def _seat_total() -> dict[str, Any]:
             "wakes_sent": 0, "wakes_answered": 0, "wakes_unanswered": 0, "wake_answer_median_s": None,
             "pacts_signed": 0, "pacts_kept": 0, "pacts_broken": 0, "pacts_renewed": 0, "gifts_sent": 0,
             "gifts_received": 0, "gifted_resources": {}, "received_resources": {}, "setup_choices": 0, "techs": []}
+
+
+def _stage3_seat() -> dict[str, Any]:
+    return {"shades_hired": 0, "shades_lost": 0, "missions": {}, "mission_ends": {}, "reports": 0, "intel_reads": 0,
+            "caught_here": 0, "caught_here_attributed": 0, "sabotages": 0, "strikes_cancelled": 0, "feints": 0,
+            "feints_exposed": 0, "missions_rejected": 0, "captures": {}, "dispositions": {}, "disposition_cost": {},
+            "loot": {}, "revolts": 0, "claims": 0, "policy_unaffordable": 0}
+
+
+def _stage3(report: dict[str, Any], ev: dict[str, Any]) -> None:
+    """Count one stage-3 journal event into `report["stage3"]` (per seat; created on the first such event)."""
+    block = report.setdefault("stage3", {s: _stage3_seat() for s in report["seats"]})
+
+    def seat(s: Any) -> dict[str, Any] | None:
+        return block.get(s) if isinstance(s, str) else None
+
+    kind = ev["type"]
+    if kind == "shade_hired" and (t := seat(ev.get("seat"))):
+        t["shades_hired"] += 1
+    elif kind == "mission_started" and (t := seat(ev.get("seat"))):
+        mid = str(ev.get("mission")).rsplit(":", 1)[-1]
+        t["missions"][mid] = t["missions"].get(mid, 0) + 1
+    elif kind == "mission_end" and (t := seat(ev.get("seat"))):
+        reason = str(ev.get("reason"))
+        t["mission_ends"][reason] = t["mission_ends"].get(reason, 0) + 1
+        t["shades_lost"] += reason == "caught"
+    elif kind == "intel_report" and (t := seat(ev.get("seat"))):
+        t["reports"] += 1
+    elif kind == "intel_read" and (t := seat(ev.get("seat"))):
+        t["intel_reads"] += 1
+    elif kind == "shade_captured" and (t := seat(ev.get("victim"))):
+        t["caught_here"] += 1
+        t["caught_here_attributed"] += bool(ev.get("attributed"))
+    elif kind == "sabotage" and (t := seat(ev.get("seat"))):
+        t["sabotages"] += 1
+    elif kind == "strike_cancelled" and (t := seat(ev.get("seat"))):
+        t["strikes_cancelled"] += 1
+    elif kind == "feint" and not ev.get("converted_in_p2") and (t := seat(ev.get("seat"))):
+        t["feints"] += 1
+    elif kind == "feint_exposed" and (t := seat(ev.get("victim_seat"))):
+        t["feints_exposed"] += 1
+    elif kind == "mission_rejected" and (t := seat(ev.get("seat"))):
+        t["missions_rejected"] += 1
+    elif kind == "province_captured" and (t := seat(ev.get("by"))):
+        mode = str(ev.get("mode"))
+        t["captures"][mode] = t["captures"].get(mode, 0) + 1
+    elif kind == "disposition" and (t := seat(ev.get("seat"))):
+        did = str(ev.get("disposition")).rsplit(":", 1)[-1]
+        t["dispositions"][did] = t["dispositions"].get(did, 0) + 1
+        _add(t["disposition_cost"], ev.get("cost") or {})
+        _add(t["loot"], ev.get("loot") or {})
+    elif kind == "occupation_revolt" and (t := seat(ev.get("seat"))):
+        t["revolts"] += 1
+    elif kind == "claim_created" and (t := seat(ev.get("seat"))):
+        t["claims"] += 1
+    elif kind == "policy_unaffordable" and (t := seat(ev.get("seat"))):
+        t["policy_unaffordable"] += 1
 
 
 def _phase_wake(kind: str, detail: Any) -> bool:
@@ -78,6 +140,12 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
     a seat's choice calls; `techs` per seat are [turn, tech] in order of completion, and each turn lists
     `techs_completed {seat: [tech]}` and `research_started {seat: tech}`. The report is the host's (and the
     revealed spectator's) view: it shows artifacts, which the players see only after game_over.
+    Stage 3 (docs/SPY_AND_CONQUEST.md section 8; only when the journal has such events): `stage3 {seat: ...}` counts
+    Shades hired and lost, missions by mission and by end reason, reports, intel reads, Shades caught at the seat (and
+    how many with the owner named), sabotages, cancelled strikes, false entries (and how many of the seat's were
+    exposed), rejected missions, captures by mode, fates by disposition with their price and loot, revolts against
+    the seat's occupations, claims it got, and policies it could not pay for. The rates of section 8 (accuracy,
+    intel used, fooled by a feint) are 3b and stay offline.
     """
     report: dict[str, Any] = {"game_id": None, "scenario": None, "rules_chars": None, "seats": {}, "phases": [],
                               "turns": [], "totals": {}, "result": None, "setup": None}
@@ -108,6 +176,8 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
 
     for ev in events:
         kind = ev["type"]
+        if kind in _STAGE3_EVENTS:
+            _stage3(report, ev)
         seat = ev.get("seat")
         totals = report["totals"].get(seat) if seat else None
         sp = seat_phase(seat, phase) if seat and kind in _PHASE_SEAT_EVENTS else None
@@ -360,6 +430,22 @@ def _seat_setup(info: dict[str, Any], t: dict[str, Any]) -> str:
     return out
 
 
+def _stage3_line(t: dict[str, Any]) -> str:
+    def counts(d: dict[str, Any]) -> str:
+        return ", ".join(f"{k} {v}" for k, v in sorted(d.items())) or "—"
+
+    def amounts(d: dict[str, Any]) -> str:
+        return " ".join(f"{_short(r)} {n}" for r, n in sorted(d.items())) or "0"
+
+    return (f"Тени: нанято {t['shades_hired']}, потеряно {t['shades_lost']}; задания {counts(t['missions'])} "
+            f"(итоги: {counts(t['mission_ends'])}); донесений {t['reports']}, прочтений {t['intel_reads']}; поймано у "
+            f"него {t['caught_here']} (хозяин установлен {t['caught_here_attributed']}); саботажей {t['sabotages']}"
+            f" (отменено {t['strikes_cancelled']}); ложных записей {t['feints']} (разоблачено чужими "
+            f"{t['feints_exposed']}); отклонено заданий {t['missions_rejected']}; захваты {counts(t['captures'])}; "
+            f"судьбы {counts(t['dispositions'])}, цена {amounts(t['disposition_cost'])}, добыча {amounts(t['loot'])}; "
+            f"бунтов {t['revolts']}, притязаний {t['claims']}, политика не по средствам {t['policy_unaffordable']}")
+
+
 def render_report(report: dict[str, Any]) -> str:
     """Russian text version of build_report()."""
     nick = {s: info["nick"] for s, info in report["seats"].items()}
@@ -394,6 +480,11 @@ def render_report(report: dict[str, Any]) -> str:
             f"(закрыто по таймеру): {not_ready}; деньги {money}{_money_split(t)}"
             + (f", кончились на ходу {t['budget_exhausted_turn']}" if t["budget_exhausted_turn"] else "")
             + _wakes(t) + _diplomacy(t) + f"; телеметрия: {telemetry}")
+    if report.get("stage3"):
+        lines.append("")
+        lines.append("ШПИОНАЖ И ЗАВОЕВАНИЕ:")
+        for seat, t in report["stage3"].items():
+            lines.append(f"{seat} {nick.get(seat, seat)}: " + _stage3_line(t))
     lines.append("")
     lines.append("ФАЗЫ (до первого вызова / первой принятой подачи / ready; вызовы; правки):")
     for ph in report["phases"]:

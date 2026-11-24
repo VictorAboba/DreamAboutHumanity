@@ -147,6 +147,18 @@
           }
         }
       ]
+    },
+    "systems": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "espionage": {
+          "type": "boolean"
+        },
+        "conquest": {
+          "type": "boolean"
+        }
+      }
     }
   }
 }

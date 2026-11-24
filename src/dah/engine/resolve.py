@@ -7,7 +7,9 @@ from collections import Counter
 from dataclasses import asdict, dataclass, field
 from typing import Any, Mapping, Sequence, Union
 
+from . import conquest as cq
 from . import diplomacy as dip
+from . import espionage as esp
 from .combat import Force, fight, pick_losses, round_half_up, strength
 from .content import Ruleset, StatKey
 from .model import BREAK, GameState, Order, PendingBuild, Player, Province, SeatOrders
@@ -41,6 +43,8 @@ def new_game_state(ruleset: Ruleset, seats: Sequence[Mapping[str, Any]], seed: i
     if len(set(ids)) != len(ids) or len(set(nicks)) != len(nicks):
         raise SetupError("seat ids and nicks must be unique")
     stream(seed, 0, "setup", "starts").shuffle(starts)
+    stage3 = bool(ruleset.scenario.systems)
+    origins: dict[str, str] = {}
     provinces = {p.id: Province(p.id, p.name, p.type, None) for p in ruleset.map.provinces.values()}
     players: dict[str, Player] = {}
     for seat_cfg, start in zip(seats, starts):
@@ -52,12 +56,15 @@ def new_game_state(ruleset: Ruleset, seats: Sequence[Mapping[str, Any]], seed: i
         faction = ruleset.factions[faction_id]
         for pid in (start.capital, *start.provinces):
             provinces[pid].owner = seat
+            if ruleset.system("conquest"):
+                origins[pid] = seat
         capital = provinces[start.capital]
         capital.units = dict(faction.start_units)
         capital.buildings = sorted(faction.start_buildings)
         resources = {r: faction.start_resources.get(r, 0) for r in ruleset.resources}
         player = Player(seat, seat_cfg["nick"], faction_id, resources,
-                        command_points=int(ruleset.stat("command_points", faction_id)))
+                        command_points=int(ruleset.stat("command_points", faction_id)),
+                        home=start.capital if stage3 else None)
         for eff in faction.start_effects:
             _apply_start_effect(eff, player, capital, ruleset)
         for art in seat_cfg.get("artifacts") or ():
@@ -68,7 +75,8 @@ def new_game_state(ruleset: Ruleset, seats: Sequence[Mapping[str, Any]], seed: i
                 for eff in ruleset.artifacts[art].effects:
                     _apply_start_effect(eff, player, capital, ruleset)
         players[seat] = player
-    state = GameState(turn=1, phase="negotiation_1", provinces=provinces, players=dict(sorted(players.items())))
+    state = GameState(turn=1, phase="negotiation_1", provinces=provinces, players=dict(sorted(players.items())),
+                      origins=dict(sorted(origins.items())))
     for seat, player in state.players.items():
         player.command_points = int(ruleset.stat("command_points", stat_key(state, ruleset, seat)))
     return state
@@ -91,18 +99,24 @@ def _apply_start_effect(eff: Mapping[str, Any], player: Player, capital: Provinc
 
 # ---------------------------------------------------------------- economy helpers (also used by view)
 
-def income_of(state: GameState, ruleset: Ruleset, seat: str, key: StatKey = ...) -> dict[str, int]:
+def income_of(state: GameState, ruleset: Ruleset, seat: str, key: StatKey = ..., strikes: bool = False
+              ) -> dict[str, int]:
     """Income per turn: flat faction/tech/artifact income plus, per own province, (type + buildings) x
-    `province.income_mul.<res>`; all x `resource.<res>.income_mul`, rounded half up."""
+    `province.income_mul.<res>`; all x `resource.<res>.income_mul`, rounded half up. `strikes` (the resolution's
+    economy step only) applies this turn's sabotage strikes."""
     if key is ...:
         key = stat_key(state, ruleset, seat)
     total: dict[str, float] = {r: float(n) for r, n in ruleset.passive_income(key).items()}
     for prov in state.owned(seat):
+        # stage 3: occupied, ruined and ravaged provinces give nothing, a sabotaged one x income_mul (conquest.py)
+        factor = cq.income_factor(prov, state.turn, strikes)
+        if factor == 0.0:
+            continue
         here: Counter[str] = Counter(ruleset.province_types[prov.type].income)
         for b in prov.buildings:
             here.update(ruleset.buildings[b].income)
         for r, n in here.items():
-            mul = province_stat(state, ruleset, prov.id, f"province.income_mul.{r}", key)
+            mul = province_stat(state, ruleset, prov.id, f"province.income_mul.{r}", key) * factor
             total[r] = total.get(r, 0.0) + (n if mul == 1.0 else n * mul)
     return {r: round_half_up(total.get(r, 0) * ruleset.stat(f"resource.{r}.income_mul", key))
             for r in ruleset.resources}
@@ -114,14 +128,15 @@ def upkeep_of(state: GameState, ruleset: Ruleset, seat: str, key: StatKey = ...)
     for prov in state.owned(seat):
         for unit, n in prov.units.items():
             total.update({r: v * n for r, v in ruleset.unit_upkeep(unit, faction).items()})
+    total.update(esp.upkeep(state, ruleset, seat, faction))      # Shades (espionage; none without it)
     return {r: total[r] for r in ruleset.resources}
 
 
 def scores(state: GameState, ruleset: Ruleset) -> dict[str, int]:
-    """1 point per province, +3 per capital (own or captured)."""
+    """1 point per province, +3 per capital (own or captured); occupied provinces and ruins give none (conquest)."""
     out = {seat: 0 for seat in state.players}
     for prov in state.provinces.values():
-        if prov.owner in out:
+        if prov.owner in out and cq.scores_province(prov, state.turn):
             out[prov.owner] += 1 + (3 if prov.id in ruleset.map.capitals else 0)
     return out
 
@@ -175,7 +190,10 @@ class _Resolution:
         self.events: list[dict[str, Any]] = []
         # each seat's stat key at the start of the resolution (techs researched now count from the next turn)
         self.factions: dict[str | None, StatKey] = {seat: stat_key(state, ruleset, seat) for seat in state.players}
-        self.retreats: list[tuple[str | None, list[str], dict[str, int], str]] = []
+        # (owner, candidates in order, units, from province, full provinces first)
+        self.retreats: list[tuple[str | None, list[str], dict[str, int], str, bool]] = []
+        self.conquest = cq.ConquestStep(self) if ruleset.system("conquest") else None
+        self.espionage = esp.EspionageStep(self) if ruleset.system("espionage") else None
         self.pacts: dict[frozenset[str], dict[str, Any]] = {}     # pacts in force in this resolution, by pair
         self.broken: dict[frozenset[str], set[str]] = {}          # pair -> seats whose "break" orders broke it
         self.break_targets: list[set[str]] = []                   # per move (in `moves` order): partners it breaks
@@ -206,36 +224,59 @@ class _Resolution:
                 self.events.append(event)
         self.start_pacts()
         moves, fortify = self.apply_orders(alive, books)
+        if self.espionage is not None:
+            self.espionage.idle()                 # 1b: recalls of negotiation_2, Shades of ended missions go idle
         self.find_breaks(moves)
         idle = self.idle_stats(alive, moves, fortify)
         arrivals, fortified = self.move(moves, fortify)
+        if self.espionage is not None:
+            self.espionage.strikes(fortified)     # 2b: sabotage strikes (no fortify, defense x defense_mul)
         owners_before = {pid: p.owner for pid, p in s.provinces.items()}
         for pid in sorted(s.provinces):
             self.battle(pid, arrivals.get(pid, []), pid in fortified)
-        self.apply_retreats()
-        for pid, prov in s.provinces.items():
-            prov.fortified = pid in fortified
-        changes = [{"province": pid, "from": owners_before[pid], "to": p.owner}
-                   for pid, p in sorted(s.provinces.items()) if p.owner != owners_before[pid]]
-        for c in changes:
-            self.ev("captured", [c["from"], c["to"]], c["province"], **{"from": c["from"], "to": c["to"]})
-        s.pending_builds = [b for b in s.pending_builds if s.provinces[b.province].owner == b.seat]
+        if self.conquest is not None:
+            # 4b: fates of captures, decisions, claims; then retreats, revolts, refunds, the builds filter
+            self.conquest.run()
+            for pid, prov in s.provinces.items():
+                prov.fortified = pid in fortified
+            changes = self.conquest.changes
+        else:
+            self.apply_retreats()
+            for pid, prov in s.provinces.items():
+                prov.fortified = pid in fortified
+            changes = [{"province": pid, "from": owners_before[pid], "to": p.owner}
+                       for pid, p in sorted(s.provinces.items()) if p.owner != owners_before[pid]]
+            for c in changes:
+                self.ev("captured", [c["from"], c["to"]], c["province"], **{"from": c["from"], "to": c["to"]})
+            s.pending_builds = [b for b in s.pending_builds if s.provinces[b.province].owner == b.seat]
         self.economy(alive)
         self.builds()
         self.research(alive)
+        if self.conquest is not None:
+            cq.timers(self)
         eliminated = self.eliminate(alive)
+        if self.conquest is not None:
+            cq.eliminated(self, eliminated)
+        if self.espionage is not None:
+            self.espionage.end(eliminated)        # Shades of the eliminated go; missions against them are void
         self.end_pacts(eliminated)
         sc = scores(s, self.rs)
         self.finish(sc)
         seen_after = {seat: visible_provinces(s, self.rs, seat) for seat in alive}
         by_seat = {seat: [_as_seen(e, seat) for e in self.events
-                          if seat in e["seats"] or e["kind"] in dip.PUBLIC_KINDS
+                          if seat in e["seats"] or e["kind"] in _PUBLIC_KINDS
+                          or (e["kind"] == "captured" and "mode" in e)      # conquest: public, without its mode
                           or (_seen_at(e) in seen_before[seat] | seen_after[seat]
                               and e["kind"] not in _PRIVATE_KINDS)]
                    for seat in alive}
         public_diplomacy = [dip.public_event(e) for e in self.events if e["kind"] in dip.PUBLIC_KINDS]
         public = {"ownership_changes": changes, "eliminated": eliminated, "scores": sc, "result": s.result,
                   "diplomacy": public_diplomacy}
+        if self.conquest is not None:
+            # public forms (SPY_AND_CONQUEST.md 2.7): captures, fates, revolts, claims, ruins; no prices or sources
+            public["conquest"] = [cq.public_event(e) for e in self.events
+                                  if e["kind"] in cq.PUBLIC_KINDS or e["kind"] == "captured"]
+            public["claims"] = [dict(c) for c in s.claims]
         if self.rs.techs:
             public["techs_count"] = tech_counts(s, self.rs)   # public: how many (not which; no artifact grants)
         report = TurnReport(self.turn, self.events, by_seat, public, idle)
@@ -303,8 +344,23 @@ class _Resolution:
             for res, n in book.forfeit.items():
                 player.resources[res] = max(0, player.resources.get(res, 0) - n)
             for o in valid:
-                for res, n in order_cost(self.rs, self.factions[seat], o, start).items():
+                cost = order_cost(self.rs, self.factions[seat], o, start)
+                for res, n in cost.items():
                     player.resources[res] -= n
+                if o.kind == "dispose" and self.conquest is not None:
+                    self.conquest.hold(seat, o, cost)   # held until step 4b: spent on the fate, or given back
+                    continue
+                if o.kind == "policy" and self.conquest is not None:
+                    self.conquest.set_policy(seat, o)
+                    continue
+                if o.kind in ("spy", "recall"):     # given in negotiation_2 (the actions entries were recon's)
+                    if self.espionage is not None:
+                        self.espionage.order(seat, o)
+                    continue
+                if o.kind == "move" and o.feint:     # a false entry: never carried out, its units stay and defend
+                    self.ev("feint", [seat], o.src, seat=seat, order_id=o.id, units=dict(o.units or {}),
+                            **{"from": o.src, "to": o.dst})
+                    continue
                 if o.kind == "research":
                     if player.researching != o.tech:
                         player.researching = o.tech
@@ -318,7 +374,7 @@ class _Resolution:
                     prov = self.s.provinces[o.province]
                     prov.units[o.unit] = prov.units.get(o.unit, 0) + o.count
                     self.ev("recruited", [seat], o.province, unit=o.unit, count=o.count)
-                else:
+                elif o.kind == "build":
                     turns = self.rs.buildings[o.building].build_turns
                     self.s.pending_builds.append(PendingBuild(seat, o.province, o.building, turns))
                     self.ev("build_started", [seat], o.province, building=o.building, turns=turns)
@@ -418,9 +474,12 @@ class _Resolution:
         rng = self.rng("combat", pid)
         attackers = sorted(by_owner.values(), key=lambda f: f.owner or "")
         ties = {f.owner: rng.random() for f in attackers}
+        muls = {f.owner: cq.claim_mul(self.s, self.rs, f.owner, pid, self.turn, self.factions.get(f.owner))
+                for f in attackers} if self.conquest is not None else {}
 
         def power(f: Force) -> float:
-            return strength(self.rs, f, {}, defending=False, faction=self.factions.get(f.owner))
+            return strength(self.rs, f, {}, defending=False, faction=self.factions.get(f.owner),
+                            attack_mul=muls.get(f.owner, 1.0))
 
         attackers.sort(key=lambda f: (-power(f), ties[f.owner]))
         # Attackers meet in order of strength. `group` holds the attackers still standing, all of them mutually
@@ -432,7 +491,8 @@ class _Resolution:
             standing = True
             for champion in [g for g in group if not self.shielded(g, challenger.owner, challenger)]:
                 snap = (dict(champion.units), dict(challenger.units))
-                res = fight(self.rs, champion, challenger, rng, b_defending=False, factions=self.factions)
+                res = fight(self.rs, champion, challenger, rng, b_defending=False, factions=self.factions,
+                            a_mul=muls.get(champion.owner, 1.0), b_mul=muls.get(challenger.owner, 1.0))
                 self.ev("battle", [champion.owner, challenger.owner], pid, stage="attackers",
                         sides=[_side(champion, snap[0], res.losses_a, res.a_won, res.strength_a),
                                _side(challenger, snap[1], res.losses_b, not res.a_won, res.strength_b)])
@@ -454,8 +514,8 @@ class _Resolution:
             for i, champion in enumerate(group):
                 snap = (dict(champion.units), dict(defender.units))
                 res = fight(self.rs, champion, defender, rng, b_defending=True, factions=self.factions,
-                            defense_mul=province_defense_mul(self.s, self.rs, pid, self.factions.get(prov.owner)),
-                            fortified=fortified)
+                            defense_mul=self.defense_mul(pid, prov.owner),
+                            fortified=fortified, a_mul=muls.get(champion.owner, 1.0))
                 self.ev("battle", [champion.owner, defender.owner], pid, stage="defense", fortified=fortified,
                         sides=[_side(champion, snap[0], res.losses_a, res.a_won, res.strength_a),
                                _side(defender, snap[1], res.losses_b, not res.a_won, res.strength_b)])
@@ -468,7 +528,10 @@ class _Resolution:
                 return
             group = [g for g in group[winner_at:] if g.total()]
             if defender.owner is not None:
-                self.retreat(defender, [n for n in self.rs.map.adjacency[pid]], pid)
+                # with conquest a defender may go back into its province if a fate gives it back in this resolution
+                # (apply_retreats checks the owner when it applies); otherwise the province is not its own
+                first = [pid] if self.conquest is not None else []
+                self.retreat(defender, first + sorted(self.rs.map.adjacency[pid]), pid)
             elif defender.total():
                 self.ev("destroyed", [], pid, units=dict(defender.units))
         # Pact partners took the province together. The holder is the one that beat the defender (the earlier ones
@@ -480,12 +543,20 @@ class _Resolution:
                     partners=sorted(g.owner for g in group if g is not holder))
             for g in group[1:]:
                 self.retreat_home(g, pid, fallback=True)
+        if self.conquest is not None:
+            self.conquest.capture(pid, holder.owner, prov.owner, holder.parts, prov.status)
         prov.owner = holder.owner
         prov.units = holder.units
 
+    def defense_mul(self, pid: str, owner: str | None) -> float:
+        """The province's defense multiplier, x a sabotage strike's `defense_mul` in this resolution."""
+        mul = province_defense_mul(self.s, self.rs, pid, self.factions.get(owner))
+        return mul * self.espionage.defense_mul(pid) if self.espionage is not None else mul
+
     def retreat(self, force: Force, candidates: list[str], from_pid: str) -> None:
+        """Candidates in the given order (the first own one at apply time takes the force)."""
         if force.total():
-            self.retreats.append((force.owner, sorted(candidates), dict(force.units), from_pid))
+            self.retreats.append((force.owner, list(candidates), dict(force.units), from_pid, False))
 
     def retreat_home(self, attacker: Force, from_pid: str, fallback: bool = False) -> None:
         """A losing attacker's survivors go back to the provinces they came from, each part to its own. With
@@ -494,10 +565,12 @@ class _Resolution:
         near = sorted(self.rs.map.adjacency[from_pid]) if fallback else []
         for origin, units in sorted(attacker.parts.items()):
             self.retreats.append((attacker.owner, [origin] + [n for n in near if n != origin], dict(units),
-                                  from_pid))
+                                  from_pid, False))
 
     def apply_retreats(self) -> None:
-        for owner, candidates, units, from_pid in self.retreats:
+        for owner, candidates, units, from_pid, full_first in self.retreats:
+            if full_first:
+                candidates = sorted(candidates, key=lambda c: (not cq.is_full(self.s.provinces[c], self.turn), c))
             target = next((c for c in candidates if self.s.provinces[c].owner == owner), None)
             if target is None:
                 self.ev("retreat_lost", [owner], from_pid, units=units)
@@ -513,7 +586,7 @@ class _Resolution:
         for seat in alive:
             player = self.s.players[seat]
             key = self.factions[seat]
-            income = income_of(self.s, self.rs, seat, key)
+            income = income_of(self.s, self.rs, seat, key, strikes=True)
             upkeep = upkeep_of(self.s, self.rs, seat, key)
             for res in self.rs.resources:
                 player.resources[res] = player.resources.get(res, 0) + income[res] - upkeep[res]
@@ -596,13 +669,29 @@ class _Resolution:
 
 # Events only their seats see: they would reveal resources or orders (fortify_broken reveals a fortify order).
 _PRIVATE_KINDS = frozenset({"order_rejected", "economy", "starvation", "build_started", "recruited",
-                            "fortify_broken", "research_started", "tech_completed"}) | dip.PRIVATE_KINDS
+                            "fortify_broken", "research_started", "tech_completed"}) | dip.PRIVATE_KINDS \
+    | cq.PRIVATE_KINDS | esp.PRIVATE_KINDS
+# Events everyone sees (in their public form when not a side): diplomacy, and conquest's fates, revolts and claims.
+_PUBLIC_KINDS = dip.PUBLIC_KINDS | cq.PUBLIC_KINDS
 
 
 def _as_seen(event: dict[str, Any], seat: str) -> dict[str, Any]:
-    """A public diplomacy event loses its private fields (gift amounts, pact id) for a seat that is not a side."""
-    if event["kind"] in dip.PUBLIC_KINDS and seat not in event["seats"]:
+    """A public event loses its private fields for a seat that is not a side: gift amounts and pact ids, a fate's
+    price, loot and source, a capture's mode."""
+    if event["kind"] == "sabotage":
+        return esp.sabotage_seen(event, seat)
+    # a fate and a capture are in full only for the taker: the raid victim, the release recipient and the loser get
+    # the public form (the source would tell the taker's private policy, SPY_AND_CONQUEST.md 2.7)
+    if event["kind"] == "disposition" and "source" in event:
+        return event if event.get("seat") == seat else cq.public_event(event)
+    if event["kind"] == "captured" and "mode" in event:
+        return event if event.get("to") == seat else cq.public_event(event)
+    if seat in event["seats"]:
+        return event
+    if event["kind"] in dip.PUBLIC_KINDS:
         return dip.public_event(event)
+    if event["kind"] in cq.PUBLIC_KINDS or (event["kind"] == "captured" and "mode" in event):
+        return cq.public_event(event)
     return event
 
 

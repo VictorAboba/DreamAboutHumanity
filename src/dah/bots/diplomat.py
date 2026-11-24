@@ -12,10 +12,18 @@
 - Stage 2: prefers factions of command and cunning (synclite, captains, ash_choir), artifacts of command and income,
   researches logistics first (more command points), then industry; recruits one of its faction's unique unit per
   turn before assault.
+- Stage 3 (docs/SPY_AND_CONQUEST.md section 7): never proposes a pact first to a seat whose Shade it caught with the
+  owner named. From turn 2 it keeps 1-2 Shades (35 alloy each) reading the orders of its strongest neighbouring
+  partner (3 rounds; the ledger while S < 2; the strongest neighbour when it has no partner). In negotiation_2, a
+  `move` of that book into its land not marked as false gets a fortify there (1 CP); it recalls a sabotage aimed at a
+  partner. One false entry in the last 2 turns, before the betrayal. Fates: occupations of a partner's own land are
+  liberated to that partner; else subjugate what the provisions pay for (policy subjugate while 15 are free).
 """
 
 from __future__ import annotations
 
+from dah.bots import conquest as cq
+from dah.bots import spy
 from dah.bots.base import Bot, DiplomacyApi, Estimator, Order
 from dah.bots.builder import choose_build, total_upkeep
 from dah.bots.tactics import (
@@ -33,6 +41,7 @@ from dah.bots.view import (
     BUILD_RESOURCE,
     BUILDING_COST_ALLOY,
     UNIT_COST_ALLOY,
+    Province,
     StateView,
     farm_site,
 )
@@ -50,6 +59,12 @@ MAX_PROPOSALS = 2  # to one seat that never accepted
 FOOD_TURNS = 3
 RECRUIT_UNIT = "assault"
 UNIQUE_PER_TURN = 1
+SHADE_FROM_TURN = 2
+SHADE_MIN_ALLOY = 35
+MAX_SHADES = 2
+READ_ROUNDS = 3
+P2_FORTIFY_CP = 1   # registry: a fortify given in negotiation_2
+P2_RECALL_CP = 1    # registry default of p2.cost.recall
 
 
 class DiplomatBot(Bot):
@@ -64,6 +79,7 @@ class DiplomatBot(Bot):
         self.proposed: dict[str, int] = {}  # seat -> proposals made to it
         self.garrison = self.rng.choice(GARRISONS)
         self.build_until = self.rng.choice(BUILD_UNTILS)
+        self.feinted = False    # stage 3: one false entry per game, in the last turns
 
     def answer_pacts(self, view: StateView, api: DiplomacyApi) -> None:
         for prop in view.pact_proposals:
@@ -78,6 +94,8 @@ class DiplomatBot(Bot):
         for other in neighbours(view):
             if view.is_partner(other) or other in open_with or self.proposed.get(other, 0) >= MAX_PROPOSALS:
                 continue
+            if other in self.memory.hostile:     # its Shade was caught spying on us (decision 22)
+                continue
             api.propose_pact(other, None)
             self.proposed[other] = self.proposed.get(other, 0) + 1
             if alloy >= GIFT_MIN_ALLOY and self.rng.random() < GIFT_CHANCE:
@@ -85,6 +103,9 @@ class DiplomatBot(Bot):
                 alloy -= GIFT_ALLOY
 
     def action_orders(self, view: StateView, estimate: Estimator) -> list[Order]:
+        extra, food_held, alloy_held = self._stage3(view)
+        full = view
+        view = spy.food_view(view, food_held, alloy_held)
         orders: list[Order] = []
         alloy = view.resource(BUILD_RESOURCE)
         feedable = view.feedable(RECRUIT_UNIT, FOOD_TURNS)
@@ -115,8 +136,79 @@ class DiplomatBot(Bot):
         betrayal = self._betrayal(view, estimate)
         moves = [betrayal] if betrayal is not None else []
         keep = merge_reserved(garrison(capital_of(view), self.garrison), reserved_by_orders(moves))
+        if view.conquest:
+            keep = merge_reserved(keep, cq.occupation_garrison(view))
         moves += plan_moves(view, estimate, ATTACK_WIN, self.rng, keep, lambda t: not view.is_partner(t.owner))
-        return orders + moves + fortify_orders(view, moves)
+        late = bool(view.turn_limit) and view.turn > view.turn_limit - BETRAY_TURNS
+        if view.espionage is not None and not self.feinted and late:
+            feint = spy.feint_order(full, merge_reserved(keep, reserved_by_orders(moves)), moves,
+                                    lambda t: not view.is_partner(t.owner), self.rng)
+            if feint is not None:
+                self.feinted = True
+                extra.append(feint)
+        return orders + moves + fortify_orders(full, moves) + extra
+
+    def _stage3(self, view: StateView) -> tuple[list[Order], int, int]:
+        """Fates, policy, Shades and their missions: (orders, provisions held, alloy held)."""
+        out: list[Order] = []
+        food, alloy = view.free_food(), view.resource(BUILD_RESOURCE)
+        if view.conquest:
+            fates, spent = cq.occupation_orders(view, food, liberate_for=lambda p: self._liberate_to(view, p))
+            food -= spent
+            policy = cq.policy_order(view, food)
+            out += fates + ([policy] if policy else [])
+        if view.espionage is not None:
+            hire = spy.hire_order(view, self.memory, from_turn=SHADE_FROM_TURN, max_shades=MAX_SHADES, alloy=alloy,
+                                  min_alloy=SHADE_MIN_ALLOY)
+            if hire is not None:
+                out.append(hire)
+                alloy -= spy.shade_cost()
+            target = spy.strongest_neighbour(view, view.is_partner) or spy.strongest_neighbour(view)
+            busy = {str((sh.get("mission") or {}).get("target")) for sh in spy.active_shades(view)}
+            idle = spy.idle_shades(view)
+            if idle and target is not None and target not in busy and spy.can_start(view):
+                mission = "read_orders" if view.whisper >= spy.MISSIONS["read_orders"][0] else "ledger"
+                got = spy.spy_order(view, idle[0], mission, target, READ_ROUNDS, alloy, food)
+                if got is not None:
+                    out.append(got[0])
+                    alloy -= got[1]
+                    food -= got[2]
+        return out, view.free_food() - food, view.resource(BUILD_RESOURCE) - alloy
+
+    @staticmethod
+    def _liberate_to(view: StateView, prov: Province) -> str | None:
+        """A partner's own land (its origin) goes back to that partner."""
+        living = not view.players or prov.origin in view.players
+        if prov.origin and prov.origin not in view.me and view.is_partner(prov.origin) and living:
+            return prov.origin
+        return None
+
+    def p2_orders(self, view: StateView, current: list[Order], cp_left: int, estimate: Estimator) -> list[Order]:
+        """Espionage games: fortify where a read book moves into our land (an entry not marked false); recall a
+        sabotage aimed at a partner."""
+        if view.espionage is None:
+            return []
+        out: list[Order] = []
+        for sh in spy.active_shades(view):
+            m = sh.get("mission") or {}
+            target = view.provinces.get(str(m.get("target")))
+            sabotage = str(m.get("type") or "").endswith("sabotage")
+            if sabotage and target is not None and view.is_partner(target.owner) and cp_left >= P2_RECALL_CP:
+                out.append({"kind": "recall", "shade": sh["id"]})
+                cp_left -= P2_RECALL_CP
+        fortified = {str(o.get("province")) for o in current if o.get("kind") == "fortify"}
+        leaving = {str(o.get("from")) for o in current if o.get("kind") == "move" and not o.get("feint")}
+        for seat in sorted(view.players or ()):
+            for entry in self.memory.orders_of(seat, view.turn):
+                dst = str(entry.get("to"))
+                prov = view.provinces.get(dst)
+                if (entry.get("kind") != "move" or entry.get("exposed") or prov is None or not view.is_mine(prov)
+                        or dst in fortified or dst in leaving or cp_left < P2_FORTIFY_CP):
+                    continue
+                out.append({"kind": "fortify", "province": dst})
+                fortified.add(dst)
+                cp_left -= P2_FORTIFY_CP
+        return out
 
     def _betrayal(self, view: StateView, estimate: Estimator) -> Order | None:
         if not view.turn_limit or view.turn <= view.turn_limit - BETRAY_TURNS:

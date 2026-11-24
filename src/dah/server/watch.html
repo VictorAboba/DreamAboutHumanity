@@ -345,6 +345,10 @@ h4 { margin: 12px 0 6px; font-size: 14px; }
       g.appendChild(sv("circle", {cx: x, cy: y, r: 4.6, fill: owner ? seatColor(owner) : "var(--neutral)",
                                   stroke: selected ? "var(--fg)" : "var(--panel)", "stroke-width": selected ? "1.1" : "0.6"}));
       if (sp.fortified) g.appendChild(sv("circle", {cx: x, cy: y, r: 3.4, fill: "none", stroke: "var(--panel)", "stroke-width": "0.5"}));
+      var st = sp.status || {};
+      if (st.occupied) g.appendChild(sv("circle", {cx: x, cy: y, r: 5.5, fill: "none", stroke: st.occupied.from ? seatColor(st.occupied.from) : "var(--fg)",
+                                                    "stroke-width": "0.9", "stroke-dasharray": "1 0.7"}));
+      if (st.ruined_until || st.ravaged_until) g.appendChild(sv("circle", {cx: x, cy: y, r: 4.6, fill: st.ruined_until ? "rgba(0,0,0,.55)" : "rgba(160,90,0,.35)"}));
       var t = sv("text", {x: x, y: y + 1.1, "text-anchor": "middle", "font-size": "3", "font-weight": "700", fill: "#fff",
                           stroke: "rgba(0,0,0,.55)", "stroke-width": "0.5", "paint-order": "stroke"});
       t.textContent = p.id;
@@ -395,6 +399,13 @@ h4 { margin: 12px 0 6px; font-size: 14px; }
     function row(k, v) { dl.appendChild(el("dt", {text: k})); dl.appendChild(el("dd", {text: v})); }
     row("Тип", p.type_name + (p.capital ? " (столица)" : ""));
     row("Владелец", nick(sp.owner));
+    var st = sp.status || {}, marks = [];
+    if (st.occupied) marks.push("оккупирована (взята у " + nick(st.occupied.from) + ", с хода " + st.occupied.since + ")");
+    if (st.ruined_until) marks.push("пепелище до хода " + st.ruined_until);
+    if (st.ravaged_until) marks.push("разорена до хода " + st.ravaged_until);
+    if (marks.length) row("Статус", marks.join("; "));
+    var claims = ((S.snap && S.snap.claims) || []).filter(function (c) { return c.province === p.id; });
+    if (claims.length) row("Притязания", claims.map(function (c) { return c.nick + " до хода " + c.until_turn; }).join(", "));
     row("Соседи", p.neighbors.join(", "));
     if (S.snap && S.snap.full) {
       row("Войска", unitsText(sp.units) + (sp.fortified ? " (укреплена)" : ""));
@@ -452,7 +463,7 @@ h4 { margin: 12px 0 6px; font-size: 14px; }
       }
     } else if (s.turn === 0) box.appendChild(el("p", {cls: "note", text: "Стартовая карта. События появятся после расчёта первого хода."}));
     else if (s.in_progress) box.appendChild(el("p", {cls: "note", text: "Ход идёт: события появятся после расчёта."}));
-    if (!s.full && s.turn > 0) box.appendChild(el("p", {cls: "note", text: "Зрителю видны только публичные события: смены владельцев и выбывания. Бои, войска и приказы откроются после конца партии."}));
+    if (!s.full && s.turn > 0) box.appendChild(el("p", {cls: "note", text: "Зрителю видны только публичные события: смены владельцев, судьбы провинций, бунты, притязания и выбывания. Бои, войска и приказы откроются после конца партии."}));
     if (s.events.length) {
       var ul = el("ul", {cls: "feed"});
       s.events.forEach(function (e) { ul.appendChild(eventItem(e)); });

@@ -17,4 +17,11 @@
   name: {ru: Тайна, en: Mystery}
   order: 4
   color: "#7a4bb0"
-  description: Кредо, Сноходцы и задел для шпионажа (пока — характеристики и флаги).
+  description: Кредо, Сноходцы и шпионаж (Шёпот, Тени, сроки миссий).
+# Counter-intelligence (decision 21): exists only while espionage is on.
+- id: mirrors
+  name: {ru: Зеркала, en: Mirrors}
+  order: 5
+  color: "#4b9aa8"
+  requires_system: espionage
+  description: Контрразведка — Зеркала (C), Зеркальный зал, выучка гарнизонов, дознание пойманных Теней.

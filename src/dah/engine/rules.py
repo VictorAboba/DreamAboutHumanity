@@ -11,8 +11,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
+from . import espionage as esp
 from . import registry
 from .catalog import ABILITY_TEXT, describe, describe_effect
+from .conquest import ordered_dispositions
 from .content import DEFAULT_SETUP_LIMIT, Ruleset
 from .orders import CP_CANCEL, CP_FORTIFY, CP_REDUCE
 
@@ -33,6 +35,8 @@ TOPICS: dict[str, tuple[str, str]] = {
     "combat": ("РАСЧЁТ", "порядок расчёта и бой"),
     "victory": ("ПОБЕДА", "победа и очки"),
     "pacts": ("ДИПЛОМАТИЯ", "подношения и пакты"),
+    "spying": ("ШПИОНАЖ", "Тени, миссии, донесения, ложные записи"),
+    "conquest": ("ЗАВОЕВАНИЕ", "оккупация, судьбы провинций, притязания"),
     "fog": ("ВИДИМОСТЬ", "туман войны"),
     "messages": ("СООБЩЕНИЯ", "лимиты сообщений"),
     "techs": ("ТЕХНОЛОГИИ", "дерево технологий"),
@@ -44,6 +48,11 @@ ALIASES = {
     "gifts": "pacts", "pact": "pacts", "visibility": "fog", "tech": "techs", "research": "techs",
     "technologies": "techs", "faction": "factions", "artifact": "artifacts", "start": "setup", "unit": "units",
     "building": "buildings", "province": "provinces", "order": "orders", "message": "messages", "ability": "abilities",
+    "capture": "conquest", "завоевание": "conquest", "occupation": "conquest", "оккупация": "conquest",
+    "dispose": "conquest", "disposition": "conquest", "dispositions": "conquest", "claim": "conquest",
+    "claims": "conquest", "espionage": "spying", "spies": "spying", "spy": "spying", "intel": "spying",
+    "feint": "spying", "feints": "spying", "shade": "spying", "shades": "spying", "шпионаж": "spying",
+    "тени": "spying", "тень": "spying",
 }
 
 
@@ -268,9 +277,19 @@ def _orders(rs: Ruleset) -> Section:
         '- {"kind":"build","province":"P02","building":"mine"} — своя провинция без такого здания.\n'
         f'- {{"kind":"fortify","province":"P01"}} — оборона +{st("combat.fortify_bonus"):.0%}, если из провинции '
         f"никто не уходит.{research}")
+    rng = _move_range(rs)
+    short = ('ПРИКАЗЫ (JSON; ид можно короткие): {"kind":"move","from":"P01","to":"P02","unit":"assault",'
+             '"count":2} или "units":{...} — на соседнюю'
+             + (f" (по своей земле до {rng} рёбер)" if rng != "1" else "")
+             + '; в чужую/нейтральную с армией — атака; "pact":"honor"|"break". recruit {province,unit,count} — '
+             "резерв сразу, юниты в начале расчёта. build {province,building}. fortify {province} — оборона "
+             f'+{st("combat.fortify_bonus"):.0%}, если никто не уходит.'
+             + (" research {tech} — только в Д." if research else "")
+             + " Теряются вложенные объекты — orders одной JSON-строкой. Примеры и коды ошибок — "
+             'rules(topic="orders").')
     # the error codes only in the topic: every refusal names its code and how to fix it anyway
     return Section("orders", text + "\nКоды ошибок — rules(topic=\"orders\").",
-                   text + f"\nОшибки: {', '.join(errors)}.")
+                   text + f"\nОшибки: {', '.join(errors)}.", short)
 
 
 def _p2(rs: Ruleset) -> Section:
@@ -341,9 +360,168 @@ def _pacts(rs: Ruleset) -> Section:
     return Section("pacts", core, short=short)
 
 
+_BEHAVIOR_TEXT = {"annex": "оккупация снята: доход, очки, стройка и найм — с этого расчёта",
+                  "raze": "добыча сразу; здания и стройки уничтожены; провинция твоя, но пепелище {ruin_turns} х. "
+                          "(0 дохода и очков, без стройки и найма)",
+                  "raid": "добыча; провинция уходит прежнему владельцу (если жив, иначе нейтралам), «разорена» "
+                          "{ravage_turns} х. (доход 0); твои войска уходят назад; притязания нет",
+                  "release": "провинция уходит to, иначе прежнему владельцу, иначе исконному, иначе нейтралам; войска "
+                             "уходят; получатель не прежний и не исконный — у него оккупация"}
+
+
+def _fate_price(rs: Ruleset, amounts: Mapping[str, int], what: str) -> str:
+    return f"{what} {_amounts(rs, amounts)} × ценность" if amounts else ""
+
+
+def _conquest(rs: Ruleset) -> Section | None:
+    if not rs.system("conquest") or not rs.dispositions:
+        return None
+    st = rs.stat
+    fates = ordered_dispositions(rs)
+    names = []
+    for _, d in fates:
+        price = _fate_price(rs, d.cost, "")
+        names.append(f"{d.name} ({price.strip()})" if price else d.name)
+    values = sorted({(d.conquest_value, d.short) for d in rs.province_types.values() if d.conquest_value != 1},
+                    reverse=True)
+    value_text = ", ".join(f"{short} — {v}" for v, short in values)
+    claim_turns, claim_bonus = int(st("conquest.claim_turns")), st("conquest.claim_bonus")
+    core = ("ЗАВОЕВАНИЕ: отнятое у игрока — оккупация: ни дохода, ни очков, здания не действуют; без гарнизона "
+            "бунтует. Судьба — dispose{province,disposition} (Д/П2, 0 ОК; на чужую провинцию заранее — директива с "
+            f"резервом) или policy: {', '.join(names)}. Ценность 1" + (f" ({value_text})" if value_text else "")
+            + ". Нейтральное и своё отбитое — сразу твоё. "
+            f"Потерявший {claim_turns} ходов бьёт её на +{claim_bonus:.0%}. "
+            'Подробно — rules(topic="conquest").')
+    short = ("ЗАВОЕВАНИЕ: отнятое у игрока — оккупация без дохода и очков; судьба — dispose/policy: "
+             + ", ".join(d.name for _, d in fates) + '. Подробно — rules(topic="conquest").')
+    lines = [core.replace(' Подробно — rules(topic="conquest").', ""), "Судьбы:"]
+    for did, d in fates:
+        parts = [p for p in (_fate_price(rs, d.cost, "цена"), _fate_price(rs, d.loot, "добыча")) if p]
+        text = _BEHAVIOR_TEXT[d.behavior].format(**d.params)
+        lines.append(f"- {_short(did)} «{d.name}»: {'; '.join(parts + [text])}.")
+    lines += [
+        "Ценность по типам: " + ", ".join(f"{d.short} {d.conquest_value}" for d in rs.province_types.values()) + ".",
+        "Смена владельца: у нейтралов (и после бунта) — сразу полноценная; своё исконное или отнятое у тебя — "
+        "возвращение, сразу полноценная и бесплатно; у другого игрока в бою — твоя директива, иначе политика (если "
+        "хватает свободных ресурсов), иначе оккупация; переданная освобождением не тебе-прежнему — оккупация.",
+        'Приказы: {"kind":"dispose","province":"P07","disposition":"subjugate"} — своя оккупированная '
+        "провинция: решение в этом расчёте; чужая провинция игрока: директива на случай захвата в этом расчёте "
+        '(не взял — резерв вернётся полностью). Одна запись на провинцию; у освобождения можно "to": ник. '
+        '{"kind":"policy","disposition":"subjugate"} (или null) — для захватов без директивы, держится между '
+        "ходами. Правка и отмена в П2 — 0 ОК, резерв возвращается полностью.",
+        f"Притязание: потерявший полноценную провинцию другому игроку {claim_turns} ходов атакует её с силой "
+        f"+{claim_bonus:.0%}; гаснет по сроку, при возврате и при выбывании. Видно всем (get_state: ПРИТЯЗАНИЯ).",
+        f"Добычи нет с разорённой, с пепелища и {int(st('conquest.loot_cooldown'))} ходов после прошлой добычи с "
+        "этой провинции. Пепелище нельзя подчинить или разграбить (RUINED). В оккупации и на пепелище нельзя "
+        "строить и нанимать (OCCUPIED, RUINED).",
+        "Бунт: если после боёв у оккупанта в провинции, оккупированной до этого расчёта, нет войск — она нейтральна. "
+        "Очки: оккупации и пепелища — 0. Игрок только с оккупациями жив. Совместный захват по пакту: исполняется "
+        "только директива/политика того, кто держит провинцию.",
+        "Порядок расчёта: бои → возвращения и притязания → директивы → политика → оккупация (по ID провинций) → "
+        "решения по прежним оккупациям → добыча, отходы → бунты → возврат резервов → экономика.",
+        "Ошибки: BAD_TARGET (нейтральная), NOT_OCCUPIED (своя полноценная), OCCUPIED, RUINED, NO_RECIPIENT.",
+    ]
+    return Section("conquest", core, "\n".join(lines), short)
+
+
+_MISSION_TEXT = {esp.OBSERVE: "юниты по видам (интервалы), здания, стройка, укрепление прошлого хода, статус",
+                 esp.LEDGER: "свободные запасы (интервалы), технологии, активное исследование и прогресс, "
+                             "артефакты, S и C цели, число Теней",
+                 esp.READ_ORDERS: "книга приказов цели на конец Д (без ID; ложные записи выглядят как настоящие, "
+                                  "некоторые помечены [ЛОЖНАЯ ЗАПИСЬ]), ОК хода, её свободные войска у твоих границ",
+                 esp.SABOTAGE: "удар в расчёте этого хода: {effects}"}
+_TARGET_TEXT = {"province": "провинция", "owned_province": "провинция игрока", "seat": "игрок (ник)"}
+
+
+def _pct(x: float) -> str:
+    return f"{round(x * 100)}%"
+
+
+def _sabotage_effects(params: Mapping[str, Any]) -> str:
+    parts = []
+    if params.get("deny_fortify"):
+        parts.append("укрепление сорвано")
+    if params.get("defense_mul", 1) != 1:
+        parts.append(f"оборона ×{params['defense_mul']:g}")
+    if params.get("income_mul", 1) != 1:
+        parts.append(f"доход ×{params['income_mul']:g}")
+    return ", ".join(parts) or "без эффекта"
+
+
+def _spying(rs: Ruleset) -> Section | None:
+    if not rs.system("espionage") or not rs.missions:
+        return None
+    st = rs.stat
+    names = _names(rs)
+    shade = rs.espionage.shade_name if rs.espionage else "Тень"
+    cost = _amounts(rs, esp.shade_cost(rs, None)) or "бесплатно"
+    upkeep = esp.shade_upkeep(rs, None)
+    upkeep_txt = ", +" + ", ".join(f"{n} {names.get(r, r)}" for r, n in upkeep.items()) + "/ход" if upkeep else ""
+    spy_cp, recall_cp = int(st("p2.cost.spy")), int(st("p2.cost.recall"))
+    feint_cp = int(st("feint.cp_cost"))
+    core = (f"ШПИОНАЖ: {shade} (hire_shade, только Д: {cost}{upkeep_txt}) идёт на spy{{shade,mission,target,rounds}}: "
+            f"из Д — раунд в этом ходу, из П2 ({spy_cp} ОК) — со следующего. Раунд — между Д и П2: сперва поимка "
+            "(Тень потеряна), затем находка. Донесения — в начале П2 (get_intel): снимок конца Д, числа — интервалы "
+            f"с правдой внутри. В книге бывают ложные записи (move…feint:true: войска дома, {feint_cp} ОК). "
+            'list_spies, estimate_mission, rules(topic="spying").')
+    short = ("ШПИОНАЖ: hire_shade, spy{shade,mission,target,rounds}; донесения в П2 — get_intel; бывают ложные "
+             'записи (move feint:true). Подробно: rules(topic="spying").')
+    lines = [core.replace(', rules(topic="spying").', "."), "Миссии:"]
+    for mid, m in sorted(rs.missions.items()):
+        price = []
+        if m.cost:
+            price.append(_amounts(rs, m.cost))
+        if m.cost_per_round:
+            price.append(_amounts(rs, m.cost_per_round) + "/раунд")
+        need = [f"S{m.whisper}"] + [rs.techs[t].name if t in rs.techs else t for t in m.requires_tech]
+        what = _MISSION_TEXT.get(m.behavior, m.behavior).format(effects=_sabotage_effects(m.params))
+        loud = " (громкая)" if m.loud else ""
+        lines.append(f"- {_short(mid)} «{m.name}»{loud}: цель — {_TARGET_TEXT.get(m.target, m.target)}; "
+                     f"D{esp.difficulty(rs, mid, None)}; срок {m.rounds_min}–{esp.max_rounds(rs, mid, None)}; нужно "
+                     f"{', '.join(need)}; цена {' + '.join(price) or '0'}; даёт: {what}.")
+    s = lambda k: st(f"spy.success.{k}")      # noqa: E731
+    d = lambda k: st(f"spy.detect.{k}")       # noqa: E731
+    a = lambda k: st(f"spy.attribution.{k}")  # noqa: E731
+    lines += [
+        f"{shade}: не больше {int(st('spy.shades_max'))}, на заданиях одновременно {int(st('spy.active_base'))} + "
+        "S//2. Нанимается только при своей полноценной стартовой столице, одна за ход; появляется на закрытии Д, "
+        "задания — со следующего Д. Голод Теней не трогает. Цена задания — вся за срок, резерв при подаче, не "
+        "возвращается (кроме снятия записи spy до закрытия Д).",
+        f"S — шпионаж (база {int(st('spy.whisper'))}), C — контрразведка (база {int(st('spy.mirrors'))}); их "
+        "поднимают технологии. Место проверки — провинция-цель; для цели-игрока — его столица, иначе первая "
+        "полноценная, иначе первая оккупированная. C_лок = C владельца + Зеркальные залы там (не в оккупации и не на "
+        f"пепелище) + {int(st('spy.detect.army'))}, если там его войска; нейтральная — 0.",
+        f"Поимка (первой): p = {_pct(d('base'))} + {_pct(d('difficulty'))}·D + {_pct(d('skill'))}·(C_лок − S) − "
+        f"{_pct(d('xp'))}·V − {_pct(d('cover'))}·K, в пределах {_pct(d('min'))}–{_pct(d('max'))}. "
+        f"Находка: p = {_pct(s('base'))} + {_pct(s('skill'))}·(S − D) + {_pct(s('xp'))}·V + {_pct(s('cover'))}·K, "
+        f"{_pct(s('min'))}–{_pct(s('max'))}. K — раунды, уже сыгранные этим заданием (до "
+        f"{int(st('spy.cover_max'))}); V — опыт (+1 за задание с находкой и без поимки, до {int(st('spy.xp_max'))}). "
+        "estimate_mission(mission, target, rounds) считает это точно (чужое C — база, если не задать assume_mirrors).",
+        f"Донесение: число n — интервал шириной max(2, ⌈{st('spy.intel.width'):g}·n⌉), правда всегда внутри; смещение "
+        "постоянно для пары «ты — цель». Снимок — конец Д: правки П2 в нём не видны. get_intel() — донесения хода, "
+        "get_intel(report_id=\"r4\") — одно целиком; во входящих — одна запись [ИГРА] о разведсрезе.",
+        "Поймана — Тень потеряна навсегда, плата за срок пропала. Хозяин видит только «нет связи». Владелец места "
+        "проверки видит, где поймана, задание и цель; хозяина — если удалась атрибуция: "
+        f"{_pct(a('base'))} + {_pct(a('skill'))}·(C_лок − S), {_pct(a('min'))}–{_pct(a('max'))}. Другие не узнают "
+        "ничего; в нейтральной провинции о поимке не узнаёт никто.",
+        "Громкая миссия с находкой: удар в расчёте этого хода по провинции (видит её владелец, без исполнителя); "
+        f"отзыв Тени в П2 удар снимает. recall{{shade}}: из Д — без раунда, из П2 — {recall_cp} ОК (раунд хода уже "
+        "был); плата не возвращается. Задание снимается, если цель выбыла или провинция стала твоей.",
+        f"Ложная запись: move с \"feint\":true, только в Д, {feint_cp} ОК хода; войска резервируются, но остаются "
+        "дома, обороняются, укрепление не срывают. Видна только Чтению приказов. В П2 amend {\"feint\":false} — "
+        f"как новая атака ({int(st('p2.cost.new_attack'))} ОК, наспех); обратно нельзя; отмена — {CP_CANCEL} ОК.",
+        f"П2: новый spy {spy_cp} ОК, recall {recall_cp} ОК; hire_shade и новая ложная запись — PHASE_LOCKED; "
+        "записи spy/recall/hire_shade из Д в П2 не меняются (их исполнил разведсрез).",
+        "Видимость: свои Тени, задания, донесения и S/C видишь только ты; пакт шпионаж не запрещает.",
+        "Ошибки: NO_CAPITAL, SHADE_LIMIT, SHADE_BUSY, TOO_MANY_MISSIONS, MISSION_LOCKED, BAD_TARGET, BAD_ROUNDS "
+        "(срок длиннее оставшихся ходов).",
+    ]
+    return Section("spying", core, "\n".join(lines), short)
+
+
 def _fog(rs: Ruleset) -> Section:
     text = ("ВИДИМОСТЬ: свои провинции и соседние — полностью; остальные — владелец и тип, войска «?». Чужие ресурсы и "
-            "приказы не видны никогда.")
+            "приказы не видны никогда" + (" (кроме донесений Теней)." if rs.system("espionage") else "."))
     if rs.techs or rs.artifacts:
         text += " Чужие технологии и артефакты не видны до конца партии" + \
             (" (видно только число изученных технологий)." if rs.techs else ".")
@@ -443,7 +621,8 @@ def sections(rs: Ruleset, setup: Mapping[str, Any] | None = _UNSET,
         from .setup import setup_config
         setup = setup_config(rs)
     out = [_turn(rs, setup), _setup(rs, setup), _resources(rs), _provinces(rs), _units(rs), _abilities(rs),
-           _buildings(rs), _orders(rs), _p2(rs), _combat(rs), _victory(rs), _pacts(rs), _fog(rs), *extra,
+           _buildings(rs), _orders(rs), _p2(rs), _combat(rs), _victory(rs), _pacts(rs), _spying(rs), _conquest(rs), _fog(rs),
+           *extra,
            _techs(rs), _factions(rs, setup), _artifacts(rs, setup)]
     return [s for s in out if s is not None]
 
@@ -460,8 +639,9 @@ def _contents(secs: Sequence[Section]) -> str:
             "describe(\"id или название\") — любой юнит, здание, технология, артефакт, фракция.")
 
 
-# Shrink order when over the limit: details one can look up first, the unit list (needed every turn) last.
-SHRINK_ORDER = ("pacts", "combat", "provinces", "buildings", "units")
+# Shrink order when over the limit: details one can look up first, the unit list (needed every turn) late, the order
+# examples last (a game with every system on plus its СООБЩЕНИЯ needs them short; every form stays listed).
+SHRINK_ORDER = ("pacts", "spying", "conquest", "combat", "provinces", "buildings", "units", "orders")
 
 
 def rules_text(ruleset: Ruleset, *, setup: Mapping[str, Any] | None = _UNSET, extra: Sequence[Section] = (),

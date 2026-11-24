@@ -11,6 +11,7 @@ from collections import Counter
 from typing import Any, Callable, Iterable, Mapping
 
 from . import registry
+from .conquest import buildings_work
 from .content import Profile, Ruleset, StatKey
 from .model import GameState, Player
 
@@ -30,7 +31,8 @@ def stat_key(state: GameState, ruleset: Ruleset, seat: str | None) -> StatKey:
         return None
     counts: Counter[str] = Counter()
     if any(b.owner_mods for b in ruleset.buildings.values()):
-        for prov in state.owned(player.seat):
+        # only buildings of full provinces act (SPY_AND_CONQUEST.md 1.3: a captured HQ gives no CP until subjugated)
+        for prov in (p for p in state.owned(player.seat) if buildings_work(p, state.turn)):
             counts.update(b for b in prov.buildings if b in ruleset.buildings and ruleset.buildings[b].owner_mods)
     if not (player.techs or player.artifacts or counts):
         return player.faction
@@ -45,6 +47,8 @@ def province_stat(state: GameState, ruleset: Ruleset, pid: str, path: str, key: 
     if key is ...:
         key = stat_key(state, ruleset, prov.owner)
     base = ruleset.stat(path, key)
+    if not buildings_work(prov, state.turn):        # occupied or in ruins: its buildings do not act
+        return base
     mods = [m for b in prov.buildings if b in ruleset.buildings
             for m in ruleset.buildings[b].province_mods if m["target"] == path]
     if not mods:

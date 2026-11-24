@@ -107,6 +107,8 @@ docs/                      SLICE.md (спецификация), CONCEPT.md (ко
 | `private/reports/turn_<N>.json` | полный отчёт хода N |
 | `private/messages.jsonl` | полные тексты сообщений и записи самой игры во входящих (`system: true`) |
 | `private/bot_keys.json` | ключи мест-ботов для `dah bots run` |
+| `private/books_d/turn_<N>.json` | шпионаж: книги приказов на закрытии Д хода N (что читал разведсрез) |
+| `private/recon/turn_<N>.json` | шпионаж: разведсрез хода N — все броски, донесения с `facts` и `truth`, поимки, удары |
 
 Каталог `private/` сервер игрокам никогда не отдаёт. В журнале — размеры сообщений, а не тексты.
 
@@ -119,7 +121,10 @@ docs/                      SLICE.md (спецификация), CONCEPT.md (ко
 | `game_created` | конфиг (без ключей), `ruleset_hash`, `seed`, `rules_chars` |
 | `seat_info` | место, вид, declared, `dreamteam_session_id`; при более поздней привязке ещё `update: true`, `previous`, `source` (`cli` или `waker`) |
 | `phase_open` / `phase_close` | ход, фаза, дедлайн / причина `all_ready` или `deadline`, `not_ready` (живые места, не нажавшие ready) |
-| `recon` | ход (пустой разведсрез) |
+| `recon` | ход; при включённом шпионаже ещё `state_hash` (после разведсреза), `recon_hash`, missions, successes, captures |
+| `shade_hired` / `mission_started` / `spy_round` / `intel_report` / `intel_read` / `shade_captured` / `mission_end` / `mission_rejected` | шпионаж (этап 3): Тени, задания, броски каждого раунда, донесения (`facts_hash`, `truth_hash`, информативность), что место открыло (`via` get_state или get_intel), поимки |
+| `sabotage` / `strike_cancelled` / `feint` / `feint_exposed` | удары, ложные записи (`order_id`; `converted_in_p2`), их разоблачение (`order_id`, `index`, `report_id`) |
+| `province_captured` / `disposition` / `policy_set` / `policy_unaffordable` / `dispose_failed` / `occupation_revolt` / `claim_created` / `claim_ended` / `ruin_ended` | завоевание (этап 3): захваты с `mode` и `status`, судьбы с ценой, добычей и источником, политика, бунты, притязания, пепелища |
 | `call` | место, маршрут, `req_chars`, `resp_chars`, `ms`, статус, ход, фаза, `host` у служебных вызовов |
 | `first_call_in_phase` | место, ход, фаза |
 | `orders_validated` / `orders_submitted` | место, принятые или их число, отклонённые с причинами, `orders_hash`, фаза |
@@ -165,7 +170,8 @@ docs/                      SLICE.md (спецификация), CONCEPT.md (ко
 2. создаёт начальное состояние из зерна; при фазе старта ход 1 строится по `results` события `setup_closed`
    (фракция и артефакты каждого места);
 3. применяет операции дипломатии хода из `private/diplomacy/` и рассчитывает ход по приказам, сохранённым в
-   `private/orders/`;
+   `private/orders/`; при включённом шпионаже — операции П1, затем разведсрез по `private/books_d/` со сверкой
+   `state_hash` события `recon`, затем операции П2 и расчёт;
 4. сверяет `state_hash` каждого хода, победителей и итоговый счёт с журналом.
 
 Расхождение значит, что изменились правила или контент либо расчёт недетерминирован. Команда завершается с кодом 1.

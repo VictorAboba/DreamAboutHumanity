@@ -104,3 +104,12 @@ class ApiClient:
 
     def list_techs(self) -> dict[str, Any]:
         return self._call("GET", "/v1/techs")
+
+    # --- stage 3: espionage (docs/SPY_AND_CONQUEST.md section 7) ---
+
+    def intel(self, turn: int | None = None) -> dict[str, Any]:
+        """The seat's own reports of a recon step as data: {turn, intel: {reports, rounds, caught, lost}}."""
+        params: dict[str, Any] = {"format": "json"}
+        if turn is not None:
+            params["turn"] = turn
+        return self._call("GET", "/v1/intel", params=params)

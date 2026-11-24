@@ -1,0 +1,16 @@
+id: captains
+name: {ru: Вольные Капитаны Разлома, en: Free Captains of the Rift}
+description: >-
+  Торговцы и налётчики. Нет штрафа «наспех» за удары из П2, +2 Сплава каждый ход, ветка «Логистика» дешевле на 30%,
+  уникальные Корсары Разлома (2 ребра по любой земле). Минус: оборона провинций −10%.
+lore: lore/captains.md
+bonuses:
+  - {effect: modify, target: p2.hasty_penalty, op: set, value: 0}
+  - {effect: modify, target: tech.branch.logistics.cost_mul, op: mul, value: 0.7}
+  - {effect: income, resource: alloy, amount: 2}
+penalties:
+  - {effect: modify, target: province.defense_mul, op: mul, value: 0.9}
+starting:
+  resources: {alloy: 30, provisions: 15}
+  units: {assault: 3, rift_corsair: 1}
+  buildings: [barracks]

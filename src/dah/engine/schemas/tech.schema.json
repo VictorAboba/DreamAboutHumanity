@@ -74,6 +74,9 @@
     },
     "lore": {
       "$ref": "common.schema.json#/$defs/lore"
+    },
+    "requires_system": {
+      "$ref": "common.schema.json#/$defs/system"
     }
   }
 }

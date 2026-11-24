@@ -13,7 +13,7 @@ import re
 import threading
 import time
 import unicodedata
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -24,10 +24,12 @@ from dah.engine import (DeadlineInfo, GameState, Ruleset, SeatOrders, SetupChoic
                         rules_topic, scores, seat_reserved, setup_config, stat_key, state_hash, submit_orders, techs_text,
                         techs_view, upkeep_of, view_state, visible_provinces)
 from dah.engine import diplomacy as dip
+from dah.engine import espionage as esp
 from dah.engine.content import ContentError, legacy_pack_sets
 from dah.engine.catalog import KIND_LABELS
 from dah.engine.content import DEFAULT_DIPLOMACY_LIMITS, DEFAULT_SETUP_LIMIT
 from dah.engine.model import as_int, canonical_json, sha256_json
+from dah.engine.registry import SYSTEMS
 from dah.engine.orders import (FLAT_MOVE_EXAMPLE, P1_LOCKED_HINT, STRING_ORDERS_EXAMPLE, decode_json_arg,
                                resolve_unit_ref)
 from dah.engine.rules import Section as RulesSection
@@ -78,6 +80,7 @@ SETUP_TOOLS = ["get_setup", "choose_faction", "choose_artifacts", "describe", "l
 CHECK_TOOLS = ["list_orders", "validate_orders", "estimate"]
 ORDER_TOOLS = [*CHECK_TOOLS, "submit_orders", "cancel_order", "amend_order"]
 DIPLOMACY_TOOLS = ["send_gift", "propose_pact", "respond_pact", "leave_pact", "list_pacts"]
+SPY_TOOLS = ["list_spies", "get_intel", "estimate_mission"]     # only in games with espionage on
 # Orders are given only in actions; negotiation_1 can only check them (user decision 12).
 ALLOWED = {
     "setup": [*SETUP_TOOLS, "get_state", "inbox", *ALWAYS_TOOLS],
@@ -88,6 +91,14 @@ ALLOWED = {
     "negotiation_2": ["get_state", *ORDER_TOOLS, "send_message", *DIPLOMACY_TOOLS, "inbox", "ready", "unready",
                       "history", *CONTENT_TOOLS, *ALWAYS_TOOLS],
 }
+def intel_tail(intel: dict[str, Any]) -> str:
+    """The espionage tail of a negotiation_2 phase text (SPY_AND_CONQUEST.md 6.3), as in dah-waker's wake text."""
+    text = f"донесений: {intel.get('reports', 0)}"
+    if intel.get("caught"):
+        text += f"; поймано у тебя: {intel['caught']}"
+    return text + " (get_intel, list_spies)"
+
+
 SETUP_HINT = ("фаза старта: get_setup() → choose_faction([\"id\", ...]) → choose_artifacts([\"id\"]) → ready(); "
               "приказы — с хода 1")
 # How to press ready in each phase (phase(), wake texts and rules say the same): P1 needs no hash, D and P2 need the
@@ -105,6 +116,11 @@ PHASE_READY_HINTS = {
 SETUP_STATE_NOTE = ("ФАЗА СТАРТА: состояние предварительное — фракции и артефакты ещё не выбраны (твой выбор и "
                     "предложения — get_setup()); ход 1 строится заново, когда фаза закроется. Фракции соперников "
                     "станут известны после фазы.")
+# Conquest events of a resolution written to the journal (SPY_AND_CONQUEST.md 8; a capture as `province_captured`)
+CONQUEST_JOURNAL = ("disposition", "policy_set", "policy_unaffordable", "dispose_failed", "occupation_revolt",
+                    "claim_created", "claim_ended", "ruin_ended")
+# Espionage events of a resolution written to the journal in full (SPY_AND_CONQUEST.md 8)
+ESPIONAGE_JOURNAL = ("mission_started", "mission_end", "sabotage", "strike_cancelled")
 SYSTEM_SENDER = "ИГРА"   # inbox entries written by the game itself (gifts, pacts): not player text, not wrapped
 OWN_SENDER = "ты"        # inbox entries the seat sent itself (`own: true`): a swarm's members see each other's words
 
@@ -130,15 +146,20 @@ class GameError(Exception):
 def make_config(*, game_id: str, scenario: str, seats: list[dict[str, Any]], seed: int,
                 phase_limits: dict[str, int] | None = None, turn_limit: int | None = None,
                 pack_dirs: list[str] | None = None, artifacts: str | None = None, artifact_offer: int | None = None,
-                artifact_points: int | None = None) -> dict[str, Any]:
+                artifact_points: int | None = None, systems: dict[str, bool | None] | None = None) -> dict[str, Any]:
     """Game config (SLICE.md section 5). Limits default to the scenario's. Seats: {seat, nick, kind, bot?,
     declared?, dreamteam_session_id?, faction?}.
 
     Setup (TECH_AND_SETUP.md section 2): the scenario's `setup` with the host's overrides (`artifacts`
     draft|points|none, `artifact_offer`, `artifact_points`) goes into `config["setup"]`, and the phase limit
     `phase_limits["setup"]` (the scenario's, else 5 min). No `setup` key: no setup phase, as in the slice. A seat's
-    `faction` is its default preference."""
-    rs = build_ruleset(pack_dirs, scenario)
+    `faction` is its default preference.
+
+    Stage 3 (SPY_AND_CONQUEST.md 1.1): `systems` {espionage|conquest: bool | None} overrides the scenario's switches
+    (None: the scenario's). The resulting switches go into `config["systems"]` when the host overrode one or some
+    system is on; a config without the key plays the scenario's switches (all off before stage 3)."""
+    overrides = {k: v for k, v in (systems or {}).items() if v is not None}
+    rs = build_ruleset(pack_dirs, scenario, overrides or None)
     setup = setup_config(rs, artifacts, artifact_offer, artifact_points)
     limits = {k: v for k, v in rs.scenario.phase_limits.items() if k != SETUP}
     if setup is not None:
@@ -162,6 +183,8 @@ def make_config(*, game_id: str, scenario: str, seats: list[dict[str, Any]], see
               "turn_limit": turn_limit or rs.scenario.turn_limit}
     if setup is not None:
         config["setup"] = setup
+    if overrides or rs.scenario.systems:
+        config["systems"] = {name: rs.system(name) for name in SYSTEMS}
     return config
 
 
@@ -173,7 +196,8 @@ def diplomacy_limits(config: dict[str, Any]) -> dict[str, int]:
 def game_ruleset(config: dict[str, Any], pack_dirs: list[str] | None = None) -> Ruleset:
     """The scenario's ruleset with this game's turn and phase limits (so rules text matches the game). `pack_dirs`
     overrides the config's packs."""
-    rs = build_ruleset(pack_dirs if pack_dirs is not None else config.get("pack_dirs"), config["scenario"])
+    rs = build_ruleset(pack_dirs if pack_dirs is not None else config.get("pack_dirs"), config["scenario"],
+                       config.get("systems"))
     scenario = replace(rs.scenario, turn_limit=config["turn_limit"], phase_limits=dict(config["phase_limits"]),
                        message_limits=config["message_limits"], diplomacy_limits=diplomacy_limits(config))
     return replace(rs, scenario=scenario)
@@ -352,8 +376,9 @@ class Game:
         game = cls(gdir, config, rs, Journal(gdir.journal_path, clock), clock, state)
         if config.get("setup"):
             game.setup_offers = draft_offers(rs, config["setup"], list(state.players), config["seed"])
+        systems = {"systems": list(rs.scenario.systems)} if "systems" in config else {}
         game.journal.append("game_created", config=config, ruleset_hash=rs.hash, seed=config["seed"],
-                            rules_chars=len(game.rules()))
+                            rules_chars=len(game.rules()), **systems)
         for s in config["seats"]:
             game.journal.append("seat_info", seat=s["seat"], kind=s["kind"], declared=s["declared"],
                                 dreamteam_session_id=s.get("dreamteam_session_id"))
@@ -468,12 +493,116 @@ class Game:
             self._close_setup(reason)
             return
         if phase == "actions":
-            self.journal.append("recon", turn=self.state.turn)  # scouting step: empty in the slice
+            self._recon()      # the recon step (espionage); an empty event without espionage, as in the slice
         if phase == P2:
             self._resolve_turn()
         else:
             self.state.phase = NEXT_PHASE[phase]
             self._open_phase()
+
+    def _recon(self) -> None:
+        """The recon step at the close of actions (SPY_AND_CONQUEST.md 1.5): the actions books are saved, recon runs
+        on the state of the close, its report (rolls, `facts` next to `truth`) is saved privately and journaled, and
+        each seat it touched gets one inbox entry when negotiation_2 opens."""
+        turn = self.state.turn
+        if not self.ruleset.system("espionage"):
+            self.journal.append("recon", turn=turn)
+            return
+        books = {seat: self._book(seat) for seat in self.alive_seats()}
+        self.gdir.save_turn("books_d", turn, {s: b.to_dict() for s, b in books.items()})
+        new_state, rep = esp.recon(self.state, books, self.ruleset, self.config["seed"])
+        self.gdir.save_turn("recon", turn, rep)
+        self.journal.append("recon", turn=turn, state_hash=state_hash(new_state), recon_hash=rep["hash"],
+                            **esp.recon_summary(rep))
+        self._journal_recon(rep, turn)
+        new_state.phase = self.state.phase
+        self.state = new_state
+        for seat in sorted(self.state.players):
+            text = esp.notice_text(rep, seat)
+            if text:
+                self._notice([seat], text, "recon", turn=turn, phase=P2)
+
+    def _journal_recon(self, rep: dict[str, Any], turn: int) -> None:
+        """The recon step in full, for offline metrics (SPY_AND_CONQUEST.md 8): who saw what, next to the truth."""
+        j = self.journal.append
+        for seat, items in sorted(rep["rejected"].items()):
+            for item in items:
+                j("mission_rejected", seat=seat, order=item["order"], reason=item["reason"], phase="recon", turn=turn)
+        for f in rep["feints"]:
+            j("feint", turn=turn, **f)
+        for h in rep["hired"]:
+            j("shade_hired", seat=h["seat"], shade=h["shade"], turn=turn)
+        for m in rep["started"]:
+            j("mission_started", seat=m["seat"], shade=m["shade"], mission=m["mission"], target=m["target"],
+              rounds=m["rounds"], phase=m["phase"], first_turn=m["first_turn"], turn=turn)
+        for r in rep["rounds"]:
+            j("spy_round", turn=turn, **{k: v for k, v in r.items() if k != "seat"}, seat=r["seat"])
+        for seat, reports in sorted(rep["reports"].items()):
+            for r in reports:
+                exposed = [f for f in r.get("feints", []) if f["exposed"]]
+                j("intel_report", seat=seat, report_id=r["id"], shade=r["shade"], mission=r["mission"],
+                  target=r["target"], turn=turn, facts_hash=sha256_json(r["facts"]), truth_hash=sha256_json(r["truth"]),
+                  informativeness=esp.informativeness(r), feints_shown=len(r.get("feints", [])),
+                  feints_exposed=len(exposed))
+                for f in exposed:
+                    j("feint_exposed", spy_seat=seat, victim_seat=r["target"], order_id=f.get("order_id"),
+                      index=f["index"], report_id=r["id"],
+                      turn=turn)
+        for c in rep.get("caught", []):
+            j("shade_captured", victim=c["victim"], owner=c["owner"], shade=c["shade"], mission=c["mission"],
+              target=c["target"], province=c["province"], attributed=c["attributed"], turn=turn)
+        for e in rep["ended"]:
+            j("mission_end", turn=turn, **e)
+
+    def recon_report(self, turn: int | None = None) -> dict[str, Any] | None:
+        """The saved recon step of a turn (default: the current one, once actions closed)."""
+        turn = self.state.turn if turn is None else turn
+        if not self.ruleset.system("espionage"):
+            return None
+        return self.gdir.load_turn("recon", turn)
+
+    def _require_espionage(self) -> None:
+        if not self.ruleset.system("espionage"):
+            raise GameError("NOT_AVAILABLE", "шпионаж выключен в этой партии")
+
+    def list_spies(self, seat: str) -> dict[str, Any]:
+        self._require_espionage()
+        rep = self.recon_report() if self.phase == P2 else None
+        return {"text": esp.spies_text(self.state, self.ruleset, seat, rep)}
+
+    def get_intel(self, seat: str, turn: Any = None, shade: Any = None, report_id: Any = None,
+                  fmt: str = "text") -> dict[str, Any]:
+        """The seat's reports of one recon step: text (default), or with `fmt="json"` the same as data (all its
+        reports' facts, round outcomes, captures at the seat, its lost Shades) for programs and bots."""
+        self._require_espionage()
+        if fmt not in ("text", "json"):
+            raise GameError("INVALID", f"format {str(fmt)[:20]!r} не бывает: text (по умолчанию) или json")
+        t = as_int(turn) if turn not in (None, "") else None
+        if t is not None and (isinstance(t, bool) or not isinstance(t, int)):
+            raise GameError("INVALID", f"turn — номер хода, получено {turn!r}")
+        last = self.state.turn if self.phase in (P2, GAME_OVER) else self.state.turn - 1
+        t = last if t is None else t
+        sid = esp.shade_id(shade) if shade not in (None, "") else None
+        rid = str(report_id).strip().lstrip("#") if report_id not in (None, "") else None
+        rep = self.recon_report(t) if 1 <= t <= max(last, 0) else None
+        if fmt == "json":
+            data = esp.intel_json(rep, seat)
+            self.journal.append("intel_read", seat=seat, report_ids=[r["id"] for r in data["reports"]],
+                                via="get_intel", format="json", turn=self.state.turn, phase=self.phase)
+            return {"turn": t, "intel": data}
+        text = esp.intel_text(rep, self.ruleset, self.state, seat, sid, rid)
+        self.journal.append("intel_read", seat=seat, report_ids=[rid] if rid else
+                            [r["id"] for r in ((rep or {}).get("reports") or {}).get(seat, [])],
+                            via="get_intel", turn=self.state.turn, phase=self.phase)
+        return {"turn": t, "text": text}
+
+    def estimate_mission(self, seat: str, body: dict[str, Any]) -> dict[str, Any]:
+        self._require_espionage()
+        try:
+            return esp.estimate_mission(self.state, self.ruleset, seat, body.get("mission"), body.get("target"),
+                                        body.get("rounds"), body.get("shade"), body.get("assume_mirrors"))
+        except ValueError as exc:
+            raise GameError("INVALID", str(exc)) from None
 
     def _resolve_turn(self) -> None:
         turn = self.state.turn
@@ -489,6 +618,11 @@ class Game:
         for e in report.events:
             if e["kind"] in ("research_started", "tech_completed"):
                 self.journal.append(e["kind"], seat=e["seats"][0], tech=e["tech"], turn=turn)
+            elif e["kind"] in CONQUEST_JOURNAL or (e["kind"] == "captured" and "mode" in e):
+                self._journal_conquest(e, turn)
+            elif e["kind"] in ESPIONAGE_JOURNAL:
+                data = {k: v for k, v in e.items() if k not in ("kind", "seats")}
+                self.journal.append(e["kind"], turn=turn, **data)
         self.journal.append(
             "turn_resolved", turn=turn, state_hash=state_hash(new_state), scores=report.public["scores"],
             idle_resources={s: v["resources"] for s, v in report.idle.items()},
@@ -510,6 +644,16 @@ class Game:
         else:
             self.gdir.save_turn("states", new_state.turn, new_state.to_dict())
             self._open_phase()
+
+    def _journal_conquest(self, e: dict[str, Any], turn: int) -> None:
+        """Conquest events of a resolution in their full form (SPY_AND_CONQUEST.md 8), for offline metrics."""
+        data = {k: v for k, v in e.items() if k not in ("kind", "seats")}
+        if e["kind"] == "captured":
+            data = {"province": e["province"], "by": e["to"], "from": e["from"], "mode": e["mode"],
+                    "status": e["status"]}
+            self.journal.append("province_captured", turn=turn, **data)
+            return
+        self.journal.append(e["kind"], turn=turn, **data)
 
     def _notify(self) -> None:
         with self._waiters_lock:
@@ -592,7 +736,7 @@ class Game:
             "phase": self.phase, "deadline": iso_time(self.deadline) if self.deadline is not None else None,
             "seconds_left": self.seconds_left(), "ready": ready, "you_ready": seat in self.ready_seats,
             "phase_seq": self.phase_seq,
-            "allowed": ALLOWED.get(self.phase, READ_TOOLS) if seat_alive else READ_TOOLS,
+            "allowed": self._allowed(seat_alive),
             "alive": seat_alive, "game_over": self.game_over,
         }
         if self.game_over:
@@ -603,10 +747,30 @@ class Game:
             if self.phase != "negotiation_1":
                 info["orders_hash"] = orders_hash(self._book(seat))   # ready(confirm_hash=...) in one call
             info["hint"] = PHASE_READY_HINTS[self.phase].format(orders_hash=info.get("orders_hash"))
+        intel = self._intel_counts(seat)
+        if intel is not None:
+            info["intel"] = intel       # the wake tail «донесений: N; поймано у тебя: M» (SPY_AND_CONQUEST.md 6.3)
         if host:
             info.update(self.player_presence(seat))
         info["text"] = self._phase_text(info)
         return info
+
+    def _intel_counts(self, seat: str) -> dict[str, int] | None:
+        """In negotiation_2 of an espionage game: the seat's reports of this turn's recon step and the Shades caught
+        at it; None otherwise (and in games without espionage, whose phase info never changes)."""
+        if self.phase != P2 or self.game_over or not self.ruleset.system("espionage"):
+            return None
+        rep = self.recon_report()
+        if rep is None:
+            return None
+        return {"reports": len((rep.get("reports") or {}).get(seat, [])),
+                "caught": len((rep.get("captures") or {}).get(seat, []))}
+
+    def _allowed(self, seat_alive: bool) -> list[str]:
+        tools = list(ALLOWED.get(self.phase, READ_TOOLS) if seat_alive else READ_TOOLS)
+        if self.ruleset.system("espionage") and self.phase != SETUP:
+            tools += [t for t in SPY_TOOLS if t not in tools]       # espionage reads: every phase (6.1)
+        return tools
 
     def _phase_text(self, info: dict[str, Any]) -> str:
         parts = [f"Ход {info['turn']}/{info['turn_limit']}", PHASE_LABELS.get(self.phase, self.phase)]
@@ -617,6 +781,8 @@ class Game:
             parts.append(f"до {datetime.fromtimestamp(self.deadline, timezone.utc):%H:%MZ} "
                          f"(ещё {info['seconds_left']} с)")
         parts.append(f"готово {info['ready']}" + (", ты готов" if info["you_ready"] else ", ты не готов"))
+        if info.get("intel"):
+            parts.append(intel_tail(info["intel"]))
         if info.get("hint"):
             parts.append(info["hint"])
         return " | ".join(parts)
@@ -689,6 +855,14 @@ class Game:
                        if (r := self.gdir.load_turn("reports", t)) is not None]
         text = render_state_text(self.state, self.ruleset, seat, info, since_turn, since_state, reports,
                                  self._book(seat))
+        if self.phase == P2 and self.ruleset.system("espionage"):
+            rep = self.recon_report()
+            line = esp.state_line(rep, self.ruleset, self.state, seat)
+            if line:
+                text += "\n" + line
+                self.journal.append("intel_read", seat=seat, report_ids=[r["id"] for r in
+                                                                         (rep["reports"] or {}).get(seat, [])],
+                                    via="get_state", turn=self.state.turn, phase=self.phase)
         return SETUP_STATE_NOTE + "\n" + text if self.phase == SETUP else text
 
     def state_json(self, seat: str) -> dict[str, Any]:
@@ -747,7 +921,15 @@ class Game:
         if o["kind"] == "move":
             units = " ".join(f"{short(u)}×{n}" for u, n in o["units"].items())
             breach = " [pact=break]" if o.get("pact") == "break" else ""
-            return f"{o['id']} move {o['from']}→{o['to']} {units}{breach}{hasty}"
+            feint = " [ЛОЖНАЯ ЗАПИСЬ: не исполняется]" if o.get("feint") else ""
+            return f"{o['id']} move {o['from']}→{o['to']} {units}{breach}{hasty}{feint}"
+        if o["kind"] == "spy":
+            m = self.ruleset.missions.get(o.get("mission") or "")
+            target = self._nick(o["target"]) if o.get("target") in self.state.players else o.get("target")
+            return (f"{o['id']} spy {o['shade']} «{m.name if m else o.get('mission')}» → {target} "
+                    f"{o.get('rounds')} р.")
+        if o["kind"] == "recall":
+            return f"{o['id']} recall {o['shade']}"
         if o["kind"] == "recruit":
             return f"{o['id']} recruit {o['province']} {short(o['unit'])}×{o['count']}"
         if o["kind"] == "build":
@@ -755,7 +937,13 @@ class Game:
         if o["kind"] == "research":
             tech = self.ruleset.techs.get(o["tech"])
             return f"{o['id']} research {o['tech']}" + (f" «{tech.name}»" if tech else "")
-        return f"{o['id']} fortify {o['province']}"
+        if o["kind"] in ("dispose", "policy"):
+            d = self.ruleset.dispositions.get(o.get("disposition") or "")
+            name = f" «{d.name}»" if d else (" (без политики)" if o["kind"] == "policy" else "")
+            where = f" {o['province']}" if o["kind"] == "dispose" else ""
+            to = f" → {self._nick(o['to'])}" if o.get("to") else ""
+            return f"{o['id']} {o['kind']}{where} {o.get('disposition') or 'null'}{name}{to}"
+        return f"{o['id']} {o['kind']} {o.get('province', '')}".rstrip()
 
     def _orders_changed(self, seat: str) -> None:
         if seat in self.ready_seats:
@@ -838,8 +1026,13 @@ class Game:
         if not isinstance(patch, dict):
             raise GameError("INVALID", "patch должен быть объектом {units?, unit?+count?, to?, count?} или им же "
                                        "одной JSON-строкой")
+        old = self._book(seat).find(order_id)
         res = amend_order(self.state, self.ruleset, seat, self._book(seat), order_id, patch, self.phase)
-        return self._apply_edit(seat, "amend", order_id, res)
+        out = self._apply_edit(seat, "amend", order_id, res)
+        if old is not None and old.feint and res.order is not None and not res.order.feint:
+            self.journal.append("feint", seat=seat, order_id=order_id, turn=self.state.turn, phase=self.phase,
+                                converted_in_p2=self.phase == P2, **{"from": old.src, "to": old.dst})
+        return out
 
     def _apply_edit(self, seat: str, op: str, order_id: str, res: Any) -> dict[str, Any]:
         if not res.ok:
@@ -1916,6 +2109,7 @@ class Replay:
     result_actual: dict[str, Any] | None
     ruleset_legacy: str | None = None        # the same rules hashed as before phase limits left the hash
     pack_dirs: list[str] | None = None       # packs replayed with instead of the config's (override or legacy)
+    recons: list[ReplayTurn] = field(default_factory=list)   # espionage: the recon step of every resolved turn
 
     @property
     def ruleset_ok(self) -> bool:
@@ -1927,7 +2121,7 @@ class Replay:
 
     @property
     def ok(self) -> bool:
-        return self.ruleset_ok and self.result_ok and all(t.ok for t in self.turns)
+        return self.ruleset_ok and self.result_ok and all(t.ok for t in self.turns) and all(t.ok for t in self.recons)
 
 
 def replay(gdir: GameDir, pack_dirs: list[str] | None = None) -> Replay:
@@ -1943,20 +2137,35 @@ def replay(gdir: GameDir, pack_dirs: list[str] | None = None) -> Replay:
     setup = next((e for e in events if e["type"] == "setup_closed"), None)
     state = new_game_state(rs, _seat_specs(config, setup["results"] if setup else None), config["seed"])
     expected = {e["turn"]: e["state_hash"] for e in events if e["type"] == "turn_resolved"}
-    turns = []
+    recon_hashes = {e["turn"]: e["state_hash"] for e in events if e["type"] == "recon" and "state_hash" in e}
+    turns: list[ReplayTurn] = []
+    recons: list[ReplayTurn] = []
     for turn in sorted(expected):
         raw = gdir.load_turn("orders", turn)
         if raw is None:
             raise FileNotFoundError(f"no saved orders for turn {turn}")
         ops = gdir.load_turn("diplomacy", turn) or []
-        dip.apply_ops(state, ops)
+        if rs.system("espionage"):
+            dip.apply_ops(state, [op for op in ops if op.get("phase") != P2])
+            books_d = gdir.load_turn("books_d", turn)
+            if books_d is None and turn in recon_hashes:
+                raise FileNotFoundError(f"no saved actions books for turn {turn}")
+            # a `recon` event without state_hash (a game played without espionage, replayed with packs that have it
+            # on): an empty recon step (SPY_AND_CONQUEST.md 9); the ruleset hash tells the mismatch
+            state, _ = esp.recon(state, {s: SeatOrders.from_dict(b) for s, b in (books_d or {}).items()}, rs,
+                                 config["seed"])
+            if turn in recon_hashes:
+                recons.append(ReplayTurn(turn, recon_hashes[turn], state_hash(state)))
+            dip.apply_ops(state, [op for op in ops if op.get("phase") == P2])
+        else:
+            dip.apply_ops(state, ops)
         state, _ = resolve(state, {s: SeatOrders.from_dict(b) for s, b in raw.items()}, rs, config["seed"], ops)
         turns.append(ReplayTurn(turn, expected[turn], state_hash(state)))
     result_expected = {"winners": over["winners"], "scores": over["scores"]} if over else None
     result_actual = ({"winners": state.result["winners"], "scores": state.result["scores"]}
                      if state.result else None)
     return Replay(created.get("ruleset_hash"), rs.hash, turns, result_expected, result_actual,
-                  legacy_ruleset_hash(rs, config), pick.pack_dirs)
+                  legacy_ruleset_hash(rs, config), pick.pack_dirs, recons)
 
 
 def legacy_ruleset_hash(rs: Ruleset, config: dict[str, Any]) -> str:

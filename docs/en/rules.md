@@ -5,7 +5,7 @@
 These are the rules as the engine implements them: the vertical slice plus stage 2 (techs, the setup phase,
 factions and artifacts). The exact contracts are in the [slice specification](../SLICE.md) and the
 [stage-2 specification](../TECH_AND_SETUP.md) (both in Russian); the [full concept](../CONCEPT.md) (in Russian)
-describes the game the slice grows towards. Numbers below are the defaults of the `core` pack, version 0.3.0; a
+describes the game the slice grows towards. Numbers below are the defaults of the `core` pack, version 0.4.0 (stage 3a: espionage and conquest, both on by default in `slice3`, `slice2` and `quad4`); a
 scenario or a pack can change them ([Content packs](modding.md)). The tables of units, buildings, techs, factions and
 artifacts are a snapshot: the match's own numbers are always in `rules(topic)` and `describe(id)` (see the end of
 this page).
@@ -49,7 +49,7 @@ their unique one and may get extra stock.
 - Orders are given only in A. In N1 `submit_orders`, `cancel_order` and `amend_order` answer `PHASE_LOCKED` with the
   hint «в П1 приказы можно только проверить через validate_orders; подавать — в фазе Д»; `validate_orders` works in
   every open phase (in N1 by the rules of A).
-- The intel slice is an empty step between A and N2: only a `recon` event in the journal.
+- The intel slice (recon) runs between A and N2. With espionage on it plays the Shades' rounds on the actions books (see «Espionage» below); with espionage off it is an empty step: only a `recon` event in the journal.
 - After the last turn, or when one seat is left, the match moves to `game_over`.
 - `slice3`, `slice2` and `quad4` open with a setup phase before turn 1 (see below); `blitz_test` has none.
 
@@ -419,7 +419,7 @@ line. `format=json` gives the same view as JSON.
 
 ## Techs
 
-17 techs in 4 branches (Industry, War, Logistics, Mystery), tiers 1 and 2, paid in Creed. A tier-2 tech needs two
+17 techs in 4 branches (Industry, War, Logistics, Mystery), tiers 1 and 2, paid in Creed. With espionage on there are 21 techs in 5 branches: Mystery gains Long Leash (tier 2) and the fifth branch «Зеркала» (Mirrors: mirror_wards, watch_drill, glass_inquest) is counter-intelligence; with espionage off these four are hidden. A tier-2 tech needs two
 tier-1 techs of its own branch (War Engines also needs Smithcraft). One tech is active at a time: the `research`
 order (only in A) picks it, and it stays active from turn to turn until it is learned or changed; the progress of
 every tech is kept. A learned tech works from the next turn: income multipliers, cheaper buildings, stat changes
@@ -445,6 +445,48 @@ Some are for one faction only (`ash_censer`: Ash Choir), some exclude each other
 `seal_of_command`). `rules(topic="factions")` and `rules(topic="artifacts")` list them with exact effects, power
 and cost.
 
+## Espionage and conquest (stage 3)
+
+The two stage-3 systems ([SPY_AND_CONQUEST.md](../SPY_AND_CONQUEST.md), in Russian; delivery 3a) are switched on by
+the scenario (`systems: {espionage, conquest}`) or by the host (`dah game create --espionage on|off --conquest
+on|off`). While a system is off its orders, rules sections and state lines do not exist, and game hashes are as
+before. The numbers below are the defaults; a game's exact numbers are in `rules(topic="spying")` and
+`rules(topic="conquest")`.
+
+**Espionage.**
+- A Shade is a record of the seat, not a unit. Hiring, `{"kind": "hire_shade"}`, is actions only, only with one's own
+  full starting capital, one per turn, up to `spy.shades_max` (2); price and upkeep come from the pack (25 alloy,
+  1 provision per turn).
+- A mission, `{"kind": "spy", "shade": "s1", "mission": "observe", "target": "P07", "rounds": 2}`: given in actions,
+  its first round is this turn; given in N2 (1 CP), from the next turn. The whole term is reserved when given and is
+  not refunded. `{"kind": "recall", "shade": "s1"}` ends a mission (in N2: 1 CP, this turn's strike is cancelled).
+- The recon step runs between actions and N2: each Shade's round checks capture first, then success. The chances
+  depend on S (whisper), the C of the checked place (counter-intelligence, Mirror halls, an army), the mission's
+  difficulty D, experience V and cover K; `estimate_mission` computes them exactly.
+- Reports are a snapshot of the end of actions; their numbers are honest intervals with the truth inside. When N2
+  opens: one `[ИГРА]` inbox entry and a `ДОНЕСЕНИЯ` line in `get_state`; the texts via `get_intel`, the Shades via
+  `list_spies`.
+- A caught Shade is lost for good. Its owner sees only "no contact" (`нет связи`); the owner of the checked place sees
+  where it was caught, its mission and target, and its owner if attribution succeeds. Third seats learn nothing.
+- Sabotage (a loud mission): in this turn's resolution the province's fortify is broken, defense x0.85, income 0. The
+  victim sees the strike without its author; the delayed spectator sees only "sabotage in P07".
+- A false entry is a `move` with `"feint": true` (actions only, 1 CP): its units are reserved but stay home and
+  defend. Only Read orders sees it. In N2 `amend_order(id, {"feint": false})` makes it real at a new attack's price.
+
+**Conquest.**
+- A province taken from a player is an Occupation: no income, no score, its buildings do not work, no building or
+  recruiting; without a garrison after the battles it revolts and becomes neutral. A neutral province, or one's own
+  taken back, is full at once.
+- Its fate: `{"kind": "dispose", "province": "P07", "disposition": "subjugate"}` (an own occupation: a decision in this
+  resolution; a player's province: a directive in case it is captured) or `{"kind": "policy", "disposition": ...}` for
+  captures without a directive. Actions and N2, 0 CP; the price is reserved and refunded when nothing was captured.
+- The `core` fates: Subjugate (5 provisions x the province's value), Exterminate (loot, ruins), Raid (loot, the
+  province goes back to its previous owner, ravaged), Release (to the previous or original owner, or to `to`).
+- A seat that lost a full province gets a Claim: for 10 turns it attacks that province with +25% strength. Claims are
+  public.
+- `get_state` shows the tags `[оккуп. Ник]`, `[пепелище до хN]`, `[разорена]` and the sections `ОККУПАЦИЯ`,
+  `ПРИТЯЗАНИЯ`, `ПОЛИТИКА`. Occupations and ruins score nothing.
+
 ## The core content
 
 - Factions: the six above.
@@ -453,25 +495,28 @@ and cost.
   21 provinces: a shrine between each two neighbours and a forge in the centre). The starts are symmetric.
 - Scenarios:
 
-| Scenario | Map | Turns | Setup phase | Phase limits setup / N1 / A / N2 |
-|---|---|---|---|---|
-| `core:slice3` | `mirror3` | 10 | 6 factions, artifact draft (3 offered) | 5m / 12m / 5m / 5m |
-| `core:slice2` | `mirror2` | 10 | 6 factions, artifact draft (3 offered) | 5m / 12m / 5m / 5m |
-| `core:quad4` | `mirror4` | 12 | 6 factions, artifact draft (3 offered) | 5m / 12m / 5m / 5m |
-| `core:blitz_test` | `mirror3` | 6 | none (`covenant` only) | — / 5s / 5s / 5s |
+| Scenario | Map | Turns | Setup phase | Phase limits setup / N1 / A / N2 | Espionage / conquest |
+|---|---|---|---|---|---|
+| `core:slice3` | `mirror3` | 10 | 6 factions, artifact draft (3 offered) | 5m / 12m / 5m / 5m | on / on |
+| `core:slice2` | `mirror2` | 10 | 6 factions, artifact draft (3 offered) | 5m / 12m / 5m / 5m | on / on |
+| `core:quad4` | `mirror4` | 12 | 6 factions, artifact draft (3 offered) | 5m / 12m / 5m / 5m | on / on |
+| `core:blitz_test` | `mirror3` | 6 | none (`covenant` only) | — / 5s / 5s / 5s | off / off |
+| `core:blitz_spy` | `mirror3` | 6 | none (`covenant` only) | — / 5s / 5s / 5s | on / on |
 
-`dah game create --limits`, `--turns` and the setup flags override the scenario's values for one match.
+`dah game create --limits`, `--turns` and the setup flags override the scenario's values for one match;
+`--espionage on|off` and `--conquest on|off` switch the stage-3 systems for one match.
 
 ## The rules tool
 
 `rules()` returns the short core of these rules in Russian (at most 6000 characters), generated from the match's
 ruleset (so scenario changes show up), with a table of topics. When there is a lot of content (units, techs,
 factions), the long sections of the core shrink to a list of names pointing to their topic: diplomacy first, then
-resolution, provinces, buildings and units.
+espionage, conquest, resolution, provinces, buildings, units and, last, the order examples.
 
 With `topic` it returns one section in full, built from the match's content: `turn` (or `phases`), `setup` (the
 setup phase), `resources`, `provinces`, `units`, `abilities` (unit abilities), `buildings`, `orders`, `p2` (or
-`cp`), `combat` (or `resolution`), `victory`, `pacts` (or `diplomacy`, `gifts`), `fog` (or `visibility`),
+`cp`), `combat` (or `resolution`), `victory`, `pacts` (or `diplomacy`, `gifts`), `spying` (or `espionage`, `spies`,
+`intel`, `feint`), `conquest` (or `capture`, `occupation`, `dispose`, `claims`), `fog` (or `visibility`),
 `messages`, `techs` (the whole tree: branches, tiers, costs, requirements, effects), `factions` (bonuses,
 drawbacks, start, unique content), `artifacts` (every artifact with power, cost and effects). Only the topics the
 match needs exist (no `techs` without techs). The section headings of the rules text work too (`ЮНИТЫ`,

@@ -36,7 +36,9 @@ def garrison(capital: Province | None, size: int) -> Reserved:
 
 
 def capital_of(view: StateView) -> Province | None:
-    return next((p for p in view.own_provinces() if p.kind == "capital"), None)
+    """The own capital: in conquest games the start one (a captured capital is not it), else the first by id."""
+    capitals = [p for p in view.full_provinces() if p.kind == "capital"]
+    return next((p for p in capitals if p.origin is None or p.origin in view.me), capitals[0] if capitals else None)
 
 
 def merge_reserved(*parts: Reserved) -> Reserved:
@@ -175,7 +177,7 @@ def distance_to_foreign(view: StateView) -> dict[str, int]:
 
 def recruit_site(view: StateView) -> Province | None:
     """First own province with a recruiting building (id order)."""
-    return next((p for p in view.own_provinces() if RECRUIT_BUILDINGS & set(p.buildings)), None)
+    return next((p for p in view.full_provinces() if RECRUIT_BUILDINGS & set(p.buildings)), None)
 
 
 def unique_recruit(view: StateView, alloy: int, food_turns: int, max_count: int) -> tuple[Order | None, int, int]:

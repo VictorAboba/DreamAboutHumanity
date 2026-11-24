@@ -48,6 +48,11 @@ def parse_seat(text: str) -> dict[str, Any]:
     return {"seat": seat, "nick": nick, "kind": kind}
 
 
+def _switch(value: str | None) -> bool | None:
+    """`--espionage on|off`, `--conquest on|off`; None: the scenario's switch."""
+    return None if value is None else value == "on"
+
+
 def _pairs(values: list[str] | None, option: str) -> dict[str, str]:
     out = {}
     for value in values or []:
@@ -56,6 +61,20 @@ def _pairs(values: list[str] | None, option: str) -> dict[str, str]:
             raise ValueError(f"bad {option} {value!r}; expected SEAT=VALUE")
         out[seat] = rest
     return out
+
+
+def _stage3_goal_lines(config: dict[str, Any]) -> list[str]:
+    """Goal lines for the stage-3 systems the game has on (SPY_AND_CONQUEST.md 6); none for other games."""
+    on = config.get("systems") or {}
+    lines = []
+    if on.get("espionage"):
+        lines.append("В партии есть шпионаж: Тени (приказы hire_shade, spy, recall; dah.rules(topic=\"spying\")). "
+                     "Донесения разведсреза приходят в начале П2: dah.get_intel(), Тени — dah.list_spies(), шансы "
+                     "задания — dah.estimate_mission().")
+    if on.get("conquest"):
+        lines.append("В партии есть завоевание: отнятая у игрока провинция — оккупация, её судьбу решают приказы "
+                     "dispose и policy (dah.rules(topic=\"conquest\"); разделы ОККУПАЦИЯ, ПРИТЯЗАНИЯ в get_state).")
+    return lines
 
 
 def _setup_goal_lines(config: dict[str, Any]) -> list[str]:
@@ -87,6 +106,7 @@ def goal_text(config: dict[str, Any], seat: str) -> str:
         "dah.describe(id) — любой юнит, здание, технология, артефакт, фракция.",
         "ЦЕЛЬ НЕ ДОСТИГНУТА, ПОКА dah.phase() НЕ ВЕРНУЛ game_over. Не объявляй работу завершённой раньше.",
         *_setup_goal_lines(config),
+        *_stage3_goal_lines(config),
         f"Каждый ход: П1 переговоры → Д действия → П2 переговоры → расчёт. Длительность фаз: {minutes}.",
         "В каждой фазе смотри dah.get_state(since_turn=прошлый ход) и dah.inbox() (по умолчанию — только новое). "
         "П1: переговоры (dah.send_message), подношения (dah.send_gift), пакты (dah.propose_pact, dah.respond_pact, "
@@ -150,7 +170,8 @@ def cmd_game_create(args: argparse.Namespace) -> int:
     config = make_config(game_id=game_id, scenario=args.scenario, seats=seats, seed=seed,
                          phase_limits=limits or None, turn_limit=args.turns, pack_dirs=args.packs,
                          artifacts=args.artifacts, artifact_offer=args.artifact_offer,
-                         artifact_points=args.artifact_points)
+                         artifact_points=args.artifact_points,
+                         systems={"espionage": _switch(args.espionage), "conquest": _switch(args.conquest)})
     gdir, keys = init_game_dir(args.games_dir, config)
     Game.create(gdir, start=False)
     first = "фаза старта (выбор фракций и артефактов)" if config.get("setup") else "фаза П1 хода 1"
@@ -162,6 +183,10 @@ def cmd_game_create(args: argparse.Namespace) -> int:
                 "none": "без артефактов"}[st["artifacts"]]
         print(f"Фаза старта: {config['phase_limits']['setup']} с; артефакты — {mode}; уникальные фракции: "
               f"{'да' if st['unique_factions'] else 'нет'}.")
+    if config.get("systems"):
+        names = {"espionage": "шпионаж", "conquest": "завоевание"}
+        print("Системы: " + ", ".join(f"{names.get(k, k)} {'вкл' if v else 'выкл'}"
+                                      for k, v in config["systems"].items()) + ".")
     print("Ключи мест — показываются ОДИН раз, храните как пароль:")
     for s in config["seats"]:
         print(f"  {s['seat']} {s['nick']} ({s.get('bot') or s['kind']}): {keys[s['seat']]}")
@@ -270,6 +295,10 @@ def build_parser() -> argparse.ArgumentParser:
                              "старта и у сценария без неё")
     create.add_argument("--artifact-offer", type=int, help="драфт: сколько артефактов предложить месту (1..10)")
     create.add_argument("--artifact-points", type=int, help="очки: бюджет места (0..50)")
+    create.add_argument("--espionage", choices=("on", "off"),
+                        help="шпионаж в этой партии (по умолчанию — как в сценарии)")
+    create.add_argument("--conquest", choices=("on", "off"),
+                        help="завоевание в этой партии (по умолчанию — как в сценарии)")
     create.add_argument("--setup-limit", help="лимит фазы старта, например 5m (по умолчанию — из сценария или 5m)")
     create.add_argument("--games-dir", default=DEFAULT_GAMES_DIR)
     create.add_argument("--server", default=DEFAULT_SERVER, help="адрес dah serve для ссылки /watch")

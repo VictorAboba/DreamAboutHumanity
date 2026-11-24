@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
+from . import conquest as cq
 from . import diplomacy as dip
 from . import registry
 from .content import Ruleset
@@ -38,9 +39,14 @@ def view_state(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders |
     key = stat_key(state, ruleset, seat)
     income, upkeep = income_of(state, ruleset, seat, key), upkeep_of(state, ruleset, seat, key)
     provinces = []
+    statuses = cq.statuses_for(state) if ruleset.system("conquest") else {}
     for pid, p in sorted(state.provinces.items()):
         entry: dict[str, Any] = {"id": pid, "name": p.name, "type": p.type, "owner": p.owner,
                                  "neighbors": list(ruleset.map.adjacency[pid]), "visible": pid in seen}
+        if pid in statuses:
+            entry["status"] = statuses[pid]     # public: occupied {by, from, since}, ruined_until, ravaged_until
+        if ruleset.system("conquest") and state.origins.get(pid):
+            entry["origin"] = state.origins[pid]    # public: the seat that started with it (Возвращение)
         if pid in seen:
             entry.update(units=dict(p.units), buildings=list(p.buildings), fortified=p.fortified)
         if p.owner == seat:
@@ -60,6 +66,11 @@ def view_state(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders |
                               if me.researching in ruleset.techs else None)
         you["research"] = dict(me.research)
         you["artifacts"] = list(me.artifacts)
+    if ruleset.system("conquest"):
+        you["conquest_policy"] = me.conquest_policy
+    if ruleset.system("espionage"):
+        from .espionage import own_view
+        you["espionage"] = own_view(state, ruleset, seat)     # own S, C, limits and Shades only
     players = []
     for s, p in state.players.items():
         entry: dict[str, Any] = {"seat": s, "nick": p.nick, "alive": p.alive, "score": sc[s], "faction": p.faction}
@@ -69,7 +80,7 @@ def view_state(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders |
             entry["techs"] = list(p.techs)              # revealed after the game (TECH_AND_SETUP.md 1.4, 2)
             entry["artifacts"] = list(p.artifacts)
         players.append(entry)
-    return {
+    out = {
         "turn": state.turn, "turn_limit": ruleset.scenario.turn_limit, "phase": state.phase,
         "you": you,
         "players": players,
@@ -81,6 +92,9 @@ def view_state(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders |
                            for pc in state.pacts if pc["status"] == dip.PROPOSED and seat in (pc["a"], pc["b"])],
         "result": state.result,
     }
+    if ruleset.system("conquest"):
+        out["claims"] = [dict(c) for c in state.claims]          # public (SPY_AND_CONQUEST.md 3.5)
+    return out
 
 
 # ---------------------------------------------------------------- text
@@ -95,8 +109,24 @@ def _units_text(ruleset: Ruleset, units: Mapping[str, int]) -> str:
     return " ".join(f"{ruleset.short(u)}×{n}" for u, n in sorted(units.items()) if n) or "пусто"
 
 
+def _status_tags(state: GameState, seat: str, status: Mapping[str, Any] | None) -> str:
+    """Public conquest marks of a province line: [оккуп. <у кого взята>], [пепелище до хN], [разорена]."""
+    if not status:
+        return ""
+    tags = []
+    if status.get("occupied"):
+        frm = status["occupied"].get("from")
+        tags.append(f"[оккуп. {_owner_tag(state, seat, frm)}]" if frm else "[оккуп.]")
+    if status.get("ruined_until"):
+        tags.append(f"[пепелище до х{status['ruined_until']}]")
+    if status.get("ravaged_until"):
+        tags.append("[разорена]")
+    return " " + " ".join(tags)
+
+
 def _province_line(ruleset: Ruleset, state: GameState, seat: str, entry: Mapping[str, Any]) -> str:
-    head = f"{entry['id']} {entry['name']} [{_owner_tag(state, seat, entry['owner'])}] {ruleset.short(entry['type'])}"
+    head = (f"{entry['id']} {entry['name']} [{_owner_tag(state, seat, entry['owner'])}] {ruleset.short(entry['type'])}"
+            f"{_status_tags(state, seat, entry.get('status'))}")
     if not entry["visible"]:
         parts = [f"{head} ?"]
     else:
@@ -166,16 +196,19 @@ def render_state_text(state: GameState, ruleset: Ruleset, seat: str, deadline_in
         lines.append(_result_line(state, seat))
     entries = view["provinces"]
     pacts = _pacts_line(state, seat, view)
+    conquest = _conquest_lines(state, ruleset, seat, view)
     if since_turn is not None and since_state is not None:
         old = {e["id"]: e for e in view_state(since_state, ruleset, seat)["provinces"]}
         entries = [e for e in entries if e["visible"] and _changed(e, old[e["id"]])]
         lines += [_province_line(ruleset, state, seat, e) for e in entries]
         lines += [pacts] if pacts else []
+        lines += conquest
         lines.append(_changes_line(state, ruleset, seat, since_turn, since_state, reports))
     else:
         lines += [_province_line(ruleset, state, seat, e) for e in entries]
         lines.append(_score_line(view, seat, ruleset))
         lines += [pacts] if pacts else []
+        lines += conquest
         if since_turn is not None:
             lines.append(_changes_line(state, ruleset, seat, since_turn, None, reports))
     return "\n".join(lines)
@@ -221,8 +254,44 @@ def _pacts_line(state: GameState, seat: str, view: Mapping[str, Any]) -> str:
     return "ПАКТЫ: " + "; ".join(items) if items else ""
 
 
+SECTION_ITEMS = 3      # ОККУПАЦИЯ and ПРИТЯЗАНИЯ list at most this many, then "+k" (SPY_AND_CONQUEST.md 2.7)
+
+
+def _price_per_value(ruleset: Ruleset, did: str, key: Any) -> str:
+    d = ruleset.dispositions[did]
+    mul = ruleset.stat(f"disposition.{did}.cost_mul", key)
+    parts = [f"{n * mul:g} {ruleset.resources[r].short}" for r, n in d.cost.items() if n * mul]
+    return f" {'+'.join(parts)}×ценн." if parts else ""
+
+
+def _conquest_lines(state: GameState, ruleset: Ruleset, seat: str, view: Mapping[str, Any]) -> list[str]:
+    """ОККУПАЦИЯ (own occupied provinces, fates with prices once in the head), ПРИТЯЗАНИЯ (public), ПОЛИТИКА (own)."""
+    if not ruleset.system("conquest"):
+        return []
+    lines = []
+    key = stat_key(state, ruleset, seat)
+    held = [e for e in view["provinces"] if e["owner"] == seat and (e.get("status") or {}).get("occupied")]
+    if held:
+        fates = " | ".join(f"{d.name.lower()}{_price_per_value(ruleset, did, key)}"
+                           for did, d in cq.ordered_dispositions(ruleset))
+        items = [f"{e['id']} с х{e['status']['occupied']['since']} ценн.{ruleset.province_types[e['type']].conquest_value}"
+                 for e in held[:SECTION_ITEMS]]
+        more = f"; +{len(held) - SECTION_ITEMS}" if len(held) > SECTION_ITEMS else ""
+        lines.append(f"ОККУПАЦИЯ ({fates}): {'; '.join(items)}{more}")
+    claims = view.get("claims") or []
+    if claims:
+        items = [f"{c['province']} — {_owner_tag(state, seat, c['seat'])} до х{c['until_turn']}"
+                 for c in claims[:SECTION_ITEMS]]
+        more = f"; +{len(claims) - SECTION_ITEMS}" if len(claims) > SECTION_ITEMS else ""
+        lines.append(f"ПРИТЯЗАНИЯ: {'; '.join(items)}{more}")
+    policy = view["you"].get("conquest_policy")
+    if policy in ruleset.dispositions:
+        lines.append(f"ПОЛИТИКА: {ruleset.dispositions[policy].name.lower()}")
+    return lines
+
+
 def _changed(new: Mapping[str, Any], old: Mapping[str, Any]) -> bool:
-    keys = ("owner", "visible", "units", "buildings", "fortified", "building_now")
+    keys = ("owner", "visible", "units", "buildings", "fortified", "building_now", "status")
     return any(new.get(k) != old.get(k) for k in keys)
 
 
@@ -258,7 +327,7 @@ def _changes_line(state: GameState, ruleset: Ruleset, seat: str, since_turn: int
             elif e["kind"] in ("battle", "edge_battle", "starvation", "build_done", "eliminated",
                                "retreat_lost", "order_rejected", "fortify_broken", "pact_bounce", "pact_joint",
                                "pact_broken", "pact_expired", "pact_ended", "pact_lapsed", "gift", "pact_signed",
-                               "pact_renewed", "pact_leave", "tech_completed"):
+                               "pact_renewed", "pact_leave", "tech_completed", *CONQUEST_EVENT_TEXT):
                 starving |= e["kind"] == "starvation"
                 items.append(event_text(e, ruleset, state, seat))
     if not starving:
@@ -275,6 +344,10 @@ def event_text(e: Mapping[str, Any], ruleset: Ruleset, state: GameState, seat: s
     kind = e["kind"]
     if kind in _DIPLOMACY_TEXT:
         return _DIPLOMACY_TEXT[kind](e, ruleset, who)
+    if kind in CONQUEST_EVENT_TEXT:
+        return CONQUEST_EVENT_TEXT[kind](e, ruleset, who)
+    if kind in ESPIONAGE_EVENT_TEXT:
+        return ESPIONAGE_EVENT_TEXT[kind](e, ruleset, lambda x: who(x) if x is None or x in state.players else str(x))
     if kind in ("battle", "edge_battle"):
         where = f"на ребре {'-'.join(e['edge'])}" if kind == "edge_battle" else f"в {e['province']}"
         sides = "; ".join(f"{who(s['owner'])}{' победа' if s['won'] else ''}: {_units_text(ruleset, s['units'])}"
@@ -282,7 +355,8 @@ def event_text(e: Mapping[str, Any], ruleset: Ruleset, state: GameState, seat: s
                           for s in e["sides"])
         return f"бой {where}{' (укр.)' if e.get('fortified') else ''}: {sides}"
     simple = {
-        "captured": lambda: f"{e['province']} перешла от {who(e['from'])} к {who(e['to'])}",
+        "captured": lambda: f"{e['province']} перешла от {who(e['from'])} к {who(e['to'])}"
+        + (f" ({_CAPTURE_STATUS.get(e['status'], e['status'])})" if e.get("status") else ""),
         "retreat": lambda: f"отход в {e['province']}: {_units_text(ruleset, e['units'])}",
         "retreat_lost": lambda: f"отступать некуда из {e['province']}: погибли {_units_text(ruleset, e['units'])}",
         "destroyed": lambda: f"в {e['province']} уничтожены {_units_text(ruleset, e['units'])}",
@@ -350,6 +424,104 @@ _DIPLOMACY_TEXT = {
     "pact_rejected": lambda e, rs, who: f"пакт {e['pact']} отклонён ({_pair(e, who)})",
     "pact_withdrawn": lambda e, rs, who: f"предложение пакта {e['pact']} отозвано ({_pair(e, who)})",
     "pact_lapsed": lambda e, rs, who: f"предложение пакта {e['pact']} не принято до конца хода ({_pair(e, who)})",
+}
+
+
+_CAPTURE_STATUS = {"full": "полноценная", "occupied": "оккупация", "ruined": "пепелище", "returned": "возвращена"}
+_FATE_STATUS = {"subjugated": "подчинена", "ruined": "пепелище", "raided_returned": "разорена и возвращена",
+                "released": "освобождена"}
+_LOOT_REASON = {"ravaged": "провинция разорена", "ruined": "пепелище", "cooldown": "недавно уже грабили"}
+
+
+def _amounts_text(ruleset: Ruleset, amounts: Mapping[str, int] | None) -> str:
+    return ", ".join(f"{ruleset.resources[r].name if r in ruleset.resources else r} {n}"
+                     for r, n in (amounts or {}).items())
+
+
+def _fate_text(e: Mapping[str, Any], ruleset: Ruleset, who: Any) -> str:
+    status = _FATE_STATUS.get(e.get("status"), e.get("status"))
+    text = f"судьба {e['province']}: {who(e['seat'])} — {status}"
+    if e.get("behavior") in ("raid", "release"):
+        text += f" → {who(e.get('owner_after'))}"
+    if e.get("cost"):
+        text += f"; цена {_amounts_text(ruleset, e['cost'])}"
+    if e.get("loot"):
+        text += f"; добыча {_amounts_text(ruleset, e['loot'])}"
+    elif e.get("loot_reason"):
+        text += f"; без добычи ({_LOOT_REASON.get(e['loot_reason'], e['loot_reason'])})"
+    if e.get("source"):
+        text += {"directive": " [директива]", "policy": " [политика]", "decision": ""}.get(e["source"], "")
+    return text
+
+
+def _disp_name(ruleset: Ruleset, did: Any) -> str:
+    return ruleset.dispositions[did].name.lower() if did in ruleset.dispositions else "нет"
+
+
+CONQUEST_EVENT_TEXT = {
+    "disposition": _fate_text,
+    "occupation_revolt": lambda e, rs, who: f"бунт в {e['province']}: без гарнизона {who(e['seat'])} её потерял, "
+                                            "провинция нейтральна",
+    "claim_created": lambda e, rs, who: f"притязание {who(e['seat'])} на {e['province']} до хода {e['until_turn']}",
+    "claim_ended": lambda e, rs, who: (f"притязание {who(e['seat'])} на {e['province']} снято ("
+                                       + {"returned": "провинция возвращена", "expired": "срок истёк",
+                                          "eliminated": "игрок выбыл"}.get(e.get("reason"), e.get("reason") or "")
+                                       + ")"),
+    "ruin_ended": lambda e, rs, who: f"{e['province']} больше не пепелище",
+    "policy_set": lambda e, rs, who: f"политика завоевания: {_disp_name(rs, e.get('disposition'))}",
+    "policy_unaffordable": lambda e, rs, who: (f"{e['province']}: политика «{_disp_name(rs, e.get('disposition'))}» "
+                                               + ("не по средствам" if e.get("reason") == "resources" else
+                                                  "неприменима к пепелищу") + " — оккупация"),
+    "dispose_failed": lambda e, rs, who: (f"{e['province']}: директива «{_disp_name(rs, e.get('disposition'))}» "
+                                          f"не исполнена ({e.get('reason')}), резерв возвращён"),
+}
+
+
+def _strike_effects(effects: Mapping[str, Any] | None) -> str:
+    effects = effects or {}
+    parts = []
+    if effects.get("deny_fortify"):
+        parts.append("укрепление сорвано")
+    if effects.get("defense_mul", 1) != 1:
+        parts.append(f"оборона ×{effects['defense_mul']:g}")
+    if effects.get("income_mul", 1) != 1:
+        parts.append("доход 0" if effects["income_mul"] == 0 else f"доход ×{effects['income_mul']:g}")
+    return ", ".join(parts)
+
+
+def _sabotage_text(e: Mapping[str, Any], ruleset: Ruleset, who: Any) -> str:
+    """The author sees its Shade; the victim sees no author; the delayed spectator (no seats at all) only where."""
+    effects = _strike_effects(e.get("effects"))
+    tail = f": {effects}" if effects else ""
+    if e.get("seat") and who(e["seat"]) == "ТЫ":
+        return f"удар твоей Тени {e.get('shade')} по {e['province']} ({who(e.get('victim'))}){tail}"
+    if e.get("seat"):      # the full spectator view
+        return f"саботаж в {e['province']}: Тень {who(e['seat'])} против {who(e.get('victim'))}{tail}"
+    if e.get("victim") and who(e["victim"]) == "ТЫ":
+        return f"саботаж в {e['province']}{tail}; исполнитель не установлен"
+    return f"саботаж в {e['province']}"
+
+
+def _mission_name(ruleset: Ruleset, mid: Any) -> str:
+    return ruleset.missions[mid].name if mid in ruleset.missions else str(mid)
+
+
+_MISSION_END = {"done": "срок вышел", "empty": "вернулась ни с чем", "struck": "удар нанесён", "recalled": "отозвана",
+                "void": "цели больше нет", "caught": "нет связи"}
+
+# Report events of espionage (SPY_AND_CONQUEST.md 2.6, 2.9, 8): only their sides see them (resolve._PRIVATE_KINDS);
+# `who` names a seat (a mission's target may be a province: it is shown as is).
+ESPIONAGE_EVENT_TEXT = {
+    "sabotage": _sabotage_text,
+    "strike_cancelled": lambda e, rs, who: f"удар Тени {e.get('shade')} по {e['province']} отменён: Тень отозвана",
+    "feint": lambda e, rs, who: (f"ложная запись {e.get('from')}→{e.get('to')} не исполнялась: "
+                                 f"{_units_text(rs, e.get('units') or {})} остались дома"),
+    "mission_started": lambda e, rs, who: (f"Тень {e.get('shade')}: задание «{_mission_name(rs, e.get('mission'))}» "
+                                           f"→ {who(e.get('target'))}, раундов {e.get('rounds')}, с хода "
+                                           f"{e.get('first_turn')}"),
+    "mission_end": lambda e, rs, who: (f"Тень {e.get('shade')}: задание «{_mission_name(rs, e.get('mission'))}» "
+                                       f"→ {who(e.get('target'))} кончено "
+                                       f"({_MISSION_END.get(e.get('reason'), e.get('reason'))})"),
 }
 
 

@@ -1,0 +1,48 @@
+# Espionage of core 0.4.0 (docs/SPY_AND_CONQUEST.md 2.2, section 5). Only while the scenario (or the host) turns
+# espionage on. The Shade is dear on purpose (decision 22): a caught Shade is lost for good, so 25 alloy (two or three
+# units, or two mines at the start) makes a loss felt.
+config:
+  shade: {name: {ru: Тень, en: Shade}, cost: {alloy: 25}, upkeep: {provisions: 1}}
+  ward: {cost: {alloy: 5}}     # Застава, stage 3b
+missions:
+  - id: observe
+    name: {ru: Наблюдение, en: Observe}
+    behavior: observe_province
+    target: province
+    difficulty: 1
+    rounds: [1, 5]
+    requires: {whisper: 1}
+    cost_per_round: {provisions: 1}
+    description: Юниты провинции по видам (интервалы), здания, стройка, укрепление прошлого хода, статус.
+  - id: ledger
+    name: {ru: Счётная книга, en: Ledger}
+    behavior: read_ledger
+    target: seat
+    difficulty: 1                # balance of core 0.4.0: was 2 (docs/SPY_AND_CONQUEST.md, «Баланс core 0.4.0»)
+    rounds: [1, 3]
+    requires: {whisper: 1}
+    cost_per_round: {provisions: 1}   # was 2
+    description: >-
+      Свободные запасы места (интервалы), изученные технологии, активное исследование и прогресс, артефакты, Шёпот и
+      Зеркала цели, число её Теней.
+  - id: read_orders
+    name: {ru: Чтение приказов, en: Read Orders}
+    behavior: read_orders
+    target: seat
+    difficulty: 3
+    rounds: [1, 3]
+    requires: {whisper: 2}
+    cost_per_round: {provisions: 2}
+    description: Книга приказов цели на конец Д (в П2 приказы могли измениться); ложные записи можно разоблачить.
+  - id: sabotage
+    name: {ru: Саботаж, en: Sabotage}
+    behavior: sabotage
+    target: owned_province
+    difficulty: 3
+    rounds: [1, 4]
+    requires: {whisper: 2}
+    cost: {alloy: 8}
+    cost_per_round: {provisions: 1}
+    params: {deny_fortify: true, defense_mul: 0.85, income_mul: 0}
+    description: >-
+      Громкая миссия против провинции места: в расчёте этого хода укрепление сорвано, оборона ×0.85, доход 0.

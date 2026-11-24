@@ -158,6 +158,20 @@ def estimate(game: Game, seat: str, request: Request, body: dict[str, Any]) -> d
     return game.estimate(body, seat)
 
 
+def list_spies(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.list_spies(seat)
+
+
+def get_intel(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    q = request.query_params
+    return game.get_intel(seat, q.get("turn"), q.get("shade"), q.get("report") or q.get("report_id"),
+                          q.get("format", "text"))
+
+
+def estimate_mission(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.estimate_mission(seat, body)
+
+
 def _first(body: dict[str, Any], *names: str) -> Any:
     """The first of several accepted spellings of one argument (prefs / factions / faction ...)."""
     return next((body[n] for n in names if body.get(n) is not None), None)
@@ -258,6 +272,9 @@ SEAT_ROUTES: list[tuple[str, str, Handler]] = [
     ("DELETE", "/v1/orders/{order_id}", cancel_order),
     ("PATCH", "/v1/orders/{order_id}", amend_order),
     ("POST", "/v1/estimate", estimate),
+    ("GET", "/v1/spies", list_spies),
+    ("GET", "/v1/intel", get_intel),
+    ("POST", "/v1/estimate/mission", estimate_mission),
     ("GET", "/v1/setup", get_setup),
     ("POST", "/v1/setup/faction", choose_faction),
     ("POST", "/v1/setup/artifacts", choose_artifacts),

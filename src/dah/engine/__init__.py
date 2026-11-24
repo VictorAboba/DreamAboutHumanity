@@ -78,6 +78,31 @@ Stage 2 (docs/TECH_AND_SETUP.md: techs, abilities, setup phase, artifacts)
     resolve_setup(ruleset, setup, seed, seats, choices, offers) -> {seat: {faction, prefs, artifacts,
         auto_faction, auto_artifacts, faction_conflict, dropped}}
     new_game_state(..., seats=[{seat, nick, faction?, artifacts?}], ...)   # artifacts applied at the start
+
+Stage 3 (docs/SPY_AND_CONQUEST.md; 3a so far: switches and conquest)
+    build_ruleset(pack_dirs, scenario_id, systems={espionage|conquest: bool | None} | None)  # host override of the
+        scenario's `systems`; Ruleset.system(name) -> bool; .scenario.systems (the ones on; hashed only while any)
+    Ruleset.dispositions {id: DispositionDef(id, name, name_en, behavior annex|raze|raid|release, cost, loot, params)}
+        (empty while conquest is off); ProvinceTypeDef.conquest_value (1..5, default 1)
+    registry: SYSTEMS, ORDER_SYSTEMS, ORDER_PHASE_RULES {kind: {p2_new, p2_edit, recon_consumed}},
+        MISSION_BEHAVIORS, DISPOSITION_BEHAVIORS, StatSpec.system (stage-3 stats are never seeded)
+    State: Province.status {occupied{by,from,since}, ruined_until, ravaged_until, looted_turn, sabotaged};
+        Player.home / shades / spy_seq / conquest_policy; GameState.claims [{seat, province, until_turn}] / origins
+        {pid: seat} — all left out of state_hash while empty
+    Orders: {"kind":"dispose","province","disposition","to"?} and {"kind":"policy","disposition": id | null}
+        (conquest; 0 CP in Д and П2, free P2 edits); hire_shade/spy/recall/ward (espionage); move "feint": true.
+        Reasons BAD_TARGET NOT_OCCUPIED OCCUPIED RUINED NO_RECIPIENT (+ espionage ones in orders.STAGE3_REASONS)
+    engine.conquest: is_full/occupied/is_ruined/is_ravaged, living_capital, check_place, claim_of, disposition_cost,
+        disposition_loot, statuses_for (public statuses), ConquestStep (resolution step 4b)
+    Ruleset.missions {id: MissionDef(behavior, target province|owned_province|seat, difficulty, rounds_min/max,
+        whisper, requires_tech, cost, cost_per_round, params, loud)} and Ruleset.espionage (EspionageDef: Shade name,
+        cost, upkeep, ward cost) — empty / None while espionage is off; pack dir `espionage/*.yaml` {config?, missions}
+    engine.espionage (3a): recon(state_at_close_of_actions, books_d, ruleset, seed) -> (state' in negotiation_2,
+        report {turn, rounds, reports{seat: [{id, facts, truth, ...}]}, captures{victim: [...]}, lost, strikes, hired,
+        started, ended, rejected, feints, hash}); EspionageStep (resolution steps 1, 1b, 2b, the end);
+        estimate_mission, spies_text (list_spies), intel_text (get_intel), report_text, state_line (ДОНЕСЕНИЯ),
+        notice_text (the inbox entry), honest_range, chances; orders: spy {shade, mission, target, rounds},
+        recall {shade}, hire_shade; move "feint": true costs feint.cp_cost on cp_spent in Д
 """
 
 from .catalog import describe, describe_effect, find

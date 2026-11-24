@@ -37,6 +37,8 @@ ENTITY_DIRS: dict[str, str] = {
     "branches": "branch",
     "techs": "tech",
     "artifacts": "artifact",
+    # stage 3 (SPY_AND_CONQUEST.md 3.3): optional
+    "dispositions": "disposition",
 }
 
 DEFAULT_MESSAGE_LIMITS: dict[str, Any] = {
@@ -97,6 +99,7 @@ class ProvinceTypeDef:
     short: str
     income: dict[str, int]
     defense_mul: float
+    conquest_value: int = 1      # stage 3: hashed only while conquest is on (Ruleset.to_dict)
 
 
 # Stage-2 fields below have empty defaults and are left out of the ruleset hash while empty (Ruleset.to_dict), so a
@@ -195,6 +198,51 @@ class ArtifactDef:
 
 
 @dataclass(frozen=True)
+class DispositionDef:
+    """A fate of a captured province (SPY_AND_CONQUEST.md 3.3): an engine behaviour with the pack's numbers."""
+    id: str
+    name: str
+    name_en: str
+    behavior: str                          # registry.DISPOSITION_BEHAVIORS
+    cost: dict[str, int]                   # x province conquest_value x disposition.<id>.cost_mul
+    loot: dict[str, int]                   # x province conquest_value x disposition.<id>.loot_mul
+    params: dict[str, Any]                 # the behaviour's parameters, defaults filled in
+    description: str = ""
+
+
+@dataclass(frozen=True)
+class MissionDef:
+    """A Shade mission (SPY_AND_CONQUEST.md 2.2): an engine behaviour (registry.MISSION_BEHAVIORS) with the pack's
+    numbers. `difficulty` and `rounds_max` are the bases of `spy.mission.<id>.difficulty|max_rounds`."""
+    id: str
+    name: str
+    name_en: str
+    behavior: str
+    target: str                            # province | owned_province | seat (registry.MISSION_TARGETS)
+    difficulty: int
+    rounds_min: int
+    rounds_max: int
+    whisper: int                           # the S it needs (MISSION_LOCKED below it)
+    requires_tech: tuple[str, ...]
+    cost: dict[str, int]                   # once, held when the order is given
+    cost_per_round: dict[str, int]         # x the chosen rounds, held when the order is given
+    params: dict[str, Any]                 # the behaviour's parameters, defaults filled in
+    loud: bool                             # a loud mission strikes in the resolution (sabotage)
+    description: str = ""
+
+
+@dataclass(frozen=True)
+class EspionageDef:
+    """The pack's espionage `config` (SPY_AND_CONQUEST.md 2.2): the Shade's name and the bases of
+    `spy.shade.cost.*`, `spy.shade.upkeep.*`, `spy.ward.cost.*`."""
+    shade_name: str = "Тень"
+    shade_name_en: str = "Shade"
+    shade_cost: dict[str, int] = field(default_factory=dict)
+    shade_upkeep: dict[str, int] = field(default_factory=dict)
+    ward_cost: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class Profile:
     """A seat's stat key beyond its faction: researched techs, artifacts and the owner-scoped buildings it holds
     (engine/techs.py `stat_key`). Ruleset.stat accepts it wherever it accepts a faction id."""
@@ -258,6 +306,9 @@ class ScenarioDef:
     # None: no setup phase (as in the slice); else DEFAULT_SETUP keys. A game setting (the game config may override
     # the artifact mode), not hashed.
     setup: dict[str, Any] | None = None
+    # stage 3: the switchable systems that are on (registry.SYSTEMS), from the scenario's `systems` or the host's
+    # override; hashed only while some system is on, so a ruleset without them hashes as before
+    systems: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -278,6 +329,9 @@ class Ruleset:
     branches: dict[str, BranchDef] = field(default_factory=dict)
     techs: dict[str, TechDef] = field(default_factory=dict)
     artifacts: dict[str, ArtifactDef] = field(default_factory=dict)
+    dispositions: dict[str, DispositionDef] = field(default_factory=dict)   # stage 3; empty while conquest is off
+    missions: dict[str, MissionDef] = field(default_factory=dict)           # stage 3; empty while espionage is off
+    espionage: EspionageDef | None = None                                    # stage 3; None while espionage is off
     # Inputs of per-seat stat tables (Profile); derived from the hashed content, so not hashed themselves.
     base_stats: dict[str, float] = field(default_factory=dict)
     override_mods: tuple[dict[str, Any], ...] = ()
@@ -288,6 +342,10 @@ class Ruleset:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "_cache", {})     # Profile -> stats table (not a field: never hashed or copied)
+
+    def system(self, name: str) -> bool:
+        """Is the switchable system `name` (espionage | conquest) on in this ruleset?"""
+        return name in self.scenario.systems
 
     def _table(self, key: StatKey) -> Mapping[str, float]:
         if not key:
@@ -384,7 +442,8 @@ class Ruleset:
         table: Mapping[str, Any] = getattr(self, {"unit": "units", "building": "buildings",
                                                   "resource": "resources", "province_type": "province_types",
                                                   "faction": "factions", "tech": "techs", "branch": "branches",
-                                                  "artifact": "artifacts"}[kind])
+                                                  "artifact": "artifacts", "disposition": "dispositions",
+                                                  "mission": "missions"}[kind])
         if not isinstance(ref, str):
             return None
         if ref in table:
@@ -415,6 +474,20 @@ class Ruleset:
         for key in ("branches", "techs", "artifacts"):
             if not data[key]:
                 data.pop(key)
+        # Stage 3 (SPY_AND_CONQUEST.md 1.1, 9): only the systems that are on, and their content, are hashed.
+        if data["scenario"].get("systems"):
+            data["scenario"]["systems"] = sorted(data["scenario"]["systems"])
+        else:
+            data["scenario"].pop("systems", None)
+        if not data["dispositions"]:
+            data.pop("dispositions")
+        if not data["missions"]:
+            data.pop("missions")
+        if data["espionage"] is None:
+            data.pop("espionage")
+        if not self.system("conquest"):
+            for entry in data["province_types"].values():
+                entry.pop("conquest_value", None)
         for table in ("units", "buildings", "factions"):
             for entry in data[table].values():
                 for k in [k for k, v in entry.items() if k in _NEW_FIELDS and v in (None, "", (), [], {})]:
@@ -423,7 +496,8 @@ class Ruleset:
         # must not make `dah replay` report changed content. A faction's `lore` was hashed before stage 2, so a
         # pack without stage-2 content (no techs, branches, artifacts) keeps it and hashes exactly as before.
         stage2 = any(k in data for k in ("branches", "techs", "artifacts"))
-        for table in ("units", "buildings", "factions", "techs", "branches", "artifacts"):
+        for table in ("units", "buildings", "factions", "techs", "branches", "artifacts", "dispositions",
+                      "missions"):
             for entry in (data.get(table) or {}).values():
                 for k in _COSMETIC_FIELDS & entry.keys():
                     if k == "lore" and table == "factions" and not stage2:
@@ -485,7 +559,9 @@ class _Raw:
 @dataclass
 class _Loaded:
     packs: dict[str, str] = field(default_factory=dict)
-    entities: dict[str, dict[str, _Raw]] = field(default_factory=lambda: {k: {} for k in ENTITY_DIRS.values()})
+    entities: dict[str, dict[str, _Raw]] = field(
+        default_factory=lambda: {k: {} for k in (*ENTITY_DIRS.values(), "mission")})
+    configs: list[_Raw] = field(default_factory=list)     # espionage `config` blocks (at most one per ruleset)
     errors: list[Issue] = field(default_factory=list)
     warnings: list[Issue] = field(default_factory=list)
     requires: list[tuple[list[str], str]] = field(default_factory=list)   # checked once all packs are loaded
@@ -548,7 +624,29 @@ def _load_pack(pack_dir: Path, out: _Loaded) -> None:
                     out.errors.append(Issue(rel, _json_path(prefix, ["id"]), f"duplicate {kind} id {full!r}"))
                     continue
                 out.entities[kind][full] = _Raw(kind, pack_id, full, item, rel, prefix)
+    _load_espionage(pack_dir, pack_id, rel_root, out)
     out.requires.append((meta.get("requires", []), f"{rel_root}/pack.yaml"))
+
+
+def _load_espionage(pack_dir: Path, pack_id: str, rel_root: str, out: _Loaded) -> None:
+    """`espionage/*.yaml` (SPY_AND_CONQUEST.md 2.2): each file has an optional `config` and a list of `missions`."""
+    for path in sorted((pack_dir / "espionage").glob("*.yaml")):
+        rel = f"{rel_root}/espionage/{path.name}"
+        doc = _read_yaml(path, rel, out)
+        doc = {} if doc is None else doc
+        issues = _schema_issues("espionage", doc, rel, "")
+        if issues:
+            out.errors.extend(issues)
+            continue
+        if "config" in doc:
+            out.configs.append(_Raw("config", pack_id, f"{pack_id}:config", doc["config"], rel, "config"))
+        for i, item in enumerate(doc.get("missions") or []):
+            full = f"{pack_id}:{item['id']}"
+            prefix = f"missions[{i}]"
+            if full in out.entities["mission"]:
+                out.errors.append(Issue(rel, _json_path(prefix, ["id"]), f"duplicate mission id {full!r}"))
+                continue
+            out.entities["mission"][full] = _Raw("mission", pack_id, full, item, rel, prefix)
 
 
 def _load_all(pack_dirs: Iterable[str | Path]) -> _Loaded:
@@ -646,6 +744,21 @@ class _Builder:
             if full is None:
                 return None
             segs[1] = full
+        elif segs[0] == "disposition" and len(segs) == 3:
+            full = self.ref(raw, "disposition", segs[1], parts)
+            if full is None:
+                return None
+            segs[1] = full
+        elif segs[0] == "spy" and len(segs) == 4 and segs[1] == "mission":
+            full = self.ref(raw, "mission", segs[2], parts)
+            if full is None:
+                return None
+            segs[2] = full
+        elif segs[0] == "spy" and len(segs) == 4 and segs[1] in ("shade", "ward") and segs[2] in ("cost", "upkeep"):
+            full = self.ref(raw, "resource", segs[3], parts)
+            if full is None:
+                return None
+            segs[3] = full
         elif segs[0] == "province" and len(segs) == 3 and segs[1] == "income_mul":
             full = self.ref(raw, "resource", segs[2], parts)
             if full is None:
@@ -738,7 +851,8 @@ class _Builder:
             d = raw.data
             self.texts(raw)
             out[fid] = ProvinceTypeDef(fid, self.name(d), d.get("short", self.name(d)),
-                                       self.amounts(raw, d["income"], "income"), float(d.get("defense_mul", 1.0)))
+                                       self.amounts(raw, d["income"], "income"), float(d.get("defense_mul", 1.0)),
+                                       int(d.get("conquest_value", 1)))
         return out
 
     def units(self) -> dict[str, UnitDef]:
@@ -884,6 +998,81 @@ class _Builder:
                                    effects, d.get("description", ""), self.lore(raw))
         return out
 
+    def dispositions(self) -> dict[str, DispositionDef]:
+        out = {}
+        for fid, raw in sorted(self.l.entities["disposition"].items()):
+            d = raw.data
+            self.texts(raw)
+            behavior = d["behavior"]
+            spec = registry.DISPOSITION_BEHAVIORS.get(behavior)
+            if spec is None:
+                self.err(raw, ["behavior"], f"unknown behavior {behavior!r}; known: "
+                                            f"{', '.join(registry.DISPOSITION_BEHAVIORS)}")
+                continue
+            params = behavior_params(self, raw, spec, d.get("params") or {})
+            out[fid] = DispositionDef(fid, self.name(d), self.name_en(d), behavior,
+                                      self.amounts(raw, d.get("cost", {}), "cost"),
+                                      self.amounts(raw, d.get("loot", {}), "loot"), params,
+                                      d.get("description", ""))
+        return out
+
+    def missions(self) -> dict[str, MissionDef]:
+        out = {}
+        for fid, raw in sorted(self.l.entities["mission"].items()):
+            d = raw.data
+            self.texts(raw)
+            spec = registry.MISSION_BEHAVIORS.get(d["behavior"])
+            if spec is None:
+                self.err(raw, ["behavior"], f"unknown behavior {d['behavior']!r}; known: "
+                                            f"{', '.join(registry.MISSION_BEHAVIORS)}")
+                continue
+            lo, hi = d["rounds"]
+            if lo > hi:
+                self.err(raw, ["rounds"], f"rounds [{lo}, {hi}]: the minimum is above the maximum")
+                continue
+            params = behavior_params(self, raw, spec["params"], d.get("params") or {})
+            requires = d.get("requires") or {}
+            out[fid] = MissionDef(fid, self.name(d), self.name_en(d), d["behavior"], d["target"], d["difficulty"],
+                                  lo, hi, requires.get("whisper", 0),
+                                  self.refs(raw, "tech", requires.get("tech", []), ["requires", "tech"]),
+                                  self.amounts(raw, d.get("cost", {}), "cost"),
+                                  self.amounts(raw, d.get("cost_per_round", {}), "cost_per_round"), params,
+                                  bool(spec["loud"]), d.get("description", ""))
+        return out
+
+    def espionage(self) -> EspionageDef | None:
+        """The one espionage `config` of the loaded packs (two are an error); None without any."""
+        configs = self.l.configs
+        for extra in configs[1:]:
+            self.err(extra, [], f"a second espionage config (the first is in {configs[0].file}): only one is allowed")
+        if not configs:
+            return None
+        raw = configs[0]
+        shade = raw.data.get("shade") or {}
+        ward = raw.data.get("ward") or {}
+        name = shade.get("name", {"ru": "Тень", "en": "Shade"})
+        return EspionageDef(self.name({"name": name}), self.name_en({"name": name}),
+                            self.amounts(raw, shade.get("cost", {}), "shade.cost"),
+                            self.amounts(raw, shade.get("upkeep", {}), "shade.upkeep"),
+                            self.amounts(raw, ward.get("cost", {}), "ward.cost"))
+
+    def spy_stats(self, missions: Mapping[str, MissionDef], config: EspionageDef | None) -> dict[str, float]:
+        """Base values of the pack-given espionage stats (only while espionage is on: SPY_AND_CONQUEST.md 1.2)."""
+        stats: dict[str, float] = {}
+        for m in missions.values():
+            stats[f"spy.mission.{m.id}.difficulty"] = m.difficulty
+            stats[f"spy.mission.{m.id}.max_rounds"] = m.rounds_max
+        if config is not None:
+            for prefix, amounts in (("spy.shade.cost", config.shade_cost), ("spy.shade.upkeep", config.shade_upkeep),
+                                    ("spy.ward.cost", config.ward_cost)):
+                for res, n in amounts.items():
+                    spec = registry.stat_spec(f"{prefix}.{res}")
+                    if spec is not None and not spec.in_bounds(n):
+                        self.errors.append(Issue("<ruleset>", f"espionage.{prefix}.{res}",
+                                                 f"value {n} out of bounds {spec.lo}..{spec.hi}"))
+                    stats[f"{prefix}.{res}"] = n
+        return stats
+
     def maps(self) -> dict[str, MapDef]:
         out = {}
         for fid, raw in sorted(self.l.entities["map"].items()):
@@ -968,10 +1157,11 @@ class _Builder:
                 setup = {**DEFAULT_SETUP, **setup, "artifact_pool": pool}
             else:
                 setup = None
+            systems = tuple(name for name in registry.SYSTEMS if (d.get("systems") or {}).get(name))
             out[fid] = (raw, ScenarioDef(
                 fid, d["name"], map_id or d["map"], tuple(f for f in factions if f), d["turn_limit"],
                 {k: _duration(v) for k, v in d["phase_limits"].items()}, limits,
-                _merge(DEFAULT_DIPLOMACY_LIMITS, d.get("diplomacy_limits", {})), setup))
+                _merge(DEFAULT_DIPLOMACY_LIMITS, d.get("diplomacy_limits", {})), setup, systems))
         return out
 
     def roles(self, resources: Mapping[str, ResourceDef]) -> dict[str, str]:
@@ -1035,6 +1225,31 @@ class _Builder:
             assert spec is not None
             self.warnings.append(Issue(where, target, f"value {value:g} clamped to {spec.lo}..{spec.hi}"))
         return out
+
+
+def behavior_params(b: _Builder, raw: _Raw, spec: Mapping[str, tuple[type, float, float, Any]],
+                    given: Mapping[str, Any]) -> dict[str, Any]:
+    """A behaviour's parameters: the given ones checked against `spec` (name -> (kind, lo, hi, default)), the rest
+    filled with defaults. Unknown names and bad values are content errors."""
+    out: dict[str, Any] = {}
+    for name, value in given.items():
+        if name not in spec:
+            b.err(raw, ["params", name], f"unknown parameter {name!r}; known: {', '.join(spec) or 'none'}")
+            continue
+        kind, lo, hi, _ = spec[name]
+        if kind is bool:
+            ok = isinstance(value, bool)
+        elif kind is int:
+            ok = isinstance(value, int) and not isinstance(value, bool) and lo <= value <= hi
+        else:
+            ok = isinstance(value, (int, float)) and not isinstance(value, bool) and lo <= value <= hi
+        if not ok:
+            b.err(raw, ["params", name], f"parameter {name!r}: {kind.__name__} in {lo}..{hi}, got {value!r}")
+            continue
+        out[name] = float(value) if kind is float else value
+    for name, (_, _, _, default) in spec.items():
+        out.setdefault(name, default)
+    return dict(sorted(out.items()))
 
 
 def artifact_power_guess(effects: Iterable[Mapping[str, Any]], units: Mapping[str, UnitDef],
@@ -1118,6 +1333,11 @@ def _assemble(loaded: _Loaded) -> tuple[_Builder, dict[str, Any]]:
     parts["branches"] = b.branches()
     parts["techs"] = b.techs()
     parts["artifacts"] = b.artifacts(parts["units"], parts["buildings"], parts["techs"])
+    parts["dispositions"] = b.dispositions()
+    parts["missions"] = b.missions()
+    parts["espionage"] = b.espionage()
+    parts["requires_system"] = {fid: raw.data["requires_system"] for kind in ("branch", "tech", "building", "artifact")
+                                for fid, raw in loaded.entities[kind].items() if raw.data.get("requires_system")}
     parts["maps"] = b.maps()
     parts["scenarios"] = b.scenarios()
     parts["roles"] = b.roles(parts["resources"])
@@ -1138,7 +1358,8 @@ def _assemble(loaded: _Loaded) -> tuple[_Builder, dict[str, Any]]:
     return b, parts
 
 
-def _ruleset(b: _Builder, parts: dict[str, Any], packs: dict[str, str], scenario_id: str) -> Ruleset:
+def _ruleset(b: _Builder, parts: dict[str, Any], packs: dict[str, str], scenario_id: str,
+             systems: Mapping[str, Any] | None = None) -> Ruleset:
     scenarios = parts["scenarios"]
     full = scenario_id if scenario_id in scenarios else next(
         (k for k in scenarios if k.split(":", 1)[1] == scenario_id), None)
@@ -1147,7 +1368,26 @@ def _ruleset(b: _Builder, parts: dict[str, Any], packs: dict[str, str], scenario
     raw, scenario = scenarios[full]
     if scenario.map not in parts["maps"]:
         raise ContentError([Issue(raw.file, _json_path(raw.path, ["map"]), f"map {scenario.map!r} is invalid")])
-    overrides = b.effects(raw, raw.data.get("overrides", []), "overrides", "override")
+    on = set(scenario.systems)
+    for name, value in (systems or {}).items():
+        if name not in registry.SYSTEMS:
+            raise ContentError([Issue("<ruleset>", "systems", f"unknown system {name!r}; known: "
+                                                              f"{', '.join(registry.SYSTEMS)}")])
+        if value is not None:
+            on = on | {name} if value else on - {name}
+    scenario = replace(scenario, systems=tuple(n for n in registry.SYSTEMS if n in on))
+    if "conquest" in on and not parts["dispositions"]:
+        raise ContentError([Issue(raw.file, _json_path(raw.path, ["systems", "conquest"]),
+                                  "conquest is on but the packs define no dispositions (dispositions/*.yaml)")])
+    if "espionage" in on and not parts.get("missions"):
+        raise ContentError([Issue(raw.file, _json_path(raw.path, ["systems", "espionage"]),
+                                  "espionage is on but the packs define no missions (espionage/*.yaml)")])
+    off = set(registry.SYSTEMS) - on
+    parts = _system_parts(parts, off)
+    if "espionage" in on:
+        # pack-given espionage stats join the base table only while espionage is on (hashes of other games stay)
+        parts = {**parts, "base_stats": {**parts["base_stats"], **b.spy_stats(parts["missions"], parts["espionage"])}}
+    overrides = _drop_off_effects(b.effects(raw, raw.data.get("overrides", []), "overrides", "override"), off)
     move_default = registry.default_unit_move(any(parts[k] for k in ("branches", "techs", "artifacts")))
     stats = b.effective(parts["base_stats"], overrides, raw.file, move_default)
     faction_stats = {f: b.effective(parts["base_stats"], overrides + parts["faction_mods"][f], f, move_default)
@@ -1163,18 +1403,76 @@ def _ruleset(b: _Builder, parts: dict[str, Any], packs: dict[str, str], scenario
         factions={f: parts["factions"][f] for f in scenario.factions}, map=parts["maps"][scenario.map],
         scenario=scenario, stats=stats, faction_stats=faction_stats, warnings=tuple(b.warnings),
         branches=parts["branches"], techs=parts["techs"], artifacts=parts["artifacts"],
-        base_stats=parts["base_stats"], override_mods=tuple(overrides),
+        dispositions=parts["dispositions"], missions=parts["missions"],
+        espionage=(parts["espionage"] or EspionageDef()) if "espionage" in on else None, base_stats=parts["base_stats"], override_mods=tuple(overrides),
         faction_mods={f: tuple(parts["faction_mods"][f]) for f in scenario.factions}, move_default=move_default)
     return replace(ruleset, hash=sha256_json(ruleset.to_dict()))
 
 
-def build_ruleset(pack_dirs: Iterable[str | Path] | None, scenario_id: str) -> Ruleset:
-    """Load and validate packs, then assemble the ruleset for one scenario. Raises ContentError."""
+def _drop_off_effects(effects: Iterable[Mapping[str, Any]], off: set[str]) -> list[dict[str, Any]]:
+    """Effects without the `modify` lines aimed at a stat of a system that is off (SPY_AND_CONQUEST.md 1.1): such a
+    line does nothing and is shown nowhere; the entity's other effects stay."""
+    out = []
+    for e in effects:
+        spec = registry.stat_spec(e["target"]) if e.get("type") == "modify" and e.get("target") else None
+        if spec is None or spec.system not in off:
+            out.append(dict(e))
+    return out
+
+
+def _has_off_effects(parts: Mapping[str, Any], off: set[str]) -> bool:
+    effects = [e for t in parts["techs"].values() for e in t.effects]
+    effects += [e for a in parts["artifacts"].values() for e in a.effects]
+    effects += [e for bd in parts["buildings"].values() for e in (*bd.province_mods, *bd.owner_mods)]
+    effects += [e for mods in parts["faction_mods"].values() for e in mods]
+    return len(_drop_off_effects(effects, off)) != len(effects)
+
+
+def _system_parts(parts: dict[str, Any], off: set[str]) -> dict[str, Any]:
+    """`parts` for the systems that are on: entities with `requires_system` of a system that is off are hidden (a
+    hidden branch hides its techs), effects on its stats are dropped, and its content (dispositions) is left out.
+    Unchanged (the same object) when nothing of an off system is there, so older packs build exactly as before."""
+    hidden = {fid for fid, system in parts["requires_system"].items() if system in off}
+    if not hidden and not _has_off_effects(parts, off) and not ("conquest" in off and parts["dispositions"]) \
+            and not ("espionage" in off and (parts["missions"] or parts["espionage"])):
+        return parts
+    out = dict(parts)
+    out["branches"] = {k: v for k, v in parts["branches"].items() if k not in hidden}
+    out["techs"] = {k: replace(v, effects=tuple(_drop_off_effects(v.effects, off)))
+                    for k, v in parts["techs"].items() if k not in hidden and v.branch not in hidden}
+    out["buildings"] = {k: replace(v, province_mods=tuple(_drop_off_effects(v.province_mods, off)),
+                                   owner_mods=tuple(_drop_off_effects(v.owner_mods, off)))
+                        for k, v in parts["buildings"].items() if k not in hidden}
+    out["artifacts"] = {k: replace(v, effects=tuple(_drop_off_effects(v.effects, off)))
+                        for k, v in parts["artifacts"].items() if k not in hidden}
+    out["factions"] = {k: replace(v, bonuses=tuple(_drop_off_effects(v.bonuses, off)),
+                                  penalties=tuple(_drop_off_effects(v.penalties, off)))
+                       for k, v in parts["factions"].items()}
+    out["faction_mods"] = {k: _drop_off_effects(v, off) for k, v in parts["faction_mods"].items()}
+    # the base stats of hidden techs and buildings (their costs) go too: a hidden entity leaves no trace in the hash
+    gone = {k for k in parts["techs"] if k not in out["techs"]} | {k for k in parts["buildings"]
+                                                                    if k not in out["buildings"]}
+    if gone:
+        out["base_stats"] = {k: v for k, v in parts["base_stats"].items()
+                             if not (k.split(".")[0] in ("tech", "building") and k.split(".")[1] in gone)}
+    if "conquest" in off:
+        out["dispositions"] = {}
+    if "espionage" in off:
+        out["missions"], out["espionage"] = {}, None
+    return out
+
+
+def build_ruleset(pack_dirs: Iterable[str | Path] | None, scenario_id: str,
+                  systems: Mapping[str, Any] | None = None) -> Ruleset:
+    """Load and validate packs, then assemble the ruleset for one scenario. Raises ContentError.
+
+    `systems` ({espionage|conquest: bool}, a game's host override) switches stage-3 systems on or off over the
+    scenario's `systems` (a key left out or None: the scenario's; a scenario without the key: off)."""
     loaded = _load_all(pack_dirs if pack_dirs is not None else default_pack_dirs())
     b, parts = _assemble(loaded)
     if b.errors:
         raise ContentError(list(b.errors))
-    return _ruleset(b, parts, loaded.packs, scenario_id)
+    return _ruleset(b, parts, loaded.packs, scenario_id, systems)
 
 
 def validate_packs(pack_dirs: Iterable[str | Path]) -> tuple[list[Issue], list[Issue]]:

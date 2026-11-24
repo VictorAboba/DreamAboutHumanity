@@ -19,6 +19,16 @@ not tied to one bot type) or chosen by the bots' styles (`--factions bots`); art
 add win rate per faction and per artifact (with its lift, raw and adjusted for the holders' factions and bot types),
 the share of games reaching a tier-2 tech, techs per game, and the most researched techs. `--json-out FILE` also
 writes the JSON tallies (per configuration and ALL). The balance pass of core 0.3.0: docs/SLICE.md.
+
+Stage 3 (docs/SPY_AND_CONQUEST.md section 7): with espionage on, the recon step runs in-process at the close of
+actions (the same `recon` the server runs) and the bots read their reports from its result (the same data as
+`get_intel(format=json)`). `--espionage on|off|both` and `--conquest on|off|both` (default: the scenario's) pick the
+switch combinations; each combination gets its own tables (win rates per bot type and faction, Synclite apart) and its
+own `--json` key ("espionage=on,conquest=off"). The espionage table: Shades per seat, missions per mission (success,
+caught, empty), Shade survival, sabotage strikes, P2 attacks after a strike and their wins, false entries (placed,
+exposed, made real), captures (attributed or not) and the alloy spent on Shades (and on replacing lost ones). The
+conquest table: fates by disposition and source, provisions spent on subjugation and idle at the end, occupation
+length, revolts, returns, and loot per province (how often one province was looted and what it gave).
 """
 
 from __future__ import annotations
@@ -62,6 +72,7 @@ from dah.engine import (
     view_state,
 )
 from dah.engine import diplomacy as dip
+from dah.engine import espionage as esp
 from dah.engine.content import Ruleset
 from dah.engine.model import GameState
 from dah.engine.setup import artifact_choices, faction_choices
@@ -95,6 +106,7 @@ class Match:
         self.books: dict[str, SeatOrders] = {}
         self.ops: list[dict[str, Any]] = []
         self.counts: Counter[tuple[str, str]] = Counter()
+        self.recon: dict[str, Any] | None = None    # the last recon step (espionage)
 
 
 _ESTIMATES: dict[Any, float] = {}
@@ -145,6 +157,10 @@ class EngineApi:
 
     def ready(self, confirm_hash: str | None) -> dict[str, Any]:
         return {}
+
+    def intel(self) -> dict[str, Any]:
+        """The seat's reports of the last recon step as data: what `GET /v1/intel?format=json` gives."""
+        return {"turn": (self.m.recon or {}).get("turn"), "intel": esp.intel_json(self.m.recon, self.seat)}
 
     def list_techs(self) -> dict[str, Any]:
         s, rs = self.m.state, self.m.rs
@@ -244,10 +260,18 @@ def play_game(rs: Ruleset, kinds: dict[str, str], seed: str, setup: dict[str, An
     m = Match(rs, seats, seed)
     apis = {seat: EngineApi(m, seat) for seat in kinds}
     events: list[dict[str, Any]] = []
+    recons: list[dict[str, Any]] = []
+    feints_real: list[tuple[int, str, str]] = []   # (turn, seat, order id) of false entries made real in P2
+    occupied_turns = 0
     scores_by_turn: dict[int, dict[str, int]] = {}
+    espionage = rs.system("espionage")
     while m.state.phase != "game_over":
         m.books, m.ops = {}, []
         for phase in PHASES:
+            if phase == "negotiation_2" and espionage:   # the recon step at the close of actions
+                m.state.phase = "actions"
+                m.state, m.recon = esp.recon(m.state, m.books, rs, seed)
+                recons.append(m.recon)
             m.state.phase = phase
             m.counts.clear()
             for seat in sorted(kinds):
@@ -257,7 +281,16 @@ def play_game(rs: Ruleset, kinds: dict[str, str], seed: str, setup: dict[str, An
         m.state.phase = "resolution"
         alive = [s for s, p in m.state.players.items() if p.alive]
         keys = {s: stat_key(m.state, rs, s) for s in alive}  # the stats each seat fights with this turn
-        m.state, report = resolve(m.state, {s: m.books.get(s, SeatOrders()) for s in alive}, rs, seed, m.ops)
+        books = {s: m.books.get(s, SeatOrders()) for s in alive}
+        if espionage and m.recon is not None:
+            feint_ids = {(f["seat"], f["order_id"]) for f in m.recon.get("feints", [])}
+            feints_real += [(turn, s, o.id) for s, b in books.items() for o in b.orders
+                            if o.kind == "move" and not o.feint and (s, o.id) in feint_ids]
+        p2_moves = [(s, o.dst) for s, b in books.items() for o in b.orders
+                    if o.kind == "move" and not o.feint and o.phase_added == "negotiation_2"]
+        m.state, report = resolve(m.state, books, rs, seed, m.ops)
+        occupied_turns += sum(1 for p in m.state.provinces.values() if (p.status or {}).get("occupied"))
+        events.append({"kind": "_p2_moves", "moves": p2_moves, "turn": turn, "seats": []})
         for e in report.events:
             if e["kind"] == "battle":
                 e = {**e, "keys": [keys.get(side["owner"]) for side in e["sides"]]}
@@ -270,7 +303,9 @@ def play_game(rs: Ruleset, kinds: dict[str, str], seed: str, setup: dict[str, An
             "alive": {s: p.alive for s, p in m.state.players.items()},
             "factions": {s: p.faction for s, p in m.state.players.items()},
             "artifacts": {s: list(p.artifacts) for s, p in m.state.players.items()},
-            "techs": {s: list(p.techs) for s, p in m.state.players.items()}}
+            "techs": {s: list(p.techs) for s, p in m.state.players.items()},
+            "recons": recons, "feints_real": feints_real, "occupied_turns": occupied_turns,
+            "shades_end": {s: len(p.shades) for s, p in m.state.players.items()}}
 
 
 # ---------------------------------------------------------------- statistics
@@ -318,6 +353,7 @@ class Tally:
         self.tier2_games = 0                    # games where some seat completed a tech of tier 2 or more
         self.tier2_seats = 0
         self.seat_rows: list[tuple[str, str, list[str], float]] = []  # (faction, bot type, artifacts, win share)
+        self.s3 = Stage3Tally()
 
     def add(self, rs: Ruleset, g: dict[str, Any]) -> None:
         self.games += 1
@@ -382,6 +418,7 @@ class Tally:
             elif kind in ("gift", "pact_proposed", "pact_signed", "pact_renewed", "pact_broken", "pact_bounce",
                           "pact_joint"):
                 self.diplo[kind] += 1
+        self.s3.add(g)
         if first_cap is None:
             self.no_capture += 1
         else:
@@ -395,6 +432,181 @@ class Tally:
             if len(leaders) == 1:
                 self.leader_t3_games += 1
                 self.leader_t3_wins += leaders[0] in g["winners"]
+
+
+class Stage3Tally:
+    """Espionage and conquest figures (docs/SPY_AND_CONQUEST.md section 7)."""
+
+    def __init__(self) -> None:
+        self.games = 0
+        self.esp_games = 0
+        self.con_games = 0
+        self.seats: Counter[str] = Counter()                  # bot type -> seats (espionage games)
+        self.hired: Counter[str] = Counter()                  # bot type -> Shades hired
+        self.shade_alloy: Counter[str] = Counter()            # bot type -> alloy on Shades
+        self.replace_alloy: Counter[str] = Counter()          # ... on Shades hired after a loss
+        self.missions: dict[str, Counter[str]] = defaultdict(Counter)   # mission -> end reason -> count
+        self.started: Counter[str] = Counter()                # mission -> started
+        self.rounds: Counter[str] = Counter()                 # round outcome -> count
+        self.strikes = 0
+        self.window_attacks = [0, 0]                          # [won, fought]: P2 attacks into a struck province
+        self.feints = [0, 0, 0]                               # placed, exposed (in reports), made real in P2
+        self.captures: Counter[str] = Counter()               # attributed | unattributed | neutral
+        self.dispositions: Counter[tuple[str, str]] = Counter()  # (disposition, source) -> count
+        self.subjugate_food: list[int] = []                   # provisions paid per subjugation
+        self.food_end: list[int] = []                         # provisions idle at the end, per seat
+        self.occupations = 0
+        self.occupied_turns = 0
+        self.revolts = 0
+        self.returns = 0
+        self.claims = 0
+        self.loot: dict[str, list[int]] = defaultdict(lambda: [0, 0])  # province -> [times looted, total loot]
+
+    def add(self, g: dict[str, Any]) -> None:
+        self.games += 1
+        kinds = g["kinds"]
+        recons = g.get("recons") or []
+        if recons:
+            self.esp_games += 1
+            for kind in kinds.values():
+                self.seats[kind] += 1
+        lost_before: set[str] = set()
+        for rep in recons:
+            for h in rep.get("hired", []):
+                alloy = sum(n for r, n in (h.get("cost") or {}).items() if r.endswith("alloy"))
+                self.hired[kinds[h["seat"]]] += 1
+                self.shade_alloy[kinds[h["seat"]]] += alloy
+                if h["seat"] in lost_before:
+                    self.replace_alloy[kinds[h["seat"]]] += alloy
+            for st in rep.get("started", []):
+                self.started[short(st["mission"])] += 1
+            for e in rep.get("ended", []):
+                self.missions[short(e["mission"])][e["reason"]] += 1
+            for r in rep.get("rounds", []):
+                self.rounds[r["outcome"]] += 1
+            self.strikes += len(rep.get("strikes", []))
+            self.feints[0] += len(rep.get("feints", []))
+            for reports in (rep.get("reports") or {}).values():
+                for r in reports:
+                    self.feints[1] += sum(1 for f in r.get("feints", []) if f.get("exposed"))
+            for c in rep.get("caught", []):
+                self.captures["neutral" if c.get("victim") is None else
+                              "attributed" if c.get("attributed") else "unattributed"] += 1
+            for seat in rep.get("lost", {}):
+                lost_before.add(seat)
+        self.feints[2] += len(g.get("feints_real") or [])
+        con = any(e["kind"] in ("disposition", "occupation_revolt", "claim_created") or
+                  (e["kind"] == "captured" and "mode" in e) for e in g["events"])
+        self.con_games += con
+        if con or recons or g["events"]:
+            for seat in kinds:
+                self.food_end.append(next((n for r, n in g["resources"][seat].items() if r.endswith("provisions")),
+                                          0))
+        self.occupied_turns += g.get("occupied_turns", 0)
+        struck: dict[tuple[int, str], str] = {}
+        p2: dict[int, list[tuple[str, str]]] = {}
+        for e in g["events"]:
+            kind = e["kind"]
+            if kind == "_p2_moves":
+                p2[e["turn"]] = [tuple(x) for x in e["moves"]]
+            elif kind == "sabotage":
+                struck[(e["turn"], e["province"])] = e.get("seat")
+            elif kind == "battle" and e.get("stage") == "defense":
+                by = struck.get((e["turn"], e["province"]))
+                att = e["sides"][0]
+                if by is not None and att.get("owner") == by and (by, e["province"]) in p2.get(e["turn"], []):
+                    self.window_attacks[0] += bool(att.get("won"))
+                    self.window_attacks[1] += 1
+            elif kind == "captured" and e.get("mode"):
+                if e["mode"] == "occupied" or e.get("status") == "occupied":
+                    self.occupations += 1
+                if e["mode"] == "reclaimed":
+                    self.returns += 1
+            elif kind == "disposition":
+                self.dispositions[(short(e.get("disposition", "?")), e.get("source", "?"))] += 1
+                if short(e.get("disposition", "")) == "subjugate":
+                    self.subjugate_food.append(sum((e.get("cost") or {}).values()))
+                loot = sum((e.get("loot") or {}).values())
+                if loot:
+                    acc = self.loot[e["province"]]
+                    acc[0] += 1
+                    acc[1] += loot
+            elif kind == "occupation_revolt":
+                self.revolts += 1
+            elif kind == "claim_created":
+                self.claims += 1
+
+    def summary(self) -> dict[str, Any]:
+        ended = sum(sum(c.values()) for c in self.missions.values())
+        caught = sum(c["caught"] for c in self.missions.values())
+        sabotages = self.started.get("sabotage", 0)
+        loot_counts = sorted((v[0] for v in self.loot.values()), reverse=True)
+        return {
+            "espionage_games": self.esp_games, "conquest_games": self.con_games,
+            "shades_per_seat": {k: self.hired[k] / n for k, n in self.seats.items()},
+            "shade_alloy_per_seat": {k: self.shade_alloy[k] / n for k, n in self.seats.items()},
+            "replacement_alloy_per_seat": {k: self.replace_alloy[k] / n for k, n in self.seats.items()},
+            "missions": {m: {"started": self.started[m], **dict(c)} for m, c in sorted(self.missions.items())},
+            "rounds": dict(self.rounds), "shade_survival": 1 - caught / ended if ended else None,
+            "sabotage_strike_rate": self.strikes / sabotages if sabotages else None,
+            "window_attacks": {"fought": self.window_attacks[1], "won": self.window_attacks[0]},
+            "feints": {"placed": self.feints[0], "exposed": self.feints[1], "made_real": self.feints[2]},
+            "captures": dict(self.captures),
+            "dispositions": {f"{d}/{src}": n for (d, src), n in sorted(self.dispositions.items())},
+            "subjugate_food_mean": statistics.mean(self.subjugate_food) if self.subjugate_food else None,
+            "subjugate_food_total": sum(self.subjugate_food),
+            "idle_food_end_mean": statistics.mean(self.food_end) if self.food_end else None,
+            "occupations": self.occupations, "occupied_turns": self.occupied_turns,
+            "occupation_mean_turns": self.occupied_turns / self.occupations if self.occupations else None,
+            "revolts": self.revolts, "returns": self.returns, "claims": self.claims,
+            "loot_per_province": {pid: {"times": v[0], "loot": v[1]} for pid, v in sorted(self.loot.items())},
+            "loot_max_times_one_province": loot_counts[0] if loot_counts else 0,
+        }
+
+    def report(self) -> list[str]:
+        if not self.esp_games and not self.con_games:
+            return []
+        out: list[str] = []
+        sm = self.summary()
+        g = max(1, self.games)
+        if self.esp_games:
+            per = ", ".join(f"{k} {v:.2f}" for k, v in sorted(sm["shades_per_seat"].items()))
+            spend = ", ".join(f"{k} {v:.1f} ({sm['replacement_alloy_per_seat'][k]:.1f} replacing lost)"
+                              for k, v in sorted(sm["shade_alloy_per_seat"].items()))
+            out.append(f"  espionage: Shades hired/seat {per or '-'}; alloy on Shades/seat {spend or '-'}")
+            rows = []
+            for mid, c in sm["missions"].items():
+                ok = c.get("done", 0) + c.get("struck", 0)
+                rows.append(f"{mid} {c['started']} (success {ok}, caught {c.get('caught', 0)}, empty "
+                            f"{c.get('empty', 0)}, void {c.get('void', 0)}, recalled {c.get('recalled', 0)})")
+            out.append("  missions: " + ("; ".join(rows) or "-"))
+            surv = sm["shade_survival"]
+            rate = sm["sabotage_strike_rate"]
+            wa = sm["window_attacks"]
+            out.append(f"  Shade survival per mission {'-' if surv is None else f'{100 * surv:.0f}%'}; sabotage "
+                       f"strikes {self.strikes / g:.2f}/game ({'-' if rate is None else f'{100 * rate:.0f}%'} of "
+                       f"sabotage missions); P2 attacks after a strike {wa['fought']} (won {wa['won']})")
+            f = sm["feints"]
+            cap = sm["captures"]
+            out.append(f"  false entries {f['placed'] / g:.2f}/game (exposed {f['exposed']}, made real "
+                       f"{f['made_real']}); captures {sum(cap.values()) / g:.2f}/game (attributed "
+                       f"{cap.get('attributed', 0)}, unattributed {cap.get('unattributed', 0)}, neutral "
+                       f"{cap.get('neutral', 0)})")
+        if self.con_games or self.dispositions:
+            fates = ", ".join(f"{k} {n / g:.2f}" for k, n in sm["dispositions"].items()) or "-"
+            out.append(f"  conquest: fates/game {fates}")
+            mean_food = sm["subjugate_food_mean"]
+            occ = sm["occupation_mean_turns"]
+            idle = sm["idle_food_end_mean"]
+            out.append(f"  provisions on subjugation {sm['subjugate_food_total'] / g:.1f}/game (mean "
+                       f"{'-' if mean_food is None else f'{mean_food:.1f}'}), idle at the end "
+                       f"{'-' if idle is None else f'{idle:.1f}'}/seat; occupations {self.occupations / g:.2f}/game, "
+                       f"mean {'-' if occ is None else f'{occ:.1f}'} turns; revolts {self.revolts / g:.2f}, returns "
+                       f"{self.returns / g:.2f}, claims {self.claims / g:.2f} per game")
+            top = sorted(self.loot.items(), key=lambda kv: (-kv[1][0], -kv[1][1], kv[0]))[:5]
+            out.append("  loot per province (times, total): " + (
+                ", ".join(f"{pid} {v[0]}x {v[1]}" for pid, v in top) or "-"))
+        return out
 
 
 def artifact_lift(t: Tally) -> dict[str, tuple[float, float]]:
@@ -453,6 +665,7 @@ def report(name: str, t: Tally) -> list[str]:
         out.append("  diplomacy/game: " + ", ".join(f"{k} {v / t.games:.2f}" for k, v in sorted(t.diplo.items())))
     if len(t.f_seats) > 1 or t.a_seats or t.has_techs:
         out += stage2_report(t)
+    out += t.s3.report()
     return out
 
 
@@ -520,6 +733,27 @@ def sync_bot_numbers(rs: Ruleset) -> list[str]:
             if table.get(sid) != value:
                 changed.append(f"{sid} {table.get(sid)} -> {value}")
             table[sid] = value
+    # stage 3: Shade, missions, fates and conquest values (only while the system is on)
+    if rs.espionage is not None:
+        cost = rs.espionage.shade_cost.get(build, 0)
+        if bv.SHADE_COST_ALLOY != cost:
+            changed.append(f"shade {bv.SHADE_COST_ALLOY} -> {cost}")
+        bv.SHADE_COST_ALLOY = cost
+        for full, md in rs.missions.items():
+            value = (md.whisper, md.rounds_max, md.cost.get(build, 0), md.cost_per_round.get(food, 0))
+            if bv.MISSIONS.get(short(full)) != value:
+                changed.append(f"mission {short(full)} {bv.MISSIONS.get(short(full))} -> {value}")
+            bv.MISSIONS[short(full)] = value
+    if rs.system("conquest"):
+        for full, dd in rs.dispositions.items():
+            value = dd.cost.get(food, 0)
+            if bv.DISPOSITION_FOOD.get(short(full)) != value:
+                changed.append(f"disposition {short(full)} {bv.DISPOSITION_FOOD.get(short(full))} -> {value}")
+            bv.DISPOSITION_FOOD[short(full)] = value
+        for full, pt in rs.province_types.items():
+            if pt.conquest_value != bv.CONQUEST_VALUE.get(short(full), 1):
+                changed.append(f"value {short(full)} {bv.CONQUEST_VALUE.get(short(full), 1)} -> {pt.conquest_value}")
+            bv.CONQUEST_VALUE[short(full)] = pt.conquest_value
     return changed
 
 
@@ -533,7 +767,9 @@ def summary(t: Tally) -> dict[str, Any]:
             "artifact_lift": {a: list(v) for a, v in artifact_lift(t).items()},
             "tier2_games": t.tier2_games / t.games if t.games else 0.0,
             "techs_per_faction": {f: statistics.mean(v) for f, v in t.f_techs.items() if v},
-            "techs_per_seat": {k: statistics.mean(v) for k, v in t.techs.items() if v}}
+            "techs_per_seat": {k: statistics.mean(v) for k, v in t.techs.items() if v},
+            "synclite_win_per_seat": (t.f_wins["synclite"] / t.f_seats["synclite"]) if t.f_seats["synclite"] else None,
+            "stage3": t.s3.summary()}
 
 
 def rotations(kinds: list[str]) -> list[dict[str, str]]:
@@ -570,6 +806,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="artifact mode of the setup phase (default: the scenario's)")
     ap.add_argument("--artifact-offer", type=int)
     ap.add_argument("--artifact-points", type=int)
+    ap.add_argument("--espionage", choices=("on", "off", "both"), help="espionage (default: the scenario's)")
+    ap.add_argument("--conquest", choices=("on", "off", "both"), help="conquest (default: the scenario's)")
     ap.add_argument("--json", action="store_true", help="print the tallies as JSON")
     ap.add_argument("--json-out", help="also write the JSON tallies to this file")
     args = ap.parse_args(argv)
@@ -577,14 +815,57 @@ def main(argv: list[str] | None = None) -> int:
     if args.packs:
         root = Path(args.packs)
         pack_dirs = sorted((p for p in root.iterdir() if (p / "pack.yaml").is_file()), key=lambda p: p.name != "core")
-    rs = build_ruleset(pack_dirs or default_pack_dirs(), args.scenario)
+    packs = pack_dirs or default_pack_dirs()
+    base = build_ruleset(packs, args.scenario)
+    if args.combat:
+        print("\n".join(combat_table(base)))
+        return 0
+    lines: list[str] = []
+    data: dict[str, Any] = {}
+    combos = switch_combos(base, args.espionage, args.conquest)
+    started = time.monotonic()
+    games = 0
+    for combo in combos:
+        rs = build_ruleset(packs, args.scenario, systems=combo) if len(combos) > 1 or any(
+            v is not None for v in (args.espionage, args.conquest)) else base
+        label = ",".join(f"{k}={'on' if rs.system(k) else 'off'}" for k in ("espionage", "conquest"))
+        if len(combos) > 1:
+            lines.append(f"######## {label}")
+        part, out, n = run_combo(ap, args, rs)
+        lines += part
+        games += n
+        data[label] = out
+    lines.append(f"({games} games in {time.monotonic() - started:.0f} s)")
+    if len(combos) == 1:
+        data = next(iter(data.values()))
+    if args.json_out:
+        Path(args.json_out).write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    if args.json:
+        print(json.dumps(data, ensure_ascii=False, indent=1))
+    else:
+        print("\n".join(lines))
+    return 0
+
+
+def switch_combos(rs: Ruleset, espionage: str | None, conquest: str | None) -> list[dict[str, bool]]:
+    """The switch combinations to play: each of `on|off|both` (None: the scenario's value)."""
+    def values(name: str, arg: str | None) -> list[bool]:
+        if arg == "both":
+            return [True, False]
+        if arg is None:
+            return [rs.system(name)]
+        return [arg == "on"]
+
+    return [{"espionage": e, "conquest": c} for e in values("espionage", espionage)
+            for c in values("conquest", conquest)]
+
+
+def run_combo(ap: argparse.ArgumentParser, args: argparse.Namespace, rs: Ruleset) -> tuple[list[str], dict, int]:
+    """Every configuration of one switch combination: (text lines, JSON tallies, games played)."""
     changed = sync_bot_numbers(rs)
     lines = combat_table(rs)
     if changed:
         lines.append("(bots plan with this pack's numbers, not their built-in ones: " + ", ".join(changed) + ")")
-    if args.combat:
-        print("\n".join(lines))
-        return 0
     setup = setup_config(rs, args.artifacts, args.artifact_offer, args.artifact_points)
     deal: list[str] | None
     if args.factions == "bots":
@@ -605,7 +886,6 @@ def main(argv: list[str] | None = None) -> int:
     configs = args.config or list(DEFAULT_CONFIGS_4 if len(rs.map.starts) >= 4 else DEFAULT_CONFIGS)
     overall = Tally()
     data: dict[str, Any] = {}
-    started = time.monotonic()
     for cfg in configs:
         kinds = [k.strip() for k in cfg.split(",")]
         unknown = [k for k in kinds if k not in BOT_TYPES]
@@ -622,15 +902,11 @@ def main(argv: list[str] | None = None) -> int:
         lines += report(cfg, tally)
         data[cfg] = summary(tally)
     lines += report("ALL configurations", overall)
-    lines.append(f"({overall.games} games in {time.monotonic() - started:.0f} s)")
+    if overall.f_seats["synclite"]:
+        lines.append(f"  synclite: win/seat {_pct(overall.f_wins['synclite'], overall.f_seats['synclite']).strip()} "
+                     f"over {overall.f_seats['synclite']} seats")
     data["ALL"] = summary(overall)
-    if args.json_out:
-        Path(args.json_out).write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-    if args.json:
-        print(json.dumps(data, ensure_ascii=False, indent=1))
-    else:
-        print("\n".join(lines))
-    return 0
+    return lines, data, overall.games
 
 
 if __name__ == "__main__":
