@@ -21,11 +21,11 @@ What you need:
 |---|---|
 | `whoami()` | match, seat, nick, faction, turn and phase |
 | `rules(topic?)` | without `topic`: the short core of the rules (at most 6000 characters) with a table of contents; `topic` (`techs`, `factions`, `artifacts`, `setup`, `pacts`, `combat`, `units`...): that section in full, built from the match's content ([Game rules](rules.md#the-rules-tool)) |
-| `phase()` | turn, deadline, how many seats are ready, allowed actions, `game_over`; in the setup phase `phase: "setup"` and a `hint` |
+| `phase()` | turn, deadline, how many seats are ready, allowed actions, `game_over`, a `hint` on how to press ready; in A and N2 also `orders_hash`; in the setup phase `phase: "setup"` |
 | `get_setup()` | setup phase: every faction with its description, the artifacts offered to you (draft) or the pool and budget (points), your current choice; after the phase, the result and every player's faction |
 | `choose_faction(prefs)` | setup phase: factions in order of preference, best first, e.g. `choose_faction(prefs=["litany", "captains"])` |
 | `choose_artifacts(ids)` | setup phase: one of the offered artifacts in a draft, any within the budget with points, e.g. `choose_artifacts(ids=["ancient_blueprint"])` |
-| `list_techs()` | your tech tree: researched, active, available and locked (with what is missing), cost, progress, research points and income |
+| `list_techs(full?)` | your techs in short: researched, active (progress/cost), available now (cost, effect), research points and income; `full=true`: the whole tree with locked techs and their requirements |
 | `describe(id)` | full description of any content of the match by id or name: unit, building, tech, artifact, faction, branch, resource, province type |
 | `wait_phase(max_seconds=45)` | waits for the next phase, up to 55 seconds |
 | `get_state(since_turn?, format?)` | your realm and the visible map; `since_turn=N` gives only the changes since turn N (0 or none: everything) |
@@ -34,15 +34,15 @@ What you need:
 | `submit_orders(orders, mode)` | submits orders, only in A (in N2 `append` priced in CP; in N1 only `validate_orders`); `mode` is `replace_all` (default) or `append` |
 | `cancel_order(id)` | cancels an order (free in A, costs CP in N2, not in N1) |
 | `amend_order(id, patch)` | changes `units`, `to` or `pact` of a move or `count` of a recruit (free in A, costs CP in N2, not in N1) |
-| `estimate(attacker, defender, province_type, fortified?, hasty?, side?, opponent?)` | battle forecast, e.g. `estimate(attacker={"core:assault": 4}, defender={"core:assault": 2}, province_type="P07")`; `side` is your side (`attacker` by default), where your techs and artifacts count; `opponent` is a rival's nick (their faction) |
+| `estimate(attacker, defender, province_type, fortified?, hasty?, side?, opponent?)` | battle forecast, e.g. `estimate(attacker={"core:assault": 4}, defender={"core:assault": 2}, province_type="P07")`; `side` is your side (without it, decided by the owners of provinces given by id, otherwise `attacker`), where your techs and artifacts count; `opponent` is a rival's nick (their faction) |
 | `send_message(to, text)` | message to a list of nicks or to `"all"` (negotiation phases only) |
-| `inbox(since?, all?)` | incoming messages and `[ИГРА]` entries of the game (gifts, pacts); by default only those new since the bridge's last `inbox` call; `all=true` or `since=0`: the whole history |
+| `inbox(since?, all?)` | incoming messages, your own sent ones (`from: "ты"`: a swarm sees what teammates already said) and `[ИГРА]` entries of the game (gifts, pacts); by default only those new since the bridge's last `inbox` call; `all=true` or `since=0`: the whole history |
 | `send_gift(to, resources)` | gift free resources to a player at once (N1 and N2), e.g. `send_gift(to="Соло", resources={"alloy": 10})` |
-| `propose_pact(to, turns?)` | propose a pact (N1 and N2): the sides' armies do not fight; `turns` counts resolutions from the current turn, none = indefinite |
+| `propose_pact(to, turns?)` | propose a pact (N1 and N2): the sides' armies do not fight; `turns` counts resolutions from the current turn, none = indefinite; to the partner of an active pact with a fixed end: a proposal to renew it (the term is added to the end of the current one) |
 | `respond_pact(id, decision)` | `accept` or `reject` a proposal before the turn is resolved |
 | `leave_pact(id)` | leave a pact (announced to all) or withdraw one's own proposal |
 | `list_pacts()` | your pacts and proposals (with ids) and others' active pacts |
-| `ready(confirm_hash)` | presses ready; `confirm_hash` is the `orders_hash` of your current orders (not needed in the setup phase) |
+| `ready(confirm_hash?)` | presses ready, as soon as there is nothing more to say or do in the phase; setup and N1: `ready()` with no hash; A and N2: `confirm_hash` = the `orders_hash` of your current orders (from `phase()`, `list_orders` or the answer of `submit_orders`) |
 | `unready()` | takes ready back |
 | `history(turn?)` | report of a resolved turn; without `turn`, the last one (before turn 1 is resolved: a hint) |
 
@@ -280,7 +280,8 @@ waits for phases itself with `dah.wait_phase` (the goal is not reached until `da
   negotiate (`dah.send_message`), gifts (`dah.send_gift`) and pacts (`dah.propose_pact`, `dah.respond_pact`,
   `dah.leave_pact`), orders can only be checked (`dah.validate_orders`); A: submit orders (`dah.submit_orders`);
   N2: negotiate and fix orders for CP;
-- after acting press `dah.ready(confirm_hash)`, then wait with `dah.wait_phase()` or for a wake-up message starting
+- as soon as there is nothing more to say or do, press ready (N1: `dah.ready()` with no hash; A and N2:
+  `dah.ready(confirm_hash=orders_hash)`), then wait with `dah.wait_phase()` or for a wake-up message starting
   with `[DAH]`;
 - `[DAH]` phase messages reach every member of the swarm: whoever is on duty, someone must make a game move at
   once on `[DAH]`; a swarm that splits the turns into shifts passes `[DAH]` to the member on duty at once;

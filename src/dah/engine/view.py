@@ -76,7 +76,8 @@ def view_state(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders |
         "provinces": provinces,
         "pacts": [{**dip.public_pact(pc), **({"id": pc["id"]} if seat in (pc["a"], pc["b"]) else {})}
                   for pc in dip.active_pacts(state)],
-        "pact_proposals": [{"id": pc["id"], "from": pc["a"], "to": pc["b"], "turns": pc["turns"]}
+        "pact_proposals": [{"id": pc["id"], "from": pc["a"], "to": pc["b"], "turns": pc["turns"],
+                            **({"renews": pc["renews"]} if pc.get("renews") else {})}
                            for pc in state.pacts if pc["status"] == dip.PROPOSED and seat in (pc["a"], pc["b"])],
         "result": state.result,
     }
@@ -180,8 +181,20 @@ def render_state_text(state: GameState, ruleset: Ruleset, seat: str, deadline_in
     return "\n".join(lines)
 
 
-def _pact_terms(pact: Mapping[str, Any], seat: str, state: GameState) -> str:
+def _pact_terms(pact: Mapping[str, Any], seat: str, state: GameState,
+                proposals: Sequence[Mapping[str, Any]] = ()) -> str:
     text = f"до хода {pact['until_turn']} вкл." if pact.get("until_turn") else "бессрочно"
+    if pact.get("renewed"):
+        text += f" (продлён {pact['renewed']} раз(а))"
+    if pact.get("id") and pact.get("until_turn") == state.turn and not pact.get("leaving"):
+        renewal = next((pr for pr in proposals if pr.get("renews") == pact["id"]), None)
+        if renewal is None:
+            text += " — последний ход срока, продлить: propose_pact тому же игроку"
+        elif renewal["to"] == seat:
+            text += (f" — последний ход срока; продление ждёт твоего ответа: respond_pact(id=\"{renewal['id']}\", "
+                     "decision=\"accept\")")
+        else:
+            text += f" — последний ход срока; твоё продление {renewal['id']} ждёт ответа"
     if pact.get("leaving"):
         text += (f", {_owner_tag(state, seat, pact['leaving'])} выходит: конец перед расчётом хода "
                  f"{pact['ends_before_turn']}")
@@ -191,11 +204,15 @@ def _pact_terms(pact: Mapping[str, Any], seat: str, state: GameState) -> str:
 def _pacts_line(state: GameState, seat: str, view: Mapping[str, Any]) -> str:
     """Active pacts (public: everyone sees who is allied with whom; ids only for one's own) and own proposals."""
     items = []
+    proposals = view["pact_proposals"]
     for pc in view["pacts"]:
         sides = "—".join(_owner_tag(state, seat, s) for s in pc["seats"])
-        items.append(f"{sides}{' [' + pc['id'] + ']' if pc.get('id') else ''} {_pact_terms(pc, seat, state)}")
+        items.append(f"{sides}{' [' + pc['id'] + ']' if pc.get('id') else ''} "
+                     f"{_pact_terms(pc, seat, state, proposals)}")
     for pr in view["pact_proposals"]:
         terms = f"на {pr['turns']} х." if pr["turns"] else "бессрочно"
+        if pr.get("renews"):
+            terms = f"продлить {pr['renews']} {terms}"
         if pr["to"] == seat:
             items.append(f"тебе предлагает {_owner_tag(state, seat, pr['from'])} [{pr['id']}] {terms} — "
                          "respond_pact до конца хода")
@@ -241,7 +258,7 @@ def _changes_line(state: GameState, ruleset: Ruleset, seat: str, since_turn: int
             elif e["kind"] in ("battle", "edge_battle", "starvation", "build_done", "eliminated",
                                "retreat_lost", "order_rejected", "fortify_broken", "pact_bounce", "pact_joint",
                                "pact_broken", "pact_expired", "pact_ended", "pact_lapsed", "gift", "pact_signed",
-                               "pact_leave", "tech_completed"):
+                               "pact_renewed", "pact_leave", "tech_completed"):
                 starving |= e["kind"] == "starvation"
                 items.append(event_text(e, ruleset, state, seat))
     if not starving:
@@ -316,6 +333,9 @@ _DIPLOMACY_TEXT = {
     "pact_joint": lambda e, rs, who: (f"{e['province']}: союзники по пакту ({_pair(e, who)}) вошли вместе, держит "
                                       f"{who(e['holder'])}, остальные вернулись домой"),
     "pact_signed": lambda e, rs, who: f"пакт заключён: {_pair(e, who)} ({_terms(e)})",
+    "pact_renewed": lambda e, rs, who: (f"пакт продлён: {_pair(e, who)} — "
+                                        + (f"до хода {e['until_turn']} вкл." if e.get("until_turn") else "бессрочно")
+                                        + (f" (продление с хода {e['from_turn']})" if e.get("from_turn") else "")),
     "pact_leave": lambda e, rs, who: (f"{who(e['seat'])} выходит из пакта ({_pair(e, who)}): конец перед расчётом "
                                       f"хода {e['ends_before_turn']}"),
     "pact_broken": lambda e, rs, who: (f"пакт нарушен: {_pair(e, who)}; нарушил "
@@ -323,7 +343,10 @@ _DIPLOMACY_TEXT = {
     "pact_expired": lambda e, rs, who: f"срок пакта истёк: {_pair(e, who)}",
     "pact_ended": lambda e, rs, who: (f"пакт окончен: {_pair(e, who)} — "
                                       f"{'выход вступил в силу' if e.get('reason') == 'left' else 'сторона выбыла'}"),
-    "pact_proposed": lambda e, rs, who: f"предложен пакт {e['pact']}: {who(e['sender'])} → {_pair(e, who)} ({_terms(e)})",
+    "pact_proposed": lambda e, rs, who: (f"предложен пакт {e['pact']}: {who(e['sender'])} → {_pair(e, who)} "
+                                         f"({_terms(e)})" if not e.get("renews") else
+                                         f"предложено продление {e['pact']} пакта {e['renews']}: {who(e['sender'])} → "
+                                         f"{_pair(e, who)} ({_terms(e)})"),
     "pact_rejected": lambda e, rs, who: f"пакт {e['pact']} отклонён ({_pair(e, who)})",
     "pact_withdrawn": lambda e, rs, who: f"предложение пакта {e['pact']} отозвано ({_pair(e, who)})",
     "pact_lapsed": lambda e, rs, who: f"предложение пакта {e['pact']} не принято до конца хода ({_pair(e, who)})",

@@ -342,6 +342,48 @@ def techs_text(view: Mapping[str, Any], ruleset: Ruleset) -> str:
     return "\n".join(lines)
 
 
+SHORT_TECH_KEYS = ("id", "name", "branch", "tier", "cost", "progress", "status", "effects", "unlocks")
+
+
+def short_techs_view(view: Mapping[str, Any]) -> dict[str, Any]:
+    """The default list_techs answer: researched, active and available-now techs only (lean entries), the number of
+    locked ones; the full tree (requirements, descriptions, branches) is `techs_view` (list_techs(full=true))."""
+    shown = [{k: t[k] for k in SHORT_TECH_KEYS} for t in view["techs"] if t["status"] != LOCKED]
+    out = {k: view[k] for k in ("enabled", "resource", "points", "income", "active", "researched")}
+    out.update(techs=shown, locked=sum(1 for t in view["techs"] if t["status"] == LOCKED), full=False)
+    return out
+
+
+def techs_text_short(view: Mapping[str, Any], ruleset: Ruleset) -> str:
+    """Researched, active (progress/cost) and available now (cost, effect on one line); locked ones only counted."""
+    if not view["enabled"]:
+        return "Технологий в этой партии нет."
+    res = ruleset.resources[view["resource"]].name
+    income = f" (+{view['income']}/ход)" if view.get("income") is not None else ""
+    done = [t for t in view["techs"] if t["status"] == RESEARCHED]
+    names = ", ".join(f"{t['id'].split(':')[-1]} «{t['name']}»" for t in done)
+    lines = [f"НАУКА: {res} в запасе {view['points']}{income}; изучено {len(done)}" + (f": {names}" if names else "")]
+    if view["active"]:
+        a = view["active"]
+        lines.append(f"Исследуется: {a['tech'].split(':')[-1]} «{ruleset.techs[a['tech']].name}» "
+                     f"{a['progress']}/{a['cost']}")
+    else:
+        lines.append('Исследование не выбрано: приказ {"kind":"research","tech":"<id>"} в фазе Д')
+    available = [t for t in view["techs"] if t["status"] == AVAILABLE]
+    if available:
+        lines.append("Доступно сейчас (приказ research в Д):")
+    for t in available:
+        progress = f" ({t['progress']} уже вложено)" if t["progress"] else ""
+        effects = "; ".join(t["effects"])
+        unlocks = f" (открывает: {', '.join(_unlock_name(ruleset, x) for x in t['unlocks'])})" if t["unlocks"] else ""
+        lines.append(f"· {t['id'].split(':')[-1]} «{t['name']}» цена {t['cost']}{progress}"
+                     + (f": {effects}" if effects else "") + unlocks)
+    locked = view.get("locked", 0)
+    lines.append(f"Закрыто ещё {locked} — их требования: list_techs(full=true); всё дерево — rules(topic=\"techs\")"
+                 if locked else "Закрытых технологий нет.")
+    return "\n".join(lines)
+
+
 def _unlock_name(ruleset: Ruleset, full: str) -> str:
     entity = ruleset.units.get(full) or ruleset.buildings.get(full) or ruleset.techs.get(full)
     return entity.name if entity is not None else full.split(":")[-1]

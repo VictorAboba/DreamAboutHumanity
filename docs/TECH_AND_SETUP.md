@@ -248,15 +248,15 @@ auto_faction, auto_artifacts, faction_conflict, dropped}}}` — фракции �
 
 **Маршруты** (все — ключ места): `GET /v1/setup` → `get_setup`; `POST /v1/setup/faction {prefs}` (или `factions`,
 `faction`) → `choose_faction`; `POST /v1/setup/artifacts {ids}` (или `artifacts`, `artifact`) → `choose_artifacts`;
-`GET /v1/techs` → `list_techs`; `GET /v1/describe?id=` (или `name=`) → `describe` (`404 NOT_FOUND`, если ничего не
+`GET /v1/techs` → `list_techs` (коротко: изученные, активная, доступные сейчас; `?full=true` — всё дерево); `GET /v1/describe?id=` (или `name=`) → `describe` (`404 NOT_FOUND`, если ничего не
 нашлось). Выбор принимает список, одну строку, строку через запятую или JSON-строку. `POST /v1/ready` в фазе старта —
 с пустым телом. `list_techs`, `describe` и всегда открытые `rules`, `whoami`, `phase`, `wait_phase` есть в `allowed`
 всех фаз (и у выбывших). После закрытия фазы `get_setup` отдаёт пустые `factions` и `offer` (итог — `result`,
 `players`). `describe` и `rules(topic)` принимают и начало названия («Литания»), если совпадений не больше пяти.
 
-**Инструменты моста:** `get_setup()`, `choose_faction(prefs)`, `choose_artifacts(ids)`, `list_techs()`,
+**Инструменты моста:** `get_setup()`, `choose_faction(prefs)`, `choose_artifacts(ids)`, `list_techs(full?)`,
 `describe(id)` (примеры — с ID `core`; `get_setup` и `list_techs` отдают модели текст и малый JSON: выбор,
-`confirm_hash`, итог / очки, доход, активная, изученные); `ready(confirm_hash?)` (без хэша — только в фазе старта; вне её — `STALE_HASH` «confirm_hash обязателен вне фазы старта…» с текущим `orders_hash`); `estimate(..., side?, opponent?)`; у
+`confirm_hash`, итог / очки, доход, активная, изученные); `ready(confirm_hash?)` (без хэша — в фазе старта и в П1; в Д и П2 — `STALE_HASH` с точным вызовом `ready(confirm_hash="…")` и текущим `orders_hash`); `estimate(..., side?, opponent?)`; у
 приказа — `kind: research` и поле `tech` (в `amend_order` — `patch {"tech"}`); `rules(topic)` перечисляет темы.
 Сервер принимает и `{"kind":"research","technology":...}`.
 
@@ -265,9 +265,11 @@ auto_faction, auto_artifacts, faction_conflict, dropped}}}` — фракции �
 note}`, а `faction` всех, и своя, — `null` (предварительное состояние строится из умолчаний, но не должно выглядеть как
 выбор), `you.faction_choice` — своя текущая первая из предпочтений; `whoami` так же.
 
-**`estimate` места.** Необязательные `side` (`attacker` по умолчанию | `defender`) и `opponent` (ник): на стороне
-`side` — `stat_key` вызывающего места, на другой — фракция `opponent` (публична; в фазе старта не берётся) или
-базовые числа; при `side: defender` и ID своей провинции — её `province_defense_mul`. Чужие здания не учитываются
+**`estimate` места.** Необязательные `side` (`attacker` | `defender`) и `opponent` (ник): на стороне
+`side` — `stat_key` вызывающего места, на другой — фракция `opponent` (публична; в фазе старта не берётся), без него —
+фракция владельца чужой провинции, заданной ID, или базовые числа. Без `side` сторону определяют ID провинций: своя у
+`defender` — `defender`, своя у `attacker` — `attacker`, чужая у `attacker` при составе-объекте у `defender` —
+`defender`; иначе `attacker`. Ответ: `side` и `note` (чья сторона и почему); при `side: defender` и ID своей провинции — её `province_defense_mul`. Чужие здания не учитываются
 (туман).
 
 **Правила по темам** (`engine/rules.py`). Раздел — `Section(key, core, detail, short)`. `rules_text(ruleset, setup=,

@@ -379,7 +379,8 @@ class Tally:
                     first_neu = e["turn"]
                 if e["from"] is not None and first_cap is None:
                     first_cap = e["turn"]
-            elif kind in ("gift", "pact_proposed", "pact_signed", "pact_broken", "pact_bounce", "pact_joint"):
+            elif kind in ("gift", "pact_proposed", "pact_signed", "pact_renewed", "pact_broken", "pact_bounce",
+                          "pact_joint"):
                 self.diplo[kind] += 1
         if first_cap is None:
             self.no_capture += 1

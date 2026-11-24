@@ -137,7 +137,7 @@ def test_setup_route_without_setup_phase(tmp_path):
     env = Env(tmp_path, scenario="duel_plain")
     assert env.ok("A", "GET", "/v1/setup")["enabled"] is False
     assert env.err("A", "POST", "/v1/setup/faction", json={"prefs": ["iron"]}) == "PHASE_LOCKED"
-    assert "hint" not in env.ok("A", "GET", "/v1/phase")
+    assert "get_setup" not in env.ok("A", "GET", "/v1/phase")["hint"]      # P1's ready hint, no setup hint
 
 
 # ---------------------------------------------------------------- techs, research, describe
@@ -148,8 +148,14 @@ def test_research_is_an_ordinary_order_and_others_techs_stay_hidden(tmp_path):
     assert tree["enabled"] and tree["resource"] == "t2:creed" and tree["active"] is None
     smithing = next(t for t in tree["techs"] if t["id"] == "t2:smithing")
     assert smithing["status"] == "available" and smithing["cost"] == 3       # iron: war branch ×0.5
-    assert next(t for t in tree["techs"] if t["id"] == "t2:banking")["status"] == "locked"
-    assert "НАУКА" in tree["text"]
+    assert all(t["id"] != "t2:banking" for t in tree["techs"]) and tree["locked"] >= 1    # short by default
+    assert "НАУКА" in tree["text"] and "list_techs(full=true)" in tree["text"]
+    full = env.ok("A", "GET", "/v1/techs", params={"full": "true"})
+    assert next(t for t in full["techs"] if t["id"] == "t2:banking")["status"] == "locked" and full["full"] is True
+    assert len(full["text"]) > len(tree["text"])
+    short_text, _ = env.bridge("A").call("list_techs", {})
+    full_text, _ = env.bridge("A").call("list_techs", {"full": True})
+    assert "НАУКА" in short_text and '"techs":' not in short_text and len(full_text) > len(short_text)
 
     # П1: validate only
     check = env.ok("A", "POST", "/v1/orders/validate", json={"orders": [{"kind": "research", "tech": "Кузнечное дело"}]})

@@ -24,7 +24,14 @@ def _deadline_hhmm(deadline: Any) -> str | None:
     return moment.astimezone(timezone.utc).strftime("%H:%MZ")
 
 
-def _hint(phase: str, turn: int) -> str:
+def _ready_call(orders_hash: Any) -> str:
+    """The exact ready call of an orders phase: with the hash when the phase info carried it."""
+    if isinstance(orders_hash, str) and orders_hash:
+        return f'dah.ready(confirm_hash="{orders_hash}")'
+    return "dah.ready(confirm_hash=orders_hash из dah.phase() или dah.list_orders())"
+
+
+def _hint(phase: str, turn: int, orders_hash: Any = None) -> str:
     since = f"since_turn={turn - 1}" if turn > 1 else ""
     if phase == "setup":
         return ("Фаза старта перед ходом 1: посмотри dah.get_setup(), выбери фракции по предпочтению "
@@ -33,11 +40,15 @@ def _hint(phase: str, turn: int) -> str:
     if phase == "negotiation_1":
         return (f"Посмотри dah.get_state({since}) и dah.inbox(), договорись с соседями (dah.send_message, "
                 "пакты и подношения), приказы можно только проверить (dah.validate_orders), "
-                "подаются они в ДЕЙСТВИЯХ; нажми dah.ready.")
+                "подаются они в ДЕЙСТВИЯХ. Как только сказать и сделать больше нечего — сразу dah.ready() "
+                "(в П1 без confirm_hash), не жди таймера.")
     if phase == "negotiation_2":
         return ("Посмотри dah.inbox() и dah.list_orders(), при нужде поправь приказы "
-                "(dah.amend_order / dah.cancel_order), нажми dah.ready.")
-    return f"Посмотри dah.get_state({since}), подай приказы, нажми dah.ready."
+                "(dah.amend_order / dah.cancel_order); как только сказать и сделать больше нечего — "
+                f"{_ready_call(orders_hash)} (после правки хэш новый).")
+    # actions: the hash of the phase's start is stale once orders are given; the submit answer has the new one
+    return (f"Посмотри dah.get_state({since}), подай приказы (dah.submit_orders), затем "
+            "dah.ready(confirm_hash=orders_hash из ответа dah.submit_orders).")
 
 
 def wake_text(phase_info: dict[str, Any], *, reminder: bool = False) -> str:
@@ -56,7 +67,7 @@ def wake_text(phase_info: dict[str, Any], *, reminder: bool = False) -> str:
     head = ", ".join(parts) + (", " + " ".join(timing) if timing else "")
     prefix = "[DAH] Напоминание: фаза скоро закроется, ты ещё не нажал ready. " if reminder else "[DAH] "
     ready = f" Готово {phase_info['ready']}." if phase_info.get("ready") else ""
-    return f"{prefix}{head}.{ready} {_hint(phase, turn)}"
+    return f"{prefix}{head}.{ready} {_hint(phase, turn, phase_info.get('orders_hash'))}"
 
 
 

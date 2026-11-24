@@ -83,10 +83,10 @@ def test_all_ready_closes_phase_and_recon_step_is_journaled(tmp_path, clock):
 
 def test_stale_hash_and_edit_clears_ready(tmp_path, clock):
     game = new_game(tmp_path, clock)
+    ready_all(game)  # orders are given in actions (P1 takes ready() with any or no hash: no orders there)
     with pytest.raises(GameError) as err:
         game.set_ready("A", "deadbeef")
-    assert err.value.code == "STALE_HASH"
-    ready_all(game)  # orders are given in actions
+    assert err.value.code == "STALE_HASH" and f'ready(confirm_hash="{orders_hash(game._book("A"))}")' in         err.value.message
     assert game.set_ready("A", orders_hash(game._book("A")))["ready"] == "1/2"
     game.submit("A", [{"kind": "fortify", "province": capital(game, "A")}])
     assert "A" not in game.ready_seats
@@ -163,7 +163,7 @@ def test_messages_limits_wrapping_and_phase(tmp_path, clock):
     assert private["text"].startswith("<<untrusted from=Нико>>") and private["text"].endswith("<</untrusted>>")
     assert "[DAH]" not in private["text"] and private["text"].count("<<") == 2
     assert game.inbox("B", since=2)["messages"][0]["id"] == 3
-    assert game.inbox("A")["messages"] == []
+    assert all(m["own"] and m["from"] == "ты" for m in game.inbox("A")["messages"])   # A's own sent ones
     ready_all(game)
     with pytest.raises(GameError) as err:
         game.send_message("A", "all", "в фазе действий")
@@ -258,7 +258,11 @@ def test_inbox_ids_count_only_own_messages(tmp_path, clock):
     assert [m["id"] for m in inbox["messages"]] == [1] and inbox["last_id"] == 1
     game.send_message("B", "all", "всем")
     assert [m["id"] for m in game.inbox("A", since=1)["messages"]] == [2]
-    assert [m["id"] for m in game.inbox("C")["messages"]] == [1, 2]
+    # C: B's private message, C's own one (marked own, never someone else's private message), B's public one
+    c = game.inbox("C")["messages"]
+    assert [(m["id"], m.get("own", False)) for m in c] == [(1, False), (2, True), (3, False)]
+    assert "секрет" not in game.inbox("A")["text"] and "привет" not in game.inbox("B")["text"]
+    assert "ты → Нико: привет" in game.inbox("C")["text"]
 
 
 def test_dah_lookalikes_are_escaped():

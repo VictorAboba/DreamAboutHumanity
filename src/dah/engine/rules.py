@@ -108,7 +108,9 @@ def _turn(rs: Ruleset, setup: Mapping[str, Any] | None) -> Section:
     text = (f"ХОД: {start}П1 переговоры ({pl['negotiation_1']} с; приказы можно только проверить validate_orders) → "
             f"Д действия ({pl['actions']} с; подача приказов, переписка и дипломатия закрыты) → П2 переговоры "
             f"({pl['negotiation_2']} с; правка приказов за ОК) → расчёт. Фаза кончается по таймеру или когда все "
-            "нажали ready(confirm_hash = orders_hash). Любая правка снимает ready. Не подал приказы — войска стоят.")
+            "нажали ready — жми сразу, как больше нечего сказать и сделать: П1 — ready() без хэша; Д и П2 — "
+            "ready(confirm_hash=orders_hash из phase(), list_orders или submit_orders). Правка приказов снимает "
+            "ready. Не подал приказы — войска стоят.")
     return Section("turn", text)
 
 
@@ -265,9 +267,10 @@ def _orders(rs: Ruleset) -> Section:
         "появляются в начале расчёта (в этом ходу не ходят).\n"
         '- {"kind":"build","province":"P02","building":"mine"} — своя провинция без такого здания.\n'
         f'- {{"kind":"fortify","province":"P01"}} — оборона +{st("combat.fortify_bonus"):.0%}, если из провинции '
-        f"никто не уходит.{research}\n"
-        f"Ошибки: {', '.join(errors)}.")
-    return Section("orders", text)
+        f"никто не уходит.{research}")
+    # the error codes only in the topic: every refusal names its code and how to fix it anyway
+    return Section("orders", text + "\nКоды ошибок — rules(topic=\"orders\").",
+                   text + f"\nОшибки: {', '.join(errors)}.")
 
 
 def _p2(rs: Ruleset) -> Section:
@@ -296,7 +299,7 @@ def _combat(rs: Ruleset) -> Section:
              f"{research} → выбывание. Подробно: rules(topic=\"combat\").")
     extra = ["Оборона провинции = множитель типа × бонусы зданий (province.defense_mul). Прогноз боя: "
              "estimate(attacker, defender, province_type, fortified, hasty) — с твоими технологиями и артефактами "
-             "на стороне side (по умолчанию attacker)."]
+             "на стороне side (без него — по своей провинции, иначе attacker)."]
     if any(_abilities_of(rs, u) for u in rs.units):
         extra.append("Способности: siege — оборона провинции против доли таких юнитов не выше cap; ignore_fortify — "
                      "укрепление защитника слабеет на долю таких юнитов; garrison — +оборона юнита в своей провинции.")
@@ -319,6 +322,10 @@ def _pacts(rs: Ruleset) -> Section:
         "хода. Пакт действует сразу после принятия; кто с кем в пакте — видят все (get_state, list_pacts). "
         "leave_pact(id) — выход, объявляется всем: из П1 пакт не действует уже в расчёте этого хода, из П2 — со "
         "следующего.\n"
+        "Продление: пока пакт со сроком действует и выход не объявлен, любой из двоих может предложить продлить его — "
+        "propose_pact(to=партнёр, turns=N) → respond_pact(id, accept). Принятое продление добавляет N ходов сразу "
+        "после нынешнего срока (без разрыва и наложения), ID пакта прежний; что пакт продлён, видят все. Бессрочный "
+        "пакт продлевать нечего. Выход из пакта отменяет ожидающее продление, а принятое кончается вместе с пактом.\n"
         "Пакт в расчёте: армии сторон не сражаются. Встречные ходы по ребру — обе армии остаются дома; ход в "
         "провинцию союзника — войска возвращаются, откуда шли; оба входят в одну провинцию — друг с другом не бьются, "
         "с третьей стороной бьются по очереди (сильнейший первым); провинцию берёт победивший защитника (без "
@@ -328,8 +335,9 @@ def _pacts(rs: Ruleset) -> Section:
         "нарушителю возвращаются); затем пакт разорван, и все узнают, кто нарушил.")
     short = ("ДИПЛОМАТИЯ (только П1 и П2): send_gift(to, resources) — подношение свободных ресурсов; "
              "propose_pact(to, turns) → respond_pact(id, accept|reject); leave_pact(id). Пакт: армии сторон не "
-             'сражаются (ход к союзнику вернётся); move с "pact":"break" нарушает пакт публично. Подробно: '
-             "rules(topic=\"pacts\").")
+             'сражаются (ход к союзнику вернётся); move с "pact":"break" нарушает пакт публично. Продлить пакт со '
+             "сроком — propose_pact тому же партнёру, пока пакт действует: срок добавится к концу нынешнего. "
+             "Подробно: rules(topic=\"pacts\").")
     return Section("pacts", core, short=short)
 
 

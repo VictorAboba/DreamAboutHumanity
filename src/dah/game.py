@@ -7,6 +7,7 @@ live snapshot is written to `private/runtime.json`, so `Game.load` restores a ga
 from __future__ import annotations
 
 import asyncio
+import difflib
 import logging
 import re
 import threading
@@ -21,7 +22,7 @@ from dah.engine import (DeadlineInfo, GameState, Ruleset, SeatOrders, SetupChoic
                         describe, draft_offers, estimate, find, income_of, issue_order_id, new_game_state,
                         orders_hash, render_report_text, render_state_text, resolve, resolve_setup, rules_text,
                         rules_topic, scores, seat_reserved, setup_config, stat_key, state_hash, submit_orders, techs_text,
-                        techs_view, upkeep_of, view_state)
+                        techs_view, upkeep_of, view_state, visible_provinces)
 from dah.engine import diplomacy as dip
 from dah.engine.content import ContentError, legacy_pack_sets
 from dah.engine.catalog import KIND_LABELS
@@ -33,6 +34,7 @@ from dah.engine.rules import Section as RulesSection
 from dah.engine.rules import topics as rule_topics
 from dah.engine.techs import province_defense_mul
 from dah.engine.setup import unfit_artifacts
+from dah.engine.techs import short_techs_view, techs_text_short
 from dah.engine.view import PHASE_LABELS
 from dah.journal import Journal, read_events
 from dah.store import GameDir, write_json, read_json
@@ -49,7 +51,8 @@ SETUP = "setup"           # before turn 1 when the game config has `setup` (TECH
 TIMED_PHASES = (SETUP, *PLAYABLE_PHASES)
 PACT_STATUS = {"active": "действует", "proposed": "предложен", "rejected": "отклонён", "withdrawn": "отозван",
                "lapsed": "не принят вовремя", "left": "окончен (выход)", "broken": "нарушен",
-               "expired": "истёк срок", "ended": "окончен (сторона выбыла)"}
+               "expired": "истёк срок", "ended": "окончен (сторона выбыла)", "renewed": "продление принято",
+               "cancelled": "продление отменено выходом"}
 NEXT_PHASE = {"negotiation_1": "actions", "actions": "negotiation_2"}
 SEAT_KINDS = ("swarm", "agent", "human", "bot")
 # `continue_sent`: older wakers; newer ones write `wake_sent` (a message to all members or a `continue`).
@@ -87,10 +90,23 @@ ALLOWED = {
 }
 SETUP_HINT = ("фаза старта: get_setup() → choose_faction([\"id\", ...]) → choose_artifacts([\"id\"]) → ready(); "
               "приказы — с хода 1")
+# How to press ready in each phase (phase(), wake texts and rules say the same): P1 needs no hash, D and P2 need the
+# orders_hash of the current orders (given in phase() too, so ready is one call).
+PHASE_READY_HINTS = {
+    "negotiation_1": "П1: договорись (сообщения, пакты, подношения) и сразу нажми ready() — без confirm_hash, как "
+                     "только сказать и сделать больше нечего; не жди таймера",
+    # the hash of the moment of the call goes stale with the first submit_orders: name it only as "if already given"
+    "actions": "Д: подай приказы (submit_orders) и нажми ready(confirm_hash=orders_hash из ответа submit_orders) — "
+               "хэш меняется с каждой подачей и правкой; если приказы уже поданы и верны — "
+               "ready(confirm_hash=\"{orders_hash}\")",
+    "negotiation_2": "П2: ответь, поправь приказы при нужде и нажми ready(confirm_hash=\"{orders_hash}\") (orders_hash "
+                     "меняется с каждой правкой), как только сказать и сделать больше нечего",
+}
 SETUP_STATE_NOTE = ("ФАЗА СТАРТА: состояние предварительное — фракции и артефакты ещё не выбраны (твой выбор и "
                     "предложения — get_setup()); ход 1 строится заново, когда фаза закроется. Фракции соперников "
                     "станут известны после фазы.")
 SYSTEM_SENDER = "ИГРА"   # inbox entries written by the game itself (gifts, pacts): not player text, not wrapped
+OWN_SENDER = "ты"        # inbox entries the seat sent itself (`own: true`): a swarm's members see each other's words
 
 # A `DAH` token (Latin or Cyrillic А/Н, spaces inside) in any brackets would pass for a host wake-up message.
 # It is matched after NFKC normalization (fullwidth letters) with format characters (zero-width) removed.
@@ -583,6 +599,10 @@ class Game:
             info["result"] = self.state.result
         if self.phase == SETUP:
             info["hint"] = SETUP_HINT
+        elif self.phase in PHASE_READY_HINTS and seat_alive and not self.game_over:
+            if self.phase != "negotiation_1":
+                info["orders_hash"] = orders_hash(self._book(seat))   # ready(confirm_hash=...) in one call
+            info["hint"] = PHASE_READY_HINTS[self.phase].format(orders_hash=info.get("orders_hash"))
         if host:
             info.update(self.player_presence(seat))
         info["text"] = self._phase_text(info)
@@ -694,6 +714,11 @@ class Game:
             return {"turn": None, "text": "Ещё ни один ход не рассчитан: отчёт хода 1 появится после его П2. "
                                           "Сейчас смотри get_state()."}
         turn = last if turn is None else turn
+        if turn == self.state.turn and not self.game_over:
+            # the turn in progress (asked for in its own P2, as in measurement m5): not resolved yet, not an error
+            past = f"; прошлый ход — history(turn={last})" if last >= 1 else ""
+            return {"turn": None, "text": f"Ход {turn} ещё идёт ({PHASE_LABELS.get(self.phase, self.phase)}): его "
+                                          f"отчёт появится после расчёта. Сейчас смотри get_state(){past}."}
         raw = self.gdir.load_turn("reports", turn) if 1 <= turn <= last else None
         if raw is None:
             if last < 1:
@@ -871,9 +896,45 @@ class Game:
                 if label in (self._label(t.short), self._label(t.name))]
         return hits[0] if len(hits) == 1 else None
 
-    def _estimate_side(self, side: str, raw: Any) -> dict[str, int]:
+    def _province_ref(self, raw: Any) -> str | None:
+        """A province id (P07, any case) given where units are expected, else None."""
+        if isinstance(raw, str) and raw.strip().upper() in self.state.provinces:
+            return raw.strip().upper()
+        return None
+
+    def _province_units(self, side: str, pid: str, seat: str | None) -> dict[str, int]:
+        """The army in a province the seat can see (its own and their neighbours), for `attacker="P05"` (the
+        common m5 form). Hidden armies are refused with what to pass instead."""
+        if seat is None or pid not in visible_provinces(self.state, self.ruleset, seat):
+            raise self._estimate_error("INVALID", f"{side}={pid!r}: войска в {pid} скрыты туманом войны — укажи "
+                                                  "предполагаемый состав объектом {юнит: число}")
+        units = {u: n for u, n in self.state.provinces[pid].units.items() if n > 0}
+        if not units and side == "attacker":
+            raise self._estimate_error("INVALID", f"{side}={pid!r}: в {pid} нет войск — укажи состав объектом "
+                                                  "{юнит: число}")
+        return units
+
+    def _unknown_unit(self, side: str, ref: Any) -> GameError:
+        """Unknown unit: the closest ids if any, the short ids of all units, and what to do about hidden armies."""
+        text = str(ref)[:40]
+        shorts = {u.short: uid for uid, u in self.ruleset.units.items()}
+        names = [uid.split(":")[-1] for uid in self.ruleset.units] + list(shorts)
+        close = difflib.get_close_matches(text.lower().split(":")[-1], names, n=3, cutoff=0.6)
+        hint = f"; похоже на: {', '.join(close)}" if close else ""
+        if text.strip() in ("?", "") or text.lower() in ("unknown", "hidden", "units", "army", "total", "?×?"):
+            hint += "; войска за туманом (?) неизвестны — подставь предполагаемый состав"
+        known = ", ".join(self.ruleset.units)
+        return self._estimate_error("UNKNOWN_ID", f"{side}: нет юнита {text!r}{hint}. Юниты: {known} (можно ID, "
+                                                  "метку из состояния или название; или ID своей/соседней "
+                                                  "провинции — тогда берутся войска в ней)")
+
+    def _estimate_side(self, side: str, raw: Any, seat: str | None = None) -> dict[str, int]:
         if raw is None:
-            raise self._estimate_error("INVALID", f"не указан {side}: объект {{юнит: число}}")
+            raise self._estimate_error("INVALID", f"не указан {side}: объект {{юнит: число}} или ID провинции, чьи "
+                                                  "войска видны")
+        pid = self._province_ref(raw)
+        if pid is not None:
+            return self._province_units(side, pid, seat)
         if isinstance(raw, list):  # [{"unit": "assault", "count": 3}] or [["assault", 3]]
             converted: dict[Any, Any] | None = {}
             for item in raw:
@@ -886,13 +947,13 @@ class Game:
                     break
             raw = converted
         if not isinstance(raw, dict):
-            raise self._estimate_error("INVALID", f"{side} должен быть объектом {{юнит: число}}")
-        known = ", ".join(f"{uid} ({u.short})" for uid, u in self.ruleset.units.items())
+            raise self._estimate_error("INVALID", f"{side} должен быть объектом {{юнит: число}} или ID провинции с "
+                                                  f"видимыми войсками (P07), а не {str(raw)[:30]!r}")
         units: dict[str, int] = {}
         for ref, n in raw.items():
             full = self.resolve_unit(ref)
             if full is None:
-                raise self._estimate_error("UNKNOWN_ID", f"{side}: нет юнита {str(ref)[:40]!r}; юниты: {known}")
+                raise self._unknown_unit(side, ref)
             count = n if isinstance(n, bool) else as_int(n)
             if isinstance(count, bool) or not isinstance(count, int) or count < 0:
                 raise self._estimate_error("INVALID", f"{side}: число юнитов {full} — целое ≥ 0, а не "
@@ -903,9 +964,11 @@ class Game:
     def estimate(self, body: dict[str, Any], seat: str | None = None) -> dict[str, Any]:
         """Battle forecast. Lenient on ids (resolve_unit, resolve_province_type); every refusal says what was
         wrong and shows a correct call."""
-        attacker = self._estimate_side("attacker", body.get("attacker"))
-        defender = self._estimate_side("defender", body.get("defender"))
+        attacker = self._estimate_side("attacker", body.get("attacker"), seat)
+        defender = self._estimate_side("defender", body.get("defender"), seat)
         raw_type = body.get("province_type")
+        if raw_type in (None, "") and self._province_ref(body.get("defender")):
+            raw_type = self._province_ref(body.get("defender"))      # defender="P07": the battle is in P07
         ptype = self.resolve_province_type(raw_type)
         if ptype is None:
             known = ", ".join(f"{pid} ({t.short})" for pid, t in self.ruleset.province_types.items())
@@ -923,9 +986,22 @@ class Game:
         keys: dict[str, Any] = {"attacker": None, "defender": None}
         defense_mul = None
         side = body.get("side")
+        side_note = None
         if seat is not None:
-            # The caller's own techs, artifacts and buildings count on its side (default: attacker); the other side
-            # gets the public faction of `opponent` (nick or seat), or base stats.
+            # The caller's own techs, artifacts and buildings count on its side; the other side gets the public
+            # faction of `opponent` (nick or seat), or base stats. Without `side`, province ids decide it: an own
+            # province is the caller's side, an army in another player's province is the other side (so
+            # attacker="P06" (enemy), defender="P05" (mine) forecasts the enemy attacking the caller); else attacker.
+            owners = {k: (self.state.provinces[pid].owner if (pid := self._province_ref(body.get(k))) else None)
+                      for k in keys}
+            if side in (None, ""):
+                if owners["defender"] == seat:
+                    side, side_note = "defender", f"defender={self._province_ref(body.get('defender'))} — твоя"
+                elif owners["attacker"] == seat:
+                    side, side_note = "attacker", f"attacker={self._province_ref(body.get('attacker'))} — твоя"
+                elif owners["attacker"] is not None and owners["defender"] is None:
+                    side, side_note = "defender", (f"attacker={self._province_ref(body.get('attacker'))} — "
+                                                   "чужая армия")
             side = str(side or "attacker").strip().lower()
             if side not in keys:
                 raise self._estimate_error("INVALID", f"side — attacker или defender, а не {side[:20]!r}")
@@ -939,6 +1015,8 @@ class Game:
                     raise self._estimate_error("UNKNOWN_ID", f"opponent {str(opponent)[:40]!r}: нужен ник соперника")
                 if self.phase != SETUP:
                     keys[other] = self.state.players[ref].faction
+            elif owners[other] not in (None, seat) and self.phase != SETUP:
+                keys[other] = self.state.players[owners[other]].faction   # the province's owner: a public faction
             pid = str(raw_type).strip().upper() if isinstance(raw_type, str) else None
             province = self.state.provinces.get(pid) if pid else None
             if side == "defender" and province is not None and province.owner == seat:
@@ -949,6 +1027,10 @@ class Game:
         out["province_type"] = ptype
         if seat is not None:
             out["side"] = side
+            how = f"по владельцу провинции: {side_note}" if side_note else (
+                "задано side" if body.get("side") not in (None, "") else "по умолчанию; своя оборона — side=\"defender\"")
+            out["note"] = (f"твои технологии, артефакты и постройки учтены за сторону {side} ({how}); "
+                           "win_prob — шанс атакующего")
         return out
 
     # --- ready ----------------------------------------------------------------------------------------
@@ -969,15 +1051,25 @@ class Game:
             current = self.setup_hash(seat)
             if confirm_hash not in (None, current):    # optional in setup; if given, it must be the current choice
                 raise GameError("STALE_HASH", f"выбор не совпадает с confirm_hash; актуальный confirm_hash: {current}")
+        elif self.phase == "negotiation_1":
+            # No orders can be given or changed in P1 (only validated): there is nothing for a hash to confirm, so
+            # ready() needs none and any confirm_hash (a stale one from the last turn included) is accepted.
+            self._require_active(seat)
         else:
             self._require_active(seat)
-            current = orders_hash(self._book(seat))
+            book = self._book(seat)
+            current = orders_hash(book)
+            label = PHASE_LABELS.get(self.phase, self.phase)
+            what = f"{len(book.orders)} приказ(ов)" if book.orders else "приказов нет — армии стоят"
             if confirm_hash in (None, ""):
-                raise GameError("STALE_HASH", "confirm_hash обязателен вне фазы старта: возьми orders_hash из "
-                                              f"list_orders (сейчас {current}) и вызови ready(confirm_hash=...)")
+                raise GameError("STALE_HASH", f"в фазе {label} нужен confirm_hash — orders_hash твоих приказов "
+                                              f"(сейчас {what}); он подтверждает, что ты готов именно с ними. "
+                                              f"Если они верны, вызови ready(confirm_hash=\"{current}\"). orders_hash "
+                                              "есть в phase(), list_orders() и ответе submit_orders")
             if confirm_hash != current:
-                raise GameError("STALE_HASH", f"набор приказов не совпадает с confirm_hash; актуальный orders_hash: "
-                                              f"{current}")
+                raise GameError("STALE_HASH", f"confirm_hash устарел: приказы изменились после него (сейчас {what}; "
+                                              "проверь list_orders()). Если они верны, вызови "
+                                              f"ready(confirm_hash=\"{current}\")")
         closed = False
         if seat not in self.ready_seats:
             self.ready_seats.add(seat)
@@ -1076,7 +1168,10 @@ class Game:
                                           "phase": self.phase, "turn": self.state.turn})
         self._save()
         sent = sum(1 for m in self.messages if m["from"] == seat)  # own count: the global id would leak traffic
-        return {"message_id": sent, "left": self.messages_left(seat)}
+        # the message's number in the seat's own inbox (where it shows as from "ты"): the cursor inbox(since=) uses
+        inbox_id = sum(1 for m in self.messages if (m["from"] == seat and not m.get("system"))
+                       or (m["from"] != seat and (m["to"] == "all" or seat in m["to"])))
+        return {"message_id": sent, "inbox_id": inbox_id, "left": self.messages_left(seat)}
 
     def _recipients(self, seat: str, to: Any) -> list[str] | None:
         if to == "all" or to == ["all"]:
@@ -1100,11 +1195,13 @@ class Game:
         return out
 
     def inbox(self, seat: str, since: int | None = None) -> dict[str, Any]:
-        """Messages addressed to the seat, numbered 1, 2, ... per recipient (`since` is that number), so the ids
-        say nothing about messages between other players."""
+        """Messages addressed to the seat and the seat's own sent messages (`own: true`, from "ты": every member of a
+        swarm sees what its teammates already said), numbered 1, 2, ... per seat (`since` is that number), so the
+        ids say nothing about messages between other players."""
         players = self.state.players
         received = [m for m in self.messages
-                    if m["from"] != seat and (m["to"] == "all" or seat in m["to"])]
+                    if (m["from"] == seat and not m.get("system"))
+                    or (m["from"] != seat and (m["to"] == "all" or seat in m["to"]))]
         out = []
         for number, m in enumerate(received, start=1):
             if since is not None and number <= since:
@@ -1115,14 +1212,22 @@ class Game:
             if m.get("system"):  # written by the game, not by a player: not wrapped as untrusted
                 entry.update({"from": SYSTEM_SENDER, "system": True, "event": m.get("event"),
                               "text": system_text(m["text"])})
+            elif m["from"] == seat:   # sent by this seat (a teammate in a swarm): its own words, escaped not wrapped
+                entry.update({"from": OWN_SENDER, "own": True, "text": escape_untrusted(m["text"])})
             else:
                 entry.update({"from": players[m["from"]].nick,
                               "text": wrap_untrusted(players[m["from"]].nick, m["text"])})
             out.append(entry)
         # never beyond the newest entry: a `since` past it must not move a client's cursor over future messages
         last_id = out[-1]["id"] if out else min(since or 0, len(received))
-        lines = [f"#{m['id']} ход {m['turn']} {PHASE_LABELS.get(m['phase'], m['phase'])} "
-                 f"{'всем' if m['public'] else 'лично'}: {m['text']}" for m in out]
+
+        def head(m: dict[str, Any]) -> str:
+            if m.get("own"):
+                return f"ты → {'всем' if m['public'] else ', '.join(m['to'])}"
+            return "всем" if m["public"] else "лично"
+
+        lines = [f"#{m['id']} ход {m['turn']} {PHASE_LABELS.get(m['phase'], m['phase'])} {head(m)}: {m['text']}"
+                 for m in out]
         return {"messages": out, "last_id": last_id, "text": "\n".join(lines) or "новых сообщений нет"}
 
     def _notice(self, to: list[str] | str, text: str, event: str, *, turn: int | None = None,
@@ -1156,7 +1261,9 @@ class Game:
                 raise GameError(exc.code, "в фазе Д дипломатия закрыта: подношения и пакты — в П1 и П2") from None
             others = ", ".join(p.nick for s, p in self.state.players.items() if s != seat and p.alive)
             hint = f" (игроки: {others})" if exc.code == "UNKNOWN_ID" and "игрок" in exc.message else ""
-            raise GameError(exc.code, f"{exc.message}{hint}. Пример: {example}") from None
+            # PACT_EXISTS names the exact next call itself; a generic propose example would contradict it
+            tail = "" if exc.code == "PACT_EXISTS" else f". Пример: {example}"
+            raise GameError(exc.code, f"{exc.message}{hint}{tail}") from None
         pact = dip.apply_op(self.state, op)
         self.diplomacy_log.append(op)
         return {"op": op, "pact": pact}
@@ -1218,29 +1325,81 @@ class Game:
         op, pact = done["op"], done["pact"]
         self._bump(seat, "pact_proposals")
         recipient = op["recipient"]
+        renews = dip.pact_by_id(self.state, op.get("renews")) if op.get("renews") else None
         was_ready = recipient in self.ready_seats
         self.ready_seats.discard(recipient)      # an offer needs an answer: the phase waits for the recipient again
         self._save()
         if was_ready:
             self.journal.append("ready_cleared", seat=recipient, turn=self.state.turn, phase=self.phase,
                                 reason="pact_proposed")
+        extra = {"renews": renews["id"]} if renews else {}
         self.journal.append("pact_proposed", seat=seat, to=op["recipient"], pact_id=pact["id"], turns=op["turns"],
-                            turn=self.state.turn, phase=self.phase)
-        self._notice([op["recipient"]], f"{self._nick(seat)} предлагает пакт {pact['id']} ({self._pact_terms(pact)}"
-                                        "): армии сторон пакта при встрече не сражаются. Ответь "
-                                        f"respond_pact(id=\"{pact['id']}\", decision=\"accept\" или \"reject\") "
-                                        "до конца хода.", "pact_proposed")
+                            turn=self.state.turn, phase=self.phase, **extra)
+        answer = (f"Ответь respond_pact(id=\"{pact['id']}\", decision=\"accept\" или \"reject\") до конца хода.")
+        if renews is not None:
+            terms = self._renewal_terms(renews, pact)
+            self._notice([recipient], f"{self._nick(seat)} предлагает продлить пакт {renews['id']} ({terms}): "
+                                      f"продление {pact['id']} начнётся сразу после нынешнего срока, без разрыва. "
+                                      + answer, "pact_proposed")
+            return {"pact": self._pact_view(pact, seat),
+                    "text": f"предложение продлить пакт {renews['id']} отправлено ({pact['id']}, {terms}); ждёт "
+                            "ответа до расчёта"}
+        self._notice([recipient], f"{self._nick(seat)} предлагает пакт {pact['id']} ({self._pact_terms(pact)}"
+                                  "): армии сторон пакта при встрече не сражаются. " + answer, "pact_proposed")
         return {"pact": self._pact_view(pact, seat),
                 "text": f"предложение {pact['id']} отправлено ({self._pact_terms(pact)}); ждёт ответа до расчёта"}
+
+    def _renewal_terms(self, current: dict[str, Any], renewal: dict[str, Any]) -> str:
+        """`ещё на 3 ход(а): с хода 6 до хода 8 включительно` (or indefinitely after the current term)."""
+        start = (current["until_turn"] or 0) + 1
+        if renewal["turns"] is None:
+            return f"бессрочно, начиная с хода {start}"
+        return f"ещё на {renewal['turns']} ход(а): с хода {start} до хода {start + renewal['turns'] - 1} включительно"
 
     def respond_pact(self, seat: str, pact_id: Any, decision: Any) -> dict[str, Any]:
         self._require_active(seat)
         example = 'respond_pact(id="pact-A-B-1", decision="accept") или decision="reject"'
-        done = self._diplomacy(seat, lambda: dip.make_response(self.state, seat, str(pact_id), decision,
+        known = dip.pact_by_id(self.state, str(pact_id).strip())
+        if (known is not None and seat in (known["a"], known["b"]) and known["status"] in (dip.ACTIVE, dip.RENEWED)
+                and str(decision).strip().lower() in ("accept", "true", "yes", "да", "принять")
+                and self.phase in dip.NEGOTIATION_PHASES):
+            # accepted already (often by a teammate of the same swarm): nothing to do, not an error -- as long as
+            # the pact still holds and no renewal of it waits for this seat's answer
+            current = dip.pact_by_id(self.state, known.get("renews")) if known["status"] == dip.RENEWED else known
+            if current is None or not dip.in_force(current, self.state.turn):
+                end = (f"выход объявлен, пакт закончился перед расчётом хода {current['ends_before_turn']}"
+                       if current is not None and current["status"] == dip.ACTIVE
+                       else f"статус {PACT_STATUS.get(current['status'], current['status'])}" if current else "")
+                raise GameError("INVALID", f"{known['id']} уже принят, но пакт "
+                                           f"{current['id'] if current else known.get('renews')} больше не действует "
+                                           f"({end}); принимать нечего. list_pacts() покажет твои пакты")
+            renewal = dip.pending_renewal(self.state, current["id"])
+            if renewal is not None and renewal["b"] == seat:
+                raise GameError("INVALID", f"{known['id']} — сам пакт, он уже принят; ответа ждёт продление "
+                                           f"{renewal['id']}: respond_pact(id=\"{renewal['id']}\", "
+                                           "decision=\"accept\") или decision=\"reject\"")
+            leaving = (f", но выход объявлен: конец перед расчётом хода {current['ends_before_turn']}"
+                       if current.get("leaving") else "")
+            return {"pact": self._pact_view(known, seat), "already": True,
+                    "text": f"{known['id']} уже принят: пакт {current['id']} действует "
+                            f"{self._pact_terms(current)}{leaving}; отвечать больше не нужно"}
+        done = self._diplomacy(seat, lambda: dip.make_response(self.state, seat, str(pact_id).strip(), decision,
                                                                self.phase), example)
         op, pact = done["op"], done["pact"]
         accepted = op["accept"]
         self._save()
+        if accepted and pact.get("renews"):
+            current = dip.pact_by_id(self.state, pact["renews"])
+            self.journal.append("pact_renewed", seat=seat, pact_id=current["id"], renewal_id=pact["id"],
+                                seats=sorted((pact["a"], pact["b"])), turns=pact["turns"],
+                                from_turn=pact["since_turn"], until_turn=current["until_turn"],
+                                turn=self.state.turn, phase=self.phase)
+            self._notice("all", f"Пакт продлён: {self._nick(pact['a'])} и {self._nick(pact['b'])} — теперь "
+                                f"{self._pact_terms(current)} (продление с хода {pact['since_turn']}, без разрыва).",
+                         "pact_renewed")
+            return {"pact": self._pact_view(current, seat),
+                    "text": f"продление {pact['id']} принято: пакт {current['id']} действует "
+                            f"{self._pact_terms(current)}"}
         self.journal.append("pact_accepted" if accepted else "pact_rejected", seat=seat, pact_id=pact["id"],
                             seats=sorted((pact["a"], pact["b"])), turns=pact["turns"],
                             until_turn=pact["until_turn"], turn=self.state.turn, phase=self.phase)
@@ -1248,6 +1407,15 @@ class Game:
             self._notice("all", f"Пакт заключён: {self._nick(pact['a'])} и {self._nick(pact['b'])} "
                                 f"({self._pact_terms(pact)}). Их армии при встрече не сражаются, пока пакт "
                                 "действует.", "pact_accepted")
+        elif pact.get("renews"):
+            current = dip.pact_by_id(self.state, pact["renews"])
+            still = (f"пакт {current['id']} по-прежнему действует {self._pact_terms(current)}"
+                     if current is not None and current["status"] == dip.ACTIVE
+                     else f"пакт {pact['renews']} без изменений")
+            self._notice([pact["a"]], f"{self._nick(seat)} отклонил продление пакта {pact['renews']} "
+                                      f"({pact['id']}); {still}.", "pact_rejected")
+            return {"pact": self._pact_view(pact, seat),
+                    "text": f"продление {pact['id']} отклонено; {still}"}
         else:
             self._notice([pact["a"]], f"{self._nick(seat)} отклонил пакт {pact['id']}.", "pact_rejected")
         verdict = "заключён" if accepted else "отклонён"
@@ -1256,10 +1424,18 @@ class Game:
     def leave_pact(self, seat: str, pact_id: Any) -> dict[str, Any]:
         self._require_active(seat)
         example = 'leave_pact(id="pact-A-B-1")'
-        done = self._diplomacy(seat, lambda: dip.make_leave(self.state, seat, str(pact_id), self.phase), example)
+        pending = dip.pending_renewal(self.state, str(pact_id).strip())
+        done = self._diplomacy(seat, lambda: dip.make_leave(self.state, seat, str(pact_id).strip(), self.phase),
+                               example)
         pact = done["pact"]
         partner = dip.partner_of(pact, seat)
         self._save()
+        cancelled = pending if pending is not None and pending["status"] == dip.CANCELLED else None
+        if cancelled is not None:
+            self.journal.append("pact_renewal_cancelled", seat=seat, pact_id=pact["id"], renewal_id=cancelled["id"],
+                                turn=self.state.turn, phase=self.phase)
+            self._notice([pact["a"], pact["b"]], f"Предложение продлить пакт {pact['id']} ({cancelled['id']}) отменено: "
+                                                 f"{self._nick(seat)} выходит из пакта.", "pact_renewal_cancelled")
         if pact["status"] == dip.WITHDRAWN:
             self.journal.append("pact_withdrawn", seat=seat, pact_id=pact["id"], turn=self.state.turn,
                                 phase=self.phase)
@@ -1271,45 +1447,74 @@ class Game:
             self._notice("all", f"{self._nick(seat)} выходит из пакта с {self._nick(partner)}: пакт перестаёт "
                                 f"действовать перед расчётом хода {pact['ends_before_turn']}.", "pact_left")
             text = (f"выход из пакта {pact['id']} объявлен всем; пакт действует до расчёта хода "
-                    f"{pact['ends_before_turn']} (не включая его)")
+                    f"{pact['ends_before_turn']} (не включая его)"
+                    + (f"; предложение продления {cancelled['id']} отменено" if cancelled else ""))
         return {"pact": self._pact_view(pact, seat), "text": text}
 
     def _pact_view(self, pact: dict[str, Any], seat: str) -> dict[str, Any]:
         nick = self.state.players
-        return {"id": pact["id"], "with": nick[dip.partner_of(pact, seat)].nick, "proposed_by": nick[pact["a"]].nick,
-                "status": pact["status"], "turns": pact["turns"], "since_turn": pact["since_turn"],
-                "until_turn": pact["until_turn"], "leaving": nick[pact["leaving"]].nick if pact.get("leaving") else None,
-                "ends_before_turn": pact.get("ends_before_turn"), "broken_by": [nick[s].nick for s in
-                                                                                pact.get("broken_by") or []]}
+        out = {"id": pact["id"], "with": nick[dip.partner_of(pact, seat)].nick, "proposed_by": nick[pact["a"]].nick,
+               "status": pact["status"], "turns": pact["turns"], "since_turn": pact["since_turn"],
+               "until_turn": pact["until_turn"], "leaving": nick[pact["leaving"]].nick if pact.get("leaving") else None,
+               "ends_before_turn": pact.get("ends_before_turn"), "broken_by": [nick[s].nick for s in
+                                                                               pact.get("broken_by") or []]}
+        if pact.get("renews"):
+            out["renews"] = pact["renews"]
+        if pact.get("renewals"):
+            out["renewals"] = [dict(r) for r in pact["renewals"]]
+        if pact["status"] == dip.ACTIVE:
+            renewal = dip.pending_renewal(self.state, pact["id"])
+            if renewal is not None:
+                out["renewal_proposed"] = {"id": renewal["id"], "by": nick[renewal["a"]].nick,
+                                           "turns": renewal["turns"]}
+            out["renewable"] = dip.renewable(pact, self.state.turn) and renewal is None
+        return out
 
     def pacts(self, seat: str) -> dict[str, Any]:
         """The seat's own pacts and proposals (with ids) and every active pact between others (public, no ids)."""
         mine = [self._pact_view(p, seat) for p in self.state.pacts if seat in (p["a"], p["b"])]
-        public = [{"seats": [self.state.players[s].nick for s in p["seats"]], "turns": p["turns"],
-                   "until_turn": p["until_turn"],
-                   "leaving": self.state.players[p["leaving"]].nick if p.get("leaving") else None,
-                   "ends_before_turn": p["ends_before_turn"]}
-                  for p in (dip.public_pact(x) for x in dip.active_pacts(self.state)) if seat not in p["seats"]]
+        public = []
+        for p in (dip.public_pact(x) for x in dip.active_pacts(self.state)):
+            if seat in p["seats"]:
+                continue
+            entry = {"seats": [self.state.players[s].nick for s in p["seats"]], "turns": p["turns"],
+                     "until_turn": p["until_turn"],
+                     "leaving": self.state.players[p["leaving"]].nick if p.get("leaving") else None,
+                     "ends_before_turn": p["ends_before_turn"]}
+            if p.get("renewed"):
+                entry["renewed"] = p["renewed"]
+            public.append(entry)
         lines = []
         for p in mine:
             if p["status"] == dip.ACTIVE:
                 extra = (f"; {p['leaving']} выходит, конец перед расчётом хода {p['ends_before_turn']}"
                          if p["leaving"] else "")
+                if p.get("renewals"):
+                    extra += f"; продлён {len(p['renewals'])} раз(а)"
+                if p.get("renewal_proposed"):
+                    r = p["renewal_proposed"]
+                    extra += (f"; {'ты предложил' if r['by'] != p['with'] else p['with'] + ' предлагает'} продление "
+                              f"{r['id']}")
+                elif p.get("renewable") and p["until_turn"] == self.state.turn:
+                    extra += (f"; последний ход срока — продлить: propose_pact(to=\"{p['with']}\", turns=N)")
                 lines.append(f"{p['id']}: пакт с {p['with']}, действует "
                              f"{'до хода ' + str(p['until_turn']) + ' включительно' if p['until_turn'] else 'бессрочно'}"
                              f"{extra}")
             elif p["status"] == dip.PROPOSED:
                 terms = f"на {p['turns']} ход(а)" if p["turns"] else "бессрочно"
+                what = f"продлить пакт {p['renews']} {terms}" if p.get("renews") else f"пакт {terms}"
                 if p["proposed_by"] == p["with"]:
-                    lines.append(f"{p['id']}: тебе предлагает {p['with']} ({terms}) — respond_pact до конца хода")
+                    lines.append(f"{p['id']}: тебе предлагает {p['with']} — {what}; ответь "
+                                 f"respond_pact(id=\"{p['id']}\", decision=\"accept\"|\"reject\") до конца хода")
                 else:
-                    lines.append(f"{p['id']}: ты предложил {p['with']} ({terms}), ждёт ответа")
+                    lines.append(f"{p['id']}: ты предложил {p['with']} — {what}; ждёт ответа")
             else:
                 lines.append(f"{p['id']}: с {p['with']} — {PACT_STATUS.get(p['status'], p['status'])}"
                              + (f" (нарушил {', '.join(p['broken_by'])})" if p["broken_by"] else ""))
         for p in public:
             lines.append(f"публично: {' — '.join(p['seats'])}, "
                          f"{'до хода ' + str(p['until_turn']) if p['until_turn'] else 'бессрочно'}"
+                         + (f" (продлён {p['renewed']} раз(а))" if p.get("renewed") else "")
                          + (f"; {p['leaving']} выходит" if p["leaving"] else ""))
         return {"mine": mine, "public": public, "text": "\n".join(lines) or "пактов нет"}
 
@@ -1338,8 +1543,11 @@ class Game:
                 self._notice("all", f"Пакт окончен: {pair} — {why} (ход {turn}).", kind, turn=turn,
                              phase="resolution")
             else:
-                self._notice(seats, f"Предложение пакта {e['pact']} не принято до конца хода {turn} и сгорело.",
-                             kind, turn=turn, phase="resolution")
+                lapsed = dip.pact_by_id(self.state, e["pact"])
+                what = (f"Предложение продлить пакт {lapsed['renews']} ({e['pact']})" if lapsed and lapsed.get("renews")
+                        else f"Предложение пакта {e['pact']}")
+                self._notice(seats, f"{what} не принято до конца хода {turn} и сгорело.", kind, turn=turn,
+                             phase="resolution")
 
     # --- setup phase (TECH_AND_SETUP.md section 2) ------------------------------------------------------
 
@@ -1525,8 +1733,9 @@ class Game:
 
     # --- techs and content -----------------------------------------------------------------------------
 
-    def list_techs(self, seat: str) -> dict[str, Any]:
-        """The seat's own tech tree (techs.techs_view) with its research income per turn, plus Russian `text`."""
+    def list_techs(self, seat: str, full: bool = False) -> dict[str, Any]:
+        """The seat's own techs with its research income per turn, plus Russian `text`. By default short (researched,
+        active, available now; ~10x smaller); `full` gives the whole tree with requirements (techs.techs_view)."""
         res = self.ruleset.research_resource
         income = None
         if res is not None and seat in self.state.players:
@@ -1534,6 +1743,11 @@ class Game:
             income = (income_of(self.state, self.ruleset, seat, key)[res]
                       - upkeep_of(self.state, self.ruleset, seat, key)[res])
         view = techs_view(self.state, self.ruleset, seat, income)
+        if not full:
+            short = short_techs_view(view)
+            short["text"] = techs_text_short(short, self.ruleset)
+            return short
+        view["full"] = True
         view["text"] = techs_text(view, self.ruleset)
         return view
 

@@ -325,7 +325,12 @@ def test_wake_text_format():
     text = wake_text({"turn": 3, "turn_limit": 10, "phase": "actions", "deadline": "2026-11-23T14:30:00Z",
                       "seconds_left": 1200, "ready": "1/3"})
     assert text == ("[DAH] Ход 3/10, фаза ДЕЙСТВИЯ, до 14:30Z (ещё 20 мин). Готово 1/3. "
-                    "Посмотри dah.get_state(since_turn=2), подай приказы, нажми dah.ready.")
+                    "Посмотри dah.get_state(since_turn=2), подай приказы (dah.submit_orders), затем "
+                    "dah.ready(confirm_hash=orders_hash из ответа dah.submit_orders).")
+    p1 = wake_text({"turn": 3, "turn_limit": 10, "phase": "negotiation_1"})
+    assert "сразу dah.ready() (в П1 без confirm_hash)" in p1
+    p2 = wake_text({"turn": 3, "turn_limit": 10, "phase": "negotiation_2", "orders_hash": "abc123"})
+    assert 'dah.ready(confirm_hash="abc123")' in p2
 
 
 def test_cli_requires_token_from_env(monkeypatch, capsys):

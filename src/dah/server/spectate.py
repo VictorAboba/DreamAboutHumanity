@@ -478,7 +478,7 @@ def build_timings(path: Path) -> dict[str, Any]:
                     "submits", "edits", "p2_edits", "validate_rejected", "submit_rejected", "spent_usd",
                     "submits_by_phase", "no_orders_turns", "not_ready_phases", "idle_units", "telemetry",
                     "spent_in_game_usd", "spent_after_game_usd", "in_game_s", "after_game_s", "pacts_signed",
-                    "pacts_kept", "pacts_broken", "gifts_sent", "gifts_received", "gifted_resources",
+                    "pacts_kept", "pacts_broken", "pacts_renewed", "gifts_sent", "gifts_received", "gifted_resources",
                     "received_resources")
     out = {
         "seats": rep["seats"], "rules_chars": rep["rules_chars"],

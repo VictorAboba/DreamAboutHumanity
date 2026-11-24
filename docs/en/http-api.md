@@ -57,7 +57,7 @@ Submitting and validating orders answer 200 even when some orders are refused: t
 | DELETE | `/v1/orders/{id}` | | `order_id`, `cp_cost`, `orders_hash`, `cp_left` |
 | PATCH | `/v1/orders/{id}` | `{"units"?, "unit"?, "count"?, "to"?, "pact"?}` | the same plus the changed `order`, `warning?` |
 | POST | `/v1/estimate` | see [Estimate](#estimate) | `win_prob`, average losses |
-| POST | `/v1/messages` | `{"to": [nick, ...] \| "all", "text"}` | `message_id`, `left{}` |
+| POST | `/v1/messages` | `{"to": [nick, ...] \| "all", "text"}` | `message_id` (count of own sent), `inbox_id` (number in the inbox, for `since`), `left{}` |
 | GET | `/v1/inbox` | `?since=` | `messages[]`, `last_id`, `text` |
 | POST | `/v1/gifts` | `{"to": nick, "resources": {res: n}}` | `gift`, `gifts_left`, `resources`, `text` |
 | GET | `/v1/pacts` | | `mine[]` (with ids), `public[]` (others' active pacts), `text` |
@@ -66,11 +66,11 @@ Submitting and validating orders answer 200 even when some orders are refused: t
 | POST | `/v1/pacts/{id}/leave` | | `pact`, `text` |
 | POST | `/v1/ready` | `{"confirm_hash"}` | `ready` ("N/M"), `phase_closed` |
 | POST | `/v1/unready` | | `ready` |
-| GET | `/v1/history` | `?turn=` | `turn`, `text` (before turn 1 is resolved, without `turn`: `turn: null` and a hint) |
+| GET | `/v1/history` | `?turn=` | `turn`, `text` (before turn 1 is resolved, without `turn`, or for the turn in progress: `turn: null` and a hint) |
 | GET | `/v1/setup` | | see [Setup phase](#setup-phase) |
 | POST | `/v1/setup/faction` | `{"prefs": [faction, ...]}` (also `factions`, `faction`) | `factions[]`, `confirm_hash`, `text` |
 | POST | `/v1/setup/artifacts` | `{"ids": [artifact, ...]}` (also `artifacts`, `artifact`) | `artifacts[]`, `confirm_hash`, `text` |
-| GET | `/v1/techs` | | see [Techs](#techs) |
+| GET | `/v1/techs` | `?full=true` | see [Techs](#techs) |
 | GET | `/v1/describe` | `?id=` (or `name=`) | `kind`, `id`, `name`, the entity's fields, `text`; `also[]` when several match |
 
 ### Setup phase
@@ -107,10 +107,14 @@ hidden until the game ends, and the public `techs_count` leaves out techs grante
 
 ### Techs
 
-`GET /v1/techs` is the seat's tech tree: `{enabled, resource, points, income, active: {tech, progress, cost} |
-null, researched[], branches[{id, name, name_en, order, description, color}], techs[{id, name, name_en, branch,
-tier, cost, base_cost, progress, status: researched|active|available|locked, missing[], requires[], requires_any[],
-requires_tier, factions[], effects[], unlocks[], description}], text}`. Others' techs are never shown (only
+`GET /v1/techs` is short by default (about 3.5k characters instead of 9k): `{enabled, resource, points, income,
+active: {tech, progress, cost} | null, researched[], techs[{id, name, branch, tier, cost, progress, status:
+researched|active|available, effects[], unlocks[]}], locked (how many are locked), full: false, text}` — the text
+lists the researched techs, the active one with progress/cost and every tech available now with its cost and effects
+on one line. `GET /v1/techs?full=true` is the whole tree: `{..., full: true, branches[{id, name, name_en, order,
+description, color}], techs[{id, name, name_en, branch, tier, cost, base_cost, progress, status:
+researched|active|available|locked, missing[], requires[], requires_any[], requires_tier, factions[], effects[],
+unlocks[], description}], text}` (the bridge: `list_techs(full=true)`). Others' techs are never shown (only
 `techs_count` of each player in `/v1/state?format=json`).
 
 Research is an ordinary order, `{"kind": "research", "tech": "<id or name>"}` (a `technology` field is accepted
@@ -127,7 +131,10 @@ from the match's content; a content id or name gives its description; an unknown
 `/v1/phase` returns `game_id`, `turn`, `turn_limit`, `phase`, `deadline` (UTC, `2026-11-23T14:30:00Z`),
 `seconds_left`, `ready` ("N/M" of living seats), `you_ready`, `phase_seq`, `allowed` (tools allowed in this phase),
 `alive`, `game_over`, `text`, and `result` once the match is over; in the setup phase (`phase: "setup"`) also a
-`hint` on what to do.
+`hint` on what to do. In N1, A and N2 `hint` says how to press ready in this phase (it is part of `text` too); in A
+and N2 the answer also has `orders_hash`, the seat's current one, so ready is one call:
+`ready(confirm_hash=<orders_hash>)`. It is the hash at the moment of the call: in A the hint says to take
+`orders_hash` from the `submit_orders` answer once orders are given (each submit or edit changes it).
 
 `phase_seq` grows by one at each phase change. `/v1/wait_phase?after_seq=N` returns as soon as `phase_seq` differs
 from `N`, or after `max_seconds` (default 45, at most 55) with `changed: false`. Without `after_seq` it returns at
@@ -190,24 +197,38 @@ entry has `faction` and `techs_count` (others' techs and artifacts only after th
 
 The body is `{"attacker": {unit: n}, "defender": {unit: n}, "province_type", "fortified", "hasty"}`;
 `fortified` and `hasty` default to `false`. A unit may be its full id (`core:assault`), its short id (`assault`),
-its label in the state text (`штурм`) or its name; a side may also be a list `[{"unit": ..., "count": n}]`.
+its label in the state text (`штурм`) or its name; a side may also be a list `[{"unit": ..., "count": n}]`, or a
+province id (`"P05"`) whose army the seat sees (its own provinces and their neighbours): the whole army there is
+taken (a hidden one is refused with what to pass instead; an empty province is an empty defender). Without
+`province_type`, a province id as `defender` also gives the battle's province.
 `province_type` may be a type id (`core:agri`, `agri`), its label in the state text (`агро`, `кузн.`) or name, or
 a province id (`P07`) or name, which stands for that province's type. The answer has `win_prob`,
 `attacker_losses_avg`, `defender_losses_avg`, the same averages as `losses: {attacker, defender}` and the resolved
-`province_type`. Unknown ids give `400 UNKNOWN_ID` with the list of valid ones; a missing or malformed field gives
+`province_type`. Unknown ids give `400 UNKNOWN_ID` with the closest ids and the list of valid ones (for `?`, the
+hidden army, the advice to pass a guessed army); a missing or malformed field gives
 `400 INVALID`; both messages end with a correct example call. The route works in any phase
 ([Game rules](rules.md#estimate)).
 
-Optional `side` (`attacker` by default, or `defender`) and `opponent`: the `side` gets the calling seat's stats
+Optional `side` (`attacker` or `defender`; without it province ids decide: an own province as `defender`, or
+another player's army as `attacker`, gives `defender`, otherwise `attacker`) and `opponent`: the `side` gets the calling seat's stats
 (faction, techs, artifacts, owner-scoped buildings; with `side: defender` and an own province id in
 `province_type`, also that province's defense from buildings), the other side gets the public faction of the
-player `opponent` (a nick), or base numbers without it. The answer also has `side`.
+player `opponent` (a nick), without it the faction of the owner of another player's province given by id, or base
+numbers. The answer also has `side` and `note` (which side got your stats and why).
 
 ### Ready
 
-`POST /v1/ready` needs `confirm_hash` equal to the seat's current `orders_hash`, otherwise `409 STALE_HASH` (the
-message names the current hash; with no `confirm_hash` at all, outside the setup phase, it says the hash is required). When the last living seat presses ready, the phase closes at once and the answer
-has `phase_closed: true`.
+Press ready as soon as there is nothing more to say or do in the phase: it closes when every living seat is ready.
+
+- Setup phase and N1: `POST /v1/ready` needs no `confirm_hash` (an empty body is fine). In N1 no order can be given
+  or changed, so a hash would confirm nothing: any `confirm_hash`, a stale one from the last turn included, is
+  accepted and ignored.
+- A and N2: `confirm_hash` must equal the seat's current `orders_hash` (in `/v1/phase`, `/v1/orders` and the answer
+  of `POST /v1/orders`; every edit makes a new one), otherwise `409 STALE_HASH`. The message says what happened
+  (missing, or stale because the orders changed after it, with the number of orders) and gives the exact call with
+  the current hash: `ready(confirm_hash="…")`.
+
+When the last living seat presses ready, the phase closes at once and the answer has `phase_closed: true`.
 
 ### Messages
 
@@ -215,13 +236,16 @@ has `phase_closed: true`.
 in this phase: `private`, `public` and `per_recipient` by nick. The limits are in
 [Game rules](rules.md#messages).
 
-`GET /v1/inbox` returns messages addressed to the seat. Their `id` counts only those messages (1, 2, ...); pass the
+`GET /v1/inbox` returns messages addressed to the seat and the seat's own sent messages (`from: "ты"`, `own: true`,
+`to` as sent, the text escaped but not wrapped): every member of a swarm sees what its teammates already said; other
+players' private messages never appear. Their `id` counts only these entries (1, 2, ...); pass the
 last one as `since` to get only newer ones (the HTTP route returns everything without `since`; the bridge's `inbox`
 tool remembers the last id it returned itself). `last_id` is the newest id returned, or with nothing new
 `since` capped at the number of entries, never past the newest entry. Each player's `text` is wrapped as `<<untrusted from=Nick>>…<</untrusted>>`.
 Entries written by the game itself (a gift received, a pact proposed to you, a pact signed, left, broken or expired)
-have `from: "ИГРА"`, `system: true`, `event` (`gift`, `pact_proposed`, `pact_accepted`, `pact_rejected`,
-`pact_withdrawn`, `pact_left`, `pact_broken`, `pact_expired`, `pact_ended`, `pact_lapsed`) and a text starting with
+have `from: "ИГРА"`, `system: true`, `event` (`gift`, `pact_proposed`, `pact_accepted`, `pact_renewed`,
+`pact_renewal_cancelled`, `pact_rejected`, `pact_withdrawn`, `pact_left`, `pact_broken`, `pact_expired`,
+`pact_ended`, `pact_lapsed`) and a text starting with
 `[ИГРА]`, not wrapped; message limits do not count them.
 
 ### Gifts and pacts
@@ -229,9 +253,21 @@ have `from: "ИГРА"`, `system: true`, `event` (`gift`, `pact_proposed`, `pact
 Only in N1 and N2 (`409 PHASE_LOCKED` otherwise; the rules are in [Game rules](rules.md#diplomacy-gifts-and-pacts)).
 `to` is a nick or a seat id. Refusals: `INVALID` (bad amounts, yourself, an eliminated player, a bad `turns` or
 `decision`), `UNKNOWN_ID` (an unknown player, resource or pact), `NOT_ENOUGH_RESOURCES` (more than the free,
-unreserved stock), `LIMIT_EXCEEDED` (gifts or proposals per phase), `PACT_EXISTS` (the pair already has a pact or
-an open proposal). Each refusal shows a correct call. Pact ids look like `pact-A-B-1` and are known only to the
-two sides; public listings name the sides and terms only.
+unreserved stock), `LIMIT_EXCEEDED` (gifts or proposals per phase), `PACT_EXISTS` (the message names the way out:
+the partner's proposal waiting for your `respond_pact`, your own one to withdraw with `leave_pact`, an indefinite
+pact that cannot be renewed, a pact being left, or a renewal already proposed). Each refusal shows a correct call.
+Pact ids look like `pact-A-B-1` and are known only to the two sides; public listings name the sides and terms only.
+
+Renewal: `POST /v1/pacts` to the partner of an active pact with a fixed end (in force, nobody leaving) proposes to
+renew it: the answer's `pact` has its own id and `renews: <pact id>`; the partner answers it with
+`POST /v1/pacts/{id}/respond` like any proposal, the proposer withdraws it with `POST /v1/pacts/{id}/leave`, and an
+unanswered one lapses at the resolution. Accepted, the pact keeps its id and its `until_turn` grows by `turns`
+(`null`: indefinite from then on): the renewal starts right after the current term, no gap, no overlap. The pact in
+`GET /v1/pacts` then has `renewals[{id, turns, turn, phase, from_turn}]`; an active one shows `renewal_proposed`
+and `renewable`; public rows and `pacts` of the state have `renewed` (a count). Leaving the pact cancels a pending
+renewal (status `cancelled`, inbox notice to both) and ends the pact by the usual notice rule, accepted renewals
+included. `respond` with `accept` on a pact that is already active is a no-op answer (`already: true`), not an
+error.
 
 ## Host routes
 

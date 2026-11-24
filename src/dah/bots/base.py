@@ -76,6 +76,7 @@ class Bot:
     def __init__(self, seat: str, seed: int) -> None:
         self.seat = seat
         self.rng = random.Random(seed)
+        self.renewals_asked: set[tuple[str, int]] = set()   # (pact id, turn) renewals proposed
 
     # --- decision hooks (overridden by concrete bots) ---
 
@@ -89,6 +90,30 @@ class Bot:
     def answer_pacts(self, view: StateView, api: DiplomacyApi) -> None:
         """Answer pact proposals made to this seat; called again when a proposal arrives after the bot pressed
         ready (the proposal clears it). Ignores them by default (the proposal then lapses with the phase)."""
+
+    def renew_expiring_pacts(self, view: StateView, api: DiplomacyApi) -> list[str]:
+        """In the last turn of an own pact with a fixed end, propose to renew it on the same terms (once per pact
+        and turn; not when someone is leaving or a renewal is already proposed). Returns the partners asked."""
+        asked = self.renewals_asked
+        pending = {str(p.get("renews")) for p in view.pact_proposals if p.get("renews")}
+        partners = []
+        for pact in view.pacts:
+            pid, until = pact.get("id"), pact.get("until_turn")
+            if not pid or until != view.turn or pact.get("leaving") or str(pid) in pending:
+                continue
+            if (str(pid), view.turn) in asked:
+                continue
+            other = next((s for s in pact.get("seats", ()) if s not in view.me), None)
+            if other is None:
+                continue
+            asked.add((str(pid), view.turn))
+            try:
+                api.propose_pact(other, int(pact.get("turns") or 1))
+            except ApiError as exc:     # e.g. the partner proposed the renewal first: answer_pacts takes it
+                log.info("bot %s: renewal of %s refused: %s", self.seat, pid, exc)
+                continue
+            partners.append(other)
+        return partners
 
     def action_orders(self, view: StateView, estimate: Estimator) -> list[Order]:
         """Orders for the actions phase (submitted with mode replace_all)."""

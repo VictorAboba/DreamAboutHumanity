@@ -176,7 +176,9 @@ def choose_artifacts(game: Game, seat: str, request: Request, body: dict[str, An
 
 
 def list_techs(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
-    return game.list_techs(seat)
+    """Short by default (researched, active, available now); `?full=true` gives the whole tree."""
+    full = str(request.query_params.get("full", "")).strip().lower() in ("1", "true", "yes", "да")
+    return game.list_techs(seat, full=full)
 
 
 def describe(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:

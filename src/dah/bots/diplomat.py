@@ -73,6 +73,7 @@ class DiplomatBot(Bot):
     def diplomacy(self, view: StateView, api: DiplomacyApi) -> None:
         open_with = {str(p.get("from") if str(p.get("to")) in view.me else p.get("to")) for p in view.pact_proposals}
         self.answer_pacts(view, api)
+        self.renew_expiring_pacts(view, api)
         alloy = view.resource(BUILD_RESOURCE)
         for other in neighbours(view):
             if view.is_partner(other) or other in open_with or self.proposed.get(other, 0) >= MAX_PROPOSALS:

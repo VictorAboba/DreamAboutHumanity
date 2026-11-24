@@ -26,8 +26,13 @@ stdio MCP-сервер `dah`, который переводит вызовы и�
 `validate_orders(orders)`, `submit_orders(orders, mode)`, `cancel_order(id)`, `amend_order(id, patch)`,
 `estimate(attacker, defender, province_type, fortified?, hasty?)`, `send_message(to, text)`, `inbox(since?, all?)`,
 `send_gift(to, resources)`, `propose_pact(to, turns?)`, `respond_pact(id, decision)`, `leave_pact(id)`, `list_pacts`,
-`ready(confirm_hash)`, `unready`, `history(turn?)`; этап 2 (фаза старта и технологии, [TECH_AND_SETUP.md](TECH_AND_SETUP.md)):
-`get_setup`, `choose_faction(prefs)`, `choose_artifacts(ids)`, `list_techs`, `describe(id)`.
+`ready(confirm_hash?)`, `unready`, `history(turn?)`; этап 2 (фаза старта и технологии, [TECH_AND_SETUP.md](TECH_AND_SETUP.md)):
+`get_setup`, `choose_faction(prefs)`, `choose_artifacts(ids)`, `list_techs(full?)`, `describe(id)`.
+
+- `ready` нажимай в каждой фазе, как только сказать и сделать больше нечего (фаза кончается, когда готовы все): в фазе
+  старта и П1 — `ready()` без `confirm_hash` (в П1 приказов нет, хэш не проверяется); в Д и П2 —
+  `ready(confirm_hash=orders_hash)`, где `orders_hash` — из `phase()`, `list_orders()` или ответа `submit_orders`
+  (после каждой правки новый). Отказ `STALE_HASH` называет точный вызов с актуальным хэшем.
 
 - `rules()` — краткое ядро правил (≤ 6000 символов) с оглавлением; `rules(topic="techs")` — раздел целиком, собранный
   из контента партии. Темы: `turn`, `setup`, `resources`, `provinces`, `units`, `abilities`, `buildings`, `orders`,
@@ -38,7 +43,8 @@ stdio MCP-сервер `dah`, который переводит вызовы и�
   `choose_faction(prefs=["litany", "captains"])` — фракции по предпочтению; `choose_artifacts(ids=["ancient_blueprint"])`;
   `ready()` — без `confirm_hash`. Чужой выбор не виден; `get_state` во время фазы — предварительное состояние, фракции
   соперников в нём скрыты.
-- Технологии: `list_techs()` — твоё дерево (изученные, активная, доступные и закрытые с причиной, цена, прогресс);
+- Технологии: `list_techs()` — коротко (изученные, активная с прогрессом, доступные сейчас с ценой и эффектом);
+  `list_techs(full=true)` — всё дерево с закрытыми и их требованиями;
   исследование — обычный приказ `{"kind": "research", "tech": "deep_drilling"}` в Д (в П1 — только `validate_orders`),
   сменить — `amend_order(id, patch={"tech": "agro_vats"})`. `describe(id="throne_warden")` — любой юнит, здание, технология,
   артефакт, фракция по ID или названию. Чужие технологии и артефакты не видны (только число изученных технологий).
@@ -47,9 +53,11 @@ stdio MCP-сервер `dah`, который переводит вызовы и�
   (`validate_orders` работает в любой фазе).
 - `inbox()` моста по умолчанию отдаёт только записи новее последней, которую этот процесс моста уже вернул;
   `inbox(all=true)` или `inbox(since=0)` — вся история. Записи `[ИГРА]` (`system: true`) пишет сама игра: подношения
-  и пакты.
+  и пакты. Свои отправленные сообщения тоже там (`from: "ты"`, `own: true`): участники роя видят, что уже сказали
+  напарники.
 - Дипломатия — в П1 и П2: `send_gift` (свободные ресурсы сразу уходят игроку, ≤3 за фазу), пакты
-  (`propose_pact` → `respond_pact`; `leave_pact`). У `move` есть поле `pact`: `honor` (по умолчанию: в провинцию
+  (`propose_pact` → `respond_pact`; `leave_pact`; продление действующего пакта со сроком — `propose_pact` тому же
+  партнёру, срок добавится к концу нынешнего). У `move` есть поле `pact`: `honor` (по умолчанию: в провинцию
   союзника войска не войдут) или `break` (нарушение: бой, пакт публично разорван). Подробно —
   [Правила игры](ru/rules.md#дипломатия-подношения-и-пакты).
 
@@ -65,10 +73,14 @@ stdio MCP-сервер `dah`, который переводит вызовы и�
   `estimate(attacker={"core:assault": 4}, defender={"core:assault": 2}, province_type="P07")`. Юнит — полный ID,
   короткий (`assault`) или метка из текста состояния (`штурм`); `province_type` — ID типа (`core:agri`), его метка
   из текста состояния (`агро`, `кузн.`, `пуст.`, `столица`) или ID провинции (`P07`) — тогда берётся её тип.
-  `side` (`attacker` по умолчанию или `defender`) — твоя сторона: на ней действуют твои технологии, артефакты и
-  здания; `opponent` — ник соперника, его фракция берётся на другую сторону.
+  `side` (`attacker` или `defender`) — твоя сторона: на ней действуют твои технологии, артефакты и
+  здания; без `side` её определяют ID провинций (своя провинция — твоя сторона; чужая армия у `attacker` — ты
+  защищаешься), иначе `attacker`; ответ называет сторону в `side` и `note`. `opponent` — ник соперника, его фракция
+  берётся на другую сторону (без него — фракция владельца чужой провинции, если она указана ID). Сторону можно задать и ID провинции с
+  видимой армией: `estimate(attacker="P05", defender="P07")` — вся армия каждой, бой в P07.
 - `get_state()` — всё состояние, `get_state(since_turn=N)` — изменения с хода N (`since_turn=0` — тоже всё);
-  `history()` — отчёт последнего рассчитанного хода (до расчёта хода 1 — подсказка вместо отчёта).
+  `history()` — отчёт последнего рассчитанного хода (до расчёта хода 1 и для идущего хода — подсказка вместо
+  отчёта).
 - На неверные аргументы `estimate`, `get_state`, `history` и `send_message` ответ называет ошибку и показывает верный
   вызов (`… Пример: estimate(attacker={"core:assault": 4}, …)`).
 - `wait_phase` сам помнит последний виденный `phase_seq`: первый вызов сразу возвращает текущую фазу, следующие ждут
@@ -181,7 +193,7 @@ uv run --project C:/path/to/DreamAboutHumanity dah-waker \
 
 - ждёт смены фазы (`/v1/wait_phase`); когда открывается фаза, где место действует (П1, Д, П2), будит сессию (по
   умолчанию — сообщением всем участникам, см. `--wake-mode`) самодостаточным текстом вида
-  `[DAH] Ход 3/10, фаза ДЕЙСТВИЯ, до 14:30Z (ещё 20 мин). Готово 1/3. Посмотри dah.get_state(since_turn=2), подай приказы, нажми dah.ready.`;
+  `[DAH] Ход 3/10, фаза ДЕЙСТВИЯ, до 14:30Z (ещё 20 мин). Готово 1/3. Посмотри dah.get_state(since_turn=2), подай приказы (dah.submit_orders), затем dah.ready(confirm_hash=orders_hash из ответа dah.submit_orders).` (в П1 — «сразу dah.ready() (в П1 без confirm_hash)», в П2 — точный вызов с текущим `orders_hash`);
 - за 60 секунд до дедлайна, если место ещё не нажало ready, шлёт напоминание (тем же способом);
 - после каждого пробуждения следит, ответил ли рой: если в той же фазе за `--ack-seconds` (120) от места пришёл
   собственный вызов игрока (не waker'а), пишет `wake_answered` {seconds — через сколько секунд после пробуждения},

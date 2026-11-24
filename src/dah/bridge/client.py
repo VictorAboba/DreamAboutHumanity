@@ -118,8 +118,8 @@ class GameClient:
     def choose_artifacts(self, ids: Any) -> dict[str, Any]:
         return self.request("POST", "/v1/setup/artifacts", body={"ids": ids})
 
-    def list_techs(self) -> dict[str, Any]:
-        return self.request("GET", "/v1/techs")
+    def list_techs(self, full: bool = False) -> dict[str, Any]:
+        return self.request("GET", "/v1/techs", params={"full": "true"} if full else None)
 
     def describe(self, ref: Any) -> dict[str, Any]:
         return self.request("GET", "/v1/describe", params={"id": ref})
@@ -146,7 +146,7 @@ class GameClient:
         return self.request("POST", f"/v1/pacts/{quote(str(pact_id), safe='')}/leave", body={})
 
     def ready(self, confirm_hash: str | None) -> dict[str, Any]:
-        """`confirm_hash` may be None only in the setup phase."""
+        """`confirm_hash` may be None in the setup phase and in negotiation_1 (no orders there)."""
         return self.request("POST", "/v1/ready", body={"confirm_hash": confirm_hash})
 
     def unready(self) -> dict[str, Any]:

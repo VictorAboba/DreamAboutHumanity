@@ -132,6 +132,8 @@ The server never gives `private/` to players. The journal holds message sizes, n
 | `gift` | seat (giver), to, resources, turn, phase |
 | `pact_proposed` / `pact_accepted` / `pact_rejected` / `pact_withdrawn` / `pact_left` | seat, `pact_id`, seats or to, turns, `until_turn` / `ends_before_turn`, turn, phase |
 | `pact_broken` / `pact_expired` / `pact_ended` / `pact_lapsed` | `pact_id`, seats, turn; `broken_by` / reason (`left`, `eliminated`) |
+| `pact_renewed` | seat (who accepted), `pact_id` (the renewed pact), `renewal_id`, seats, turns, `from_turn`, `until_turn` (the new end), turn, phase |
+| `pact_renewal_cancelled` | seat (who left), `pact_id`, `renewal_id`, turn, phase |
 | `game_over` | winners, reason (`last_standing` or `turn_limit`), scores, turn |
 
 A crash in the middle of a write leaves at most one torn line; readers skip it and the writer continues after it.

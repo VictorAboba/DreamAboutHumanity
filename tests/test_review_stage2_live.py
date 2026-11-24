@@ -129,10 +129,14 @@ def test_setup_text_names_the_choice_and_ready_without_hash_says_it_is_required(
     assert "Твой выбор: фракции ash_choir «" in text and "trail_maps «" in text and "['" not in text
     for seat in "ABC":
         game.set_ready(seat, None)                   # ready() without a hash is fine in setup
-    assert game.phase != "setup"
+    assert game.phase == "negotiation_1"
+    assert game.set_ready("A", None)["ready"] == "1/3"   # P1: no orders, so no hash needed
+    for seat in "BC":
+        game.set_ready(seat, None)
+    assert game.phase == "actions"
     with pytest.raises(GameError) as err:
         game.set_ready("A", None)
-    assert err.value.code == "STALE_HASH" and "confirm_hash обязателен" in err.value.message
+    assert err.value.code == "STALE_HASH" and "нужен confirm_hash" in err.value.message
 
 
 # ---------------------------------------------------------------- LIVE-5 and LIVE-6: the watch page

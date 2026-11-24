@@ -63,8 +63,9 @@ class BuilderBot(Bot):
         return None
 
     def diplomacy(self, view: StateView, api: DiplomacyApi) -> None:
-        """Accept every pact offered (and keep it); propose none."""
+        """Accept every pact offered (and keep it); propose none, but renew a fixed pact in its last turn."""
         self.answer_pacts(view, api)
+        self.renew_expiring_pacts(view, api)
 
     def answer_pacts(self, view: StateView, api: DiplomacyApi) -> None:
         for prop in view.pact_proposals:

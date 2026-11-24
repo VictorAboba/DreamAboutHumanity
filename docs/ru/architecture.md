@@ -132,6 +132,8 @@ docs/                      SLICE.md (спецификация), CONCEPT.md (ко
 | `gift` | место (даритель), to, resources, turn, phase |
 | `pact_proposed` / `pact_accepted` / `pact_rejected` / `pact_withdrawn` / `pact_left` | место, `pact_id`, seats или to, turns, `until_turn` / `ends_before_turn`, turn, phase |
 | `pact_broken` / `pact_expired` / `pact_ended` / `pact_lapsed` | `pact_id`, seats, turn; `broken_by` / reason (`left`, `eliminated`) |
+| `pact_renewed` | место (кто принял), `pact_id` (продлённый пакт), `renewal_id`, seats, turns, `from_turn`, `until_turn` (новый конец), turn, phase |
+| `pact_renewal_cancelled` | место (кто вышел), `pact_id`, `renewal_id`, turn, phase |
 | `game_over` | победители, причина (`last_standing` или `turn_limit`), счёт, ход |
 
 Сбой посреди записи оставляет не больше одной оборванной строки: при чтении она пропускается, а запись

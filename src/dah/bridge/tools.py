@@ -39,9 +39,11 @@ _ORDER_ITEM = {
     },
     "required": ["kind"],
 }
-_EST_UNITS = {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0},
+_EST_UNITS = {"anyOf": [{"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+                        {"type": "string"}],
               "description": "Юниты стороны: {юнит: число}, например {\"core:assault\": 4, \"core:armor\": 1}; "
-                             "юнит — полный ID, короткий (assault) или метка из get_state (штурм)"}
+                             "юнит — полный ID, короткий (assault) или метка из get_state (штурм). Или ID провинции "
+                             "с видимыми войсками (своей или соседней, \"P05\") — берутся все войска в ней"}
 EST_EXAMPLE = ('estimate(attacker={"core:assault": 4}, defender={"core:assault": 2}, province_type="core:agri", '
                'fortified=false)')
 _ORDERS = {"type": "array", "items": _ORDER_ITEM,
@@ -87,7 +89,8 @@ TOOLS: tuple[ToolSpec, ...] = (
                       f"контента партии ({RULE_TOPICS}). Пример: rules(topic=\"techs\").",
              _schema({"topic": {"type": "string", "description": f"Раздел правил: {RULE_TOPICS}"}})),
     ToolSpec("phase", "Текущая фаза (setup — фаза старта перед ходом 1, затем П1/Д/П2): ход, дедлайн, готовность, "
-                      "разрешённые действия, game_over.", _schema()),
+                      "разрешённые действия, game_over, подсказка, как нажать ready; в Д и П2 — ещё orders_hash для "
+                      "ready(confirm_hash=...).", _schema()),
     ToolSpec("get_setup", "Фаза старта: все фракции с описаниями, предложенные тебе артефакты (драфт) или пул и "
                           "бюджет (очки), твой текущий выбор; после фазы — итог и фракции всех игроков. Чужой выбор "
                           "не виден.", _schema()),
@@ -100,9 +103,11 @@ TOOLS: tuple[ToolSpec, ...] = (
                                  "бюджета. Пример: choose_artifacts(ids=[\"ancient_blueprint\"]).",
              _schema({"ids": {**_LIST_OR_STRING, "description": "ID или названия артефактов из get_setup"}},
                      ["ids"])),
-    ToolSpec("list_techs", "Твоё дерево технологий: изученные, активная, доступные и закрытые (чего не хватает), "
-                           "цена и прогресс каждой, очки и доход ресурса исследований. Изучать — приказ "
-                           f"{RESEARCH} в фазе Д.", _schema()),
+    ToolSpec("list_techs", "Твои технологии коротко: изученные, активная (прогресс/цена), доступные сейчас (цена, "
+                           "эффект), очки и доход ресурса исследований. full=true — всё дерево с закрытыми и их "
+                           f"требованиями (примерно вдвое длиннее). Изучать — приказ {RESEARCH} в фазе Д.",
+             _schema({"full": {"type": "boolean", "default": False,
+                               "description": "true — всё дерево с закрытыми технологиями и требованиями"}})),
     ToolSpec("describe", "Полное описание любого контента партии по ID или названию: юнит, здание, технология, "
                          "артефакт, фракция, ветка, ресурс, тип провинции. Пример: describe(id=\"throne_warden\").",
              _schema({"id": {"type": "string", "description": "ID (assault, core:assault) или название (можно начало)"}}, ["id"])),
@@ -137,23 +142,29 @@ TOOLS: tuple[ToolSpec, ...] = (
                       "province_type": {"type": "string",
                                         "description": "Где бой: тип провинции (core:forge, core:agri, core:waste, "
                                                        "core:capital или метка из get_state: кузн., агро, пуст., "
-                                                       "столица) либо ID провинции (P07)"},
+                                                       "столица) либо ID провинции (P07); без него, если "
+                                                       "defender — ID провинции, бой в ней"},
                       "fortified": {"type": "boolean", "default": False,
                                     "description": "Защитник укрепился (fortify)"},
                       "hasty": {"type": "boolean", "default": False,
                                 "description": "Атака подана в П2 (наспех, штраф)"},
-                      "side": {"type": "string", "enum": ["attacker", "defender"], "default": "attacker",
-                               "description": "Твоя сторона: на ней действуют твои технологии, артефакты и здания"},
+                      "side": {"type": "string", "enum": ["attacker", "defender"],
+                               "description": "Твоя сторона: на ней действуют твои технологии, артефакты и здания. "
+                                              "Без него — по ID провинций (своя — твоя сторона, чужая армия у "
+                                              "attacker — ты защищаешься), иначе attacker"},
                       "opponent": {"type": "string",
                                    "description": "Ник соперника: его фракция (публична) на другой стороне"}},
-                     ["attacker", "defender", "province_type"])),
-    ToolSpec("send_message", "Отправить сообщение (только в П1 и П2): to — список ников или \"all\". "
+                     ["attacker", "defender"])),
+    ToolSpec("send_message", "Отправить сообщение (только в П1 и П2): to — список ников или \"all\". В ответе "
+                             "inbox_id — номер этого сообщения в твоих входящих (message_id — счёт твоих "
+                             "отправленных, не номер для inbox(since=)). "
                              "Пример: send_message(to=[\"Ник\"], text=\"Предлагаю мир\").",
              _schema({"to": {"anyOf": [{"type": "array", "items": {"type": "string"}},
                                        {"type": "string", "enum": ["all"]}]},
                       "text": {"type": "string", "maxLength": 800}}, ["to", "text"])),
-    ToolSpec("inbox", "Входящие: сообщения игроков (обёрнуты untrusted) и записи [ИГРА] от самой игры "
-                      "(подношения, пакты). По умолчанию — только новые с прошлого вызова inbox; all=true или "
+    ToolSpec("inbox", "Входящие: сообщения игроков (обёрнуты untrusted), записи [ИГРА] от самой игры "
+                      "(подношения, пакты) и твои отправленные (from: \"ты\", own: true — их видят все участники "
+                      "роя). По умолчанию — только новые с прошлого вызова inbox; all=true или "
                       "since=0 — вся история; since=N — новее номера N.",
              _schema({"since": {"type": ["integer", "string"], "description": "Номер последнего прочитанного; 0 — всё"},
                       "all": {"type": "boolean", "default": False, "description": "Вся история входящих"}})),
@@ -164,24 +175,31 @@ TOOLS: tuple[ToolSpec, ...] = (
                                     "description": "{ресурс: число}, например {\"alloy\": 10, \"provisions\": 5}"}},
                      ["to", "resources"])),
     ToolSpec("propose_pact", "Предложить пакт (только П1 и П2): армии сторон при встрече не сражаются. turns — на "
-                             "сколько расчётов, считая текущий ход; без turns — бессрочно. Пример: "
-                             "propose_pact(to=\"Ник\", turns=3).",
+                             "сколько расчётов, считая текущий ход; без turns — бессрочно. Партнёру по действующему "
+                             "пакту со сроком это предложение продлить: turns добавятся к концу нынешнего срока (без "
+                             "разрыва), без turns — пакт станет бессрочным; бессрочный пакт продлевать нечего. "
+                             "Пример: propose_pact(to=\"Ник\", turns=3).",
              _schema({"to": {"type": "string", "description": "Ник"},
                       "turns": {"type": ["integer", "null"], "minimum": 1,
                                 "description": "Число ходов; null или без него — бессрочно"}}, ["to"])),
-    ToolSpec("respond_pact", "Ответить на предложение пакта (только П1 и П2) до конца хода: decision accept или "
-                             "reject. Пример: respond_pact(id=\"pact-A-B-1\", decision=\"accept\").",
+    ToolSpec("respond_pact", "Ответить на предложение пакта или его продления (только П1 и П2) до конца хода: "
+                             "decision accept или reject. У продления свой ID (не ID самого пакта) — бери его из "
+                             "входящих или list_pacts. Пример: respond_pact(id=\"pact-A-B-1\", decision=\"accept\").",
              _schema({"id": {"type": "string", "description": "ID пакта из входящих или list_pacts"},
                       "decision": {"type": "string", "enum": ["accept", "reject"]}}, ["id", "decision"])),
     ToolSpec("leave_pact", "Выйти из пакта (объявляется всем; из П1 — пакт не действует уже в расчёте этого хода, "
-                           "из П2 — со следующего) или отозвать своё предложение. Пример: "
+                           "из П2 — со следующего; ждущее продление при этом отменяется) или отозвать своё предложение, в том "
+                           "числе продления (по его ID). Пример: "
                            "leave_pact(id=\"pact-A-B-1\").",
              _schema({"id": {"type": "string", "description": "ID пакта"}}, ["id"])),
     ToolSpec("list_pacts", "Твои пакты и предложения (с ID) и все действующие пакты других (публично).", _schema()),
-    ToolSpec("ready", "Нажать «готово»; confirm_hash — orders_hash твоих текущих приказов (в фазе старта можно без "
-                      "него).",
-             _schema({"confirm_hash": {"type": "string", "description": "orders_hash из list_orders; в фазе старта "
-                                                                         "не нужен"}})),
+    ToolSpec("ready", "Нажать «готово», как только в фазе сказать и сделать больше нечего (фаза кончается, когда "
+                      "готовы все). Старт и П1 — ready() без confirm_hash. Д и П2 — ready(confirm_hash=orders_hash "
+                      "твоих текущих приказов): он есть в ответе submit_orders, в phase() и list_orders(); после "
+                      "правки приказов — новый.",
+             _schema({"confirm_hash": {"type": "string", "description": "Д и П2: orders_hash из phase(), "
+                                                                         "list_orders() или submit_orders; в фазе "
+                                                                         "старта и П1 не нужен"}})),
     ToolSpec("unready", "Снять «готово».", _schema()),
     ToolSpec("history", "Отчёт рассчитанного хода; без turn — последний. До расчёта хода 1 отчётов нет. "
                         "Пример: history(turn=1).",
@@ -224,7 +242,7 @@ EXAMPLES = {
     "cancel_order": 'cancel_order(id="o3")',
     "amend_order": 'amend_order(id="o3", patch={"unit": "assault", "count": 1}) или '
                    'amend_order(id="o3", patch={"to": "P03"})',
-    "ready": 'ready(confirm_hash="<orders_hash из list_orders>"); в фазе старта — ready()',
+    "ready": 'в П1 и фазе старта — ready(); в Д и П2 — ready(confirm_hash="<orders_hash из phase() или list_orders>")',
     "choose_faction": 'choose_faction(prefs=["litany", "captains"])',
     "choose_artifacts": 'choose_artifacts(ids=["ancient_blueprint"])',
     "describe": 'describe(id="throne_warden")',
@@ -258,13 +276,18 @@ def _lenient_json(value: Any, *, lists_only: bool = False) -> Any:
 # descriptions, ~9k characters): the model gets the text and only these fields of the JSON.
 SETUP_KEEP = ("phase", "open", "seconds_left", "you_ready", "artifacts_mode", "your_choice", "confirm_hash", "result",
               "players", "warning")
-TECHS_KEEP = ("enabled", "points", "income", "active", "researched")
+TECHS_KEEP = ("enabled", "points", "income", "active", "locked")
 
 
 def _compact(data: dict[str, Any], keep: tuple[str, ...]) -> dict[str, Any]:
     if not isinstance(data.get("text"), str):
         return data
     return {"text": data["text"], **{k: data[k] for k in keep if data.get(k) not in (None, [], {})}}
+
+
+def _flag(value: Any) -> bool:
+    """A boolean argument; some clients send "true"/"1" as strings."""
+    return value is True or str(value).strip().lower() in ("true", "1", "yes", "да")
 
 
 def _first(args: dict[str, Any], *names: str) -> Any:
@@ -304,7 +327,8 @@ class Bridge:
                 _lenient_json(_first(a, "prefs", "factions", "faction"), lists_only=True)),
             "choose_artifacts": lambda a: client.choose_artifacts(
                 _lenient_json(_first(a, "ids", "artifacts", "artifact"), lists_only=True)),
-            "list_techs": lambda a: _compact(client.list_techs(), TECHS_KEEP),
+            "list_techs": lambda a: _compact(client.list_techs(full=True) if _flag(a.get("full"))
+                                             else client.list_techs(), TECHS_KEEP),
             "describe": lambda a: client.describe(str(_first(a, "id", "name", "ref"))),
             "send_message": lambda a: client.send_message(_required(a, "to"), str(_required(a, "text"))),
             "inbox": self._inbox,

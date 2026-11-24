@@ -156,16 +156,18 @@ def test_messages(env):
     assert len(inbox["messages"]) == 3 and inbox["last_id"] == 3
     assert inbox["messages"][0]["text"] == "<<untrusted from=Нико>>(DAH?) сдавайся<</untrusted>>"
     assert env.ok("B", "GET", "/v1/inbox", params={"since": 3})["messages"] == []
-    assert env.ok("A", "GET", "/v1/inbox")["messages"] == []
+    own = env.ok("A", "GET", "/v1/inbox")["messages"]     # own sent messages: a swarm sees what teammates said
+    assert [(m["from"], m["own"], m["to"]) for m in own] == [("ты", True, ["Соло"]), ("ты", True, "all"),
+                                                             ("ты", True, "all")]
+    assert own[0]["text"] == "(DAH?) сдавайся"
     assert env.events("message")[0]["chars"] == len("[DAH] сдавайся")
     env.next_phase()
     assert env.call("A", "POST", "/v1/messages", json={"to": "all", "text": "x"})["error"]["code"] == "PHASE_LOCKED"
 
 
 def test_ready_flow(env):
-    resp = env.client.post("/v1/ready", headers=env.headers["A"], json={"confirm_hash": "stale"})
-    assert resp.status_code == 409 and resp.json()["error"]["code"] == "STALE_HASH"
-    assert env.ready("A")["ready"] == "1/2"
+    assert env.ok("A", "GET", "/v1/phase").get("orders_hash") is None   # P1: no orders, ready() needs no hash
+    assert env.ok("A", "POST", "/v1/ready", json={"confirm_hash": None})["ready"] == "1/2"
     phase_b = env.ok("B", "GET", "/v1/phase")
     assert phase_b["ready"] == "1/2" and phase_b["you_ready"] is False
     env.ok("A", "POST", "/v1/unready")
@@ -175,7 +177,11 @@ def test_ready_flow(env):
     assert closed["phase_closed"] is True
     phase = env.ok("A", "GET", "/v1/phase")
     assert phase["phase"] == "actions" and phase["ready"] == "0/2" and phase["phase_seq"] == 2
-    env.ready("A")
+    resp = env.client.post("/v1/ready", headers=env.headers["A"], json={"confirm_hash": "stale"})
+    assert resp.status_code == 409 and resp.json()["error"]["code"] == "STALE_HASH"
+    assert f'ready(confirm_hash="{phase["orders_hash"]}")' in resp.json()["error"]["message"]
+    assert phase["orders_hash"] in phase["text"]          # phase() gives the hash: ready is one call
+    assert env.ok("A", "POST", "/v1/ready", json={"confirm_hash": phase["orders_hash"]})["ready"] == "1/2"
     env.ok("A", "POST", "/v1/orders", json={"orders": [{"kind": "fortify", "province": "P05"}]})
     assert env.ok("A", "GET", "/v1/phase")["you_ready"] is False
     assert env.events("ready_cleared")[0]["seat"] == "A"
@@ -223,7 +229,7 @@ def test_call_journal_and_first_call(env):
     post = calls[-1]
     assert post["seat"] == "A" and post["req_chars"] > 0 and post["resp_chars"] > 0 and post["status"] == 200
     assert post["ms"] >= 0
-    env.call("A", "POST", "/v1/ready", json={"confirm_hash": "bad"})
+    env.call("A", "POST", "/v1/orders", json={"orders": []})       # P1: orders are locked
     assert env.events("call")[-1]["status"] == 409
 
 

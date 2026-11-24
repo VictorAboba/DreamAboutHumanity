@@ -55,9 +55,13 @@ their unique one and may get extra stock.
 
 ### Ready
 
-- `ready(confirm_hash)` takes the `orders_hash` of the seat's current orders (from `list_orders` or the answer of
-  `submit_orders`). If the orders have changed since, the server answers `STALE_HASH`. Ready is pressed in every
-  phase, negotiation phases included.
+- Ready is pressed in every phase, negotiation phases included, as soon as there is nothing more to say or do,
+  without waiting for the timer: the phase closes when everyone is ready.
+- N1 (and the setup phase): `ready()` without `confirm_hash`. No order can be given or changed in N1, so no hash is
+  needed or checked (one that is passed, even a stale one from the last turn, is ignored).
+- A and N2: `ready(confirm_hash)` takes the `orders_hash` of the seat's current orders (from `phase()`,
+  `list_orders` or the answer of `submit_orders`; every edit makes a new one). Without it, or with a stale one, the
+  server answers `STALE_HASH` and names the exact call with the current hash.
 - Any change of orders takes ready back (`ready_cleared` in the journal). `unready` takes it back by hand.
 - Opponents see only "ready N of M".
 - A seat that never pressed ready keeps the orders it submitted. A seat that submitted nothing plays on autopilot:
@@ -257,13 +261,25 @@ deceiving is up to the player.
 - `propose_pact(to, turns)` proposes one; `turns=N`: the pact holds for N resolutions counting the current turn;
   without `turns` it is indefinite. At most 3 proposals per phase (`diplomacy_limits.pact_proposals_per_phase`).
   Two players have at most one pact or one open proposal at a time; a pact left in N1 no longer counts, so the
-  two may sign a new one in the same turn.
+  two may sign a new one in the same turn. A `PACT_EXISTS` refusal names the way out: accept the other side's
+  proposal (`respond_pact`), withdraw your own (`leave_pact`), renew the pact (below) or wait for the notice to end.
 - `respond_pact(id, "accept" | "reject")`: the answer of the one proposed to, before the turn is resolved; otherwise
   the proposal lapses. The pact is active as soon as it is accepted. A proposal clears the recipient's ready mark,
   so the phase does not close before it can answer.
 - `leave_pact(id)`: leaving, announced to everyone at once. Left in N1: the pact no longer protects in this turn's
   resolution; left in N2: it still protects in this resolution and ends before the next turn's. `leave_pact` on
   one's own unanswered proposal withdraws it.
+- **Renewal.** While a pact with a fixed end is in force and nobody has given notice, either side may propose to
+  renew it: `propose_pact(to=partner, turns=N)` makes a renewal proposal (its own id, `renews` = the pact's id); the
+  partner answers `respond_pact(id, "accept" | "reject")`, the proposer may withdraw it with `leave_pact(id)`, an
+  unanswered one lapses at the resolution. An accepted renewal adds N turns right after the current term, with no
+  gap and no overlap (a pact until turn 5 renewed for 3 lasts until turn 8); the pact keeps its id, `turns=null`
+  makes it indefinite from then on. The last turn of the term (N1 or N2) is the natural moment. An indefinite pact
+  has nothing to renew (`PACT_EXISTS`). Leaving the pact cancels a pending renewal, and accepted renewals end with
+  the pact by the usual notice rule. Answer a renewal by its own id: accepting the pact's id while a renewal waits
+  for you is refused with the renewal's exact `respond_pact` call. A rejected renewal leaves the pact as it was
+  (the proposer is told it still runs to its end). Everyone sees that a pact was renewed and until when (`[ИГРА]` inbox entries,
+  `get_state`, the turn report, the Chronicle); only the two see the ids.
 - `list_pacts()`: one's own pacts and proposals (with ids) and every active pact of others.
 - Who is in a pact with whom is public: everyone sees it in `get_state` (the `ПАКТЫ:` line), without the ids of
   other players' pacts. Proposals and refusals are seen only by the two.
@@ -345,7 +361,9 @@ After a battle:
 formula 200 times with a fixed seed and returns `win_prob`, `attacker_losses_avg` and `defender_losses_avg`. The
 same inputs always give the same answer. It knows nothing about the real map: you pass the armies yourself. The
 only map lookup is `province_type`, which may also be a province id (`P07`): it stands for that province's type.
-Unit and type ids may be full, short or the labels from the state text (`штурм`, `агро`).
+Unit and type ids may be full, short or the labels from the state text (`штурм`, `агро`). A side may also be a
+province id whose army you see (yours or a neighbour's): `estimate(attacker="P05", defender="P07")` takes the whole
+army of each and fights in P07; a hidden army (`?` in the state) has to be guessed.
 
 ```json
 {"attacker": {"assault": 4}, "defender": {"assault": 3}, "province_type": "waste", "fortified": false, "hasty": false}
@@ -387,7 +405,10 @@ line. `format=json` gives the same view as JSON.
   message or an entry of the game.
 - Entries of the game itself (gifts, pact proposals and decisions) arrive in the same inbox with `from: "ИГРА"`,
   `system: true` and the text `[ИГРА] …`; message limits do not count them.
-- Message numbers in `inbox` count only the messages addressed to you and say nothing about other players' traffic.
+- `inbox` also holds your own sent messages (`from: "ты"`, `own: true`): the members of a swarm see what their
+  teammates already said. Other players' private messages never appear there.
+- Message numbers in `inbox` count only the entries of your inbox (addressed to you or sent by you) and say nothing
+  about other players' traffic.
 
 ## Victory and scoring
 
@@ -403,8 +424,9 @@ tier-1 techs of its own branch (War Engines also needs Smithcraft). One tech is 
 order (only in A) picks it, and it stays active from turn to turn until it is learned or changed; the progress of
 every tech is kept. A learned tech works from the next turn: income multipliers, cheaper buildings, stat changes
 (attack, move range, CP, the hasty penalty, the N2 refund) and the units and buildings it unlocks. Factions and
-artifacts may make a branch or a tech cheaper. `list_techs()` shows the seat's own tree with prices, requirements
-and progress; `rules(topic="techs")` shows the whole tree.
+artifacts may make a branch or a tech cheaper. `list_techs()` is short: the researched techs, the active one with
+progress and price, and the techs available now with price and effect; `list_techs(full=true)` is the seat's whole
+tree with requirements; `rules(topic="techs")` shows the whole tree for everyone.
 
 ## Factions and artifacts
 
