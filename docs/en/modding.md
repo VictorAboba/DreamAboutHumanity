@@ -17,6 +17,7 @@ mymod/
   pack.yaml
   resources/  province_types/  units/  buildings/  factions/  maps/  scenarios/
   branches/  techs/  artifacts/  lore/      # stage 2 (optional)
+  objectives/                             # stage 4 (optional)
 ```
 
 - Every `*.yaml` file in a type folder is read. A file holds one entity or a list of entities.
@@ -114,6 +115,7 @@ allowed only in some places.
 | `command_points` | int 0..10 | 3 | CP per turn |
 | `combat.fortify_bonus` | float 0..1 | 0.25 | defense bonus of `fortify` (the `core` scenarios override it to 0.15) |
 | `combat.counter_mul` | float 1..3 | 1.5 | counter multiplier |
+| `combat.fortify_persists` | int 0..1 | 0 | 1: a fortification lasts while the owner's units stay in the province (the `core` 0.5.0 scenarios set 1) |
 | `starvation.loss_frac` | float 0..1 | 0.10 | share of the army lost to starvation |
 
 ### Modifier order
@@ -215,6 +217,35 @@ scenario with both systems off, hashes and plays as before stage 3.
   `disposition.<id>.cost_mul|loot_mul`, `conquest.claim_turns`, `conquest.claim_bonus`, `conquest.loot_cooldown`. The
   full table with ranges is section 1.2 of the specification; `rules(topic="spying")` and `rules(topic="conquest")`
   show a match's numbers.
+
+## Stage-4 content: score sources, great works, secret objectives
+
+The authoritative description is sections 1–3 and 11 of the [scoring specification](../SCORING.md) (in Russian);
+`content/packs/core` 0.5.0 uses every field below. Everything is optional: a scenario without `scoring` scores land
+only (1 per province, +3 per capital) and hashes as before.
+
+- **Weights.** A scenario's `scoring: {territory, science, works, war, objectives}` (each 0..5; a source not named is
+  0; some source other than `objectives` must be > 0). The host may override per match: `dah game create --scoring
+  territory=1,science=1,works=0,war=1,objectives=1 --objectives N`. A source with weight 0 is an off system
+  `scoring.<src>`: entities with `requires_system: scoring.<src>` are hidden and `modify` lines on its `score.*`
+  stats are dropped.
+- **Buildings** gain `score` (0..10: points while ready in an own full province; stat `building.<id>.score`),
+  `max_per_owner` (1..10: the `build` order is refused with `ALREADY_BUILT` once a seat has that many, ready or
+  building, in all its provinces) and `allowed_types` (province types where it may be built). A building with
+  `score > 0` is a great work: its start and completion are public events; the validator warns when its
+  `build_turns` < 2.
+- **`objectives/*.yaml`**: `id`, `name`, `kind` (engine kinds: `hold_type {type, count}`, `hold_count {count}`,
+  `hold_foreign {count}`, `capital_other {count}`, `techs_branch {branch, count}`, `great_work {count}`,
+  `rival_capital_taken` — targets a rival seat), `params`, `points` (1..8), `maps` (empty: any), `players {min,
+  max}`, `requires_system`, `description`, `lore`. A scenario with objectives on sets `objectives: {dealt: 1}`
+  (optionally `pool: [...]`; `offer` must equal `dealt`).
+- **Validation of objectives** (every scenario with objectives on, every seat count 2..`max_players` of its map, every
+  admitted faction): the pool after the `maps`/`players`/`requires_system` filters holds at least max(3, `dealt`)
+  objectives; none is met at any start (after start effects); each can be met (enough provinces of the type, techs of
+  the branch researchable by every faction, a great work every faction can build on the map, ...).
+- **Stats** (only while their source is on): `score.territory.province|capital`, `score.science.tier1..4`,
+  `score.science.branch`, `score.war.per_point|cap_per_victim|cap|defense_pct`. `rules(topic="victory")` shows a
+  match's numbers.
 
 ## Validation
 

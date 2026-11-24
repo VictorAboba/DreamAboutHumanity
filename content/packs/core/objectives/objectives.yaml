@@ -1,0 +1,75 @@
+# Secret objectives (core 0.5.0, SCORING.md 2.5, 11): one is dealt to every seat, checked at game over on the final
+# state; all are worth 5. A mirror start is a capital + forge + agri + waste, so every "hold" needs a province
+# beyond the own start: feasible, never free (the build validator checks every map, faction and seat count).
+# Balance (SCORING.md «Баланс core 0.5.0»): points 3 -> 5 (reveal_flip), conqueror 2 -> 1 province, mechanicus 3 -> 4
+# techs; the branch objectives stay off mirror4 (12 turns: met by 75-90%), on mirror4 granary (all agri worlds are in
+# the starts) gives way to shrine_keeper (all shrines are central); capital objectives need 3 seats or more (in a duel
+# taking the only rival's capital is winning the game).
+- id: forge_lord
+  name: {ru: Хозяин кузниц, en: Forge Lord}
+  kind: hold_type
+  params: {type: forge, count: 2}
+  points: 5
+  description: Держи к концу две Кузни — свою и ещё одну, центральную или чужую.
+- id: granary
+  name: {ru: Житница, en: Granary}
+  kind: hold_type
+  params: {type: agri, count: 2}
+  points: 5
+  maps: [mirror2, mirror3]
+  description: Держи к концу два Агромира.
+- id: shrine_keeper
+  name: {ru: Хранитель святынь, en: Shrine Keeper}
+  kind: hold_type
+  params: {type: shrine, count: 2}
+  points: 5
+  maps: [mirror4]
+  description: Держи к концу две Святыни (все они в центре карты).
+- id: dominion
+  name: {ru: Держава, en: Dominion}
+  kind: hold_count
+  params: {count: 6}
+  points: 5
+  maps: [mirror3, mirror4]
+  players: {min: 3}
+  description: Держи к концу шесть провинций (на старте их четыре).
+- id: foreign_throne
+  name: {ru: Чужой престол, en: Foreign Throne}
+  kind: capital_other
+  params: {count: 1}
+  points: 5
+  players: {min: 3}
+  description: Держи к концу столицу другого места.
+- id: mechanicus
+  name: {ru: Механикус, en: Mechanicus}
+  kind: techs_branch
+  params: {branch: war, count: 4}
+  points: 5
+  maps: [mirror2, mirror3]
+  description: Изучи приказом четыре технологии ветки «Война» (подарки не в счёт).
+- id: treasurer
+  name: {ru: Казначей, en: Treasurer}
+  kind: techs_branch
+  params: {branch: industry, count: 3}
+  points: 5
+  maps: [mirror2, mirror3]
+  description: Изучи приказом три технологии ветки «Промышленность» (подарки не в счёт).
+- id: architect
+  name: {ru: Зодчий, en: Architect}
+  kind: great_work
+  params: {count: 1}
+  points: 5
+  requires_system: scoring.works
+  description: Держи к концу готовую великую стройку.
+- id: conqueror
+  name: {ru: Завоеватель, en: Conqueror}
+  kind: hold_foreign
+  params: {count: 1}
+  points: 5
+  description: Держи к концу провинцию из старта другого места.
+- id: kingbreaker
+  name: {ru: Цареубийца, en: Kingbreaker}
+  kind: rival_capital_taken
+  points: 5
+  players: {min: 3}
+  description: Возьми столицу названного соперника — владей ею в конце или захвати её хоть раз.

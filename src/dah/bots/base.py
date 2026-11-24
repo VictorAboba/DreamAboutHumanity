@@ -12,7 +12,7 @@ import httpx
 
 from dah.bots.choices import faction_prefs, pick_artifacts, pick_research
 from dah.bots.client import ApiClient, ApiError
-from dah.bots.view import StateView, parse_state
+from dah.bots.view import StateView, parse_state, short_id
 
 log = logging.getLogger(__name__)
 
@@ -142,7 +142,13 @@ class Bot:
         """A research order when nothing is being researched (the active tech stays active between turns)."""
         if not self.branch_priority or view.researching is not None:
             return None
-        tech = pick_research(techs, self.branch_priority, self.tech_first)
+        from dah.bots.score import objective_branch, research_branches
+        first, branch = self.tech_first, objective_branch(view)
+        if branch is not None:      # stage 4: an open techs_branch objective puts its branch first
+            in_branch = {short_id(str(t.get("id"))) for t in techs.get("techs") or []
+                         if isinstance(t, dict) and short_id(str(t.get("branch", ""))) == branch}
+            first = tuple(t for t in first if t in in_branch)
+        tech = pick_research(techs, research_branches(view, self.branch_priority), first)
         return {"kind": "research", "tech": tech} if tech else None
 
     # --- server loop ---

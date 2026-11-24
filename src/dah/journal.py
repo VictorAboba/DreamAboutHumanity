@@ -24,7 +24,44 @@ EVENT_TYPES = frozenset({
     # espionage (private to their seats; full level only)
     "shade_hired", "mission_started", "spy_round", "intel_report", "intel_read", "shade_captured", "mission_end",
     "sabotage", "strike_cancelled", "feint", "feint_exposed", "mission_rejected",
+    # stage 4 (SCORING.md 9): objectives (private to the seat until game_over), war credit (to the fight's sides),
+    # great works (public), the reveal at the end
+    "objectives_dealt", "war_credit", "work_started", "work_completed", "objectives_revealed",
 })
+
+# Visibility of scoring events in a non-admin view of the journal (view_events)
+_SEAT_PRIVATE = {"objectives_dealt": ("seat",), "war_credit": ("killer", "victim")}
+
+
+# config fields that deal the secret objectives: admin-only until game_over
+_SECRET_CONFIG = ("seed", "objectives_salt")
+
+
+def view_events(events: list[dict[str, Any]], *, seat: str | None = None, admin: bool = False,
+                spectator: bool = False) -> list[dict[str, Any]]:
+    """A journal as a non-admin may read it (SCORING.md 5, 9). Until game_over: `game_created` loses the secret
+    `seed` and `objectives_salt` (also inside `config`); `objectives_dealt` and `war_credit` only for their seats (`seat`); `turn_resolved`
+    keeps only the seat's own `scores`/`score_parts` entry. A `spectator` (the delayed level) sees every score, never
+    objectives or war credit. After game_over (or for the admin) everything is shown."""
+    if admin or any(e.get("type") == "game_over" for e in events):
+        return [dict(e) for e in events]
+    out = []
+    for e in events:
+        kind = e.get("type")
+        if kind == "game_created":
+            e = {k: v for k, v in e.items() if k not in _SECRET_CONFIG}
+            if isinstance(e.get("config"), dict):
+                e["config"] = {k: v for k, v in e["config"].items() if k not in _SECRET_CONFIG}
+        elif kind in _SEAT_PRIVATE:
+            if spectator or seat is None or seat not in [e.get(f) for f in _SEAT_PRIVATE[kind]]:
+                continue
+        elif kind == "turn_resolved" and not spectator:
+            e = dict(e)
+            for field in ("scores", "score_parts"):
+                if isinstance(e.get(field), dict):
+                    e[field] = {k: v for k, v in e[field].items() if k == seat}
+        out.append(dict(e))
+    return out
 
 
 def read_events(path: str | Path) -> list[dict[str, Any]]:

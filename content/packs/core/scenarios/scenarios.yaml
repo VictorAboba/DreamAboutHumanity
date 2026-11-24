@@ -4,6 +4,11 @@
 # Stage 3 (core 0.4.0, SPY_AND_CONQUEST.md 1.1, 5): every scenario states its switches; no key means off.
 # slice3/slice2/quad4 play with espionage and conquest; blitz_test stays the plain slice flow for tests;
 # blitz_spy is the short all-on game for end-to-end tests.
+# Core 0.5.0 (measurement m6 fixes): fortification lasts while the army stays (combat.fortify_persists = 1).
+# Core 0.5.0 (SCORING.md 11): slice3/slice2/quad4 score all five sources with weight 1 and deal one secret objective;
+# blitz_test and blitz_spy keep the default score (territory only); blitz_score is the short all-on scoring game.
+# Core 0.5.0 balance (SCORING.md «Баланс core 0.5.0»): the scored scenarios count a tier-2 tech as 1 (science led
+# the winners' score) and 1 war point per 15 of killed units' price (war gave the winner 3-5%).
 - id: slice3
   name: Срез на троих
   map: mirror3
@@ -17,8 +22,13 @@
     max_chars: 800
   diplomacy_limits: {gifts_per_phase: 3, pact_proposals_per_phase: 3}
   systems: {espionage: true, conquest: true}
+  scoring: {territory: 1, science: 1, works: 1, war: 1, objectives: 1}
+  objectives: {dealt: 1}
   overrides:
     - {type: modify, target: combat.fortify_bonus, op: set, value: 0.15}
+    - {type: modify, target: combat.fortify_persists, op: set, value: 1}
+    - {type: modify, target: score.science.tier2, op: set, value: 1}
+    - {type: modify, target: score.war.per_point, op: set, value: 15}
 - id: slice2
   name: Дуэль
   map: mirror2
@@ -27,8 +37,13 @@
   phase_limits: {setup: 5m, negotiation_1: 12m, actions: 5m, negotiation_2: 5m}
   setup: {artifacts: draft, artifact_offer: 3, artifact_points: 3}
   systems: {espionage: true, conquest: true}
+  scoring: {territory: 1, science: 1, works: 1, war: 1, objectives: 1}
+  objectives: {dealt: 1}
   overrides:
     - {type: modify, target: combat.fortify_bonus, op: set, value: 0.15}
+    - {type: modify, target: combat.fortify_persists, op: set, value: 1}
+    - {type: modify, target: score.science.tier2, op: set, value: 1}
+    - {type: modify, target: score.war.per_point, op: set, value: 15}
 - id: quad4
   name: Четверо у Предела
   map: mirror4
@@ -42,8 +57,13 @@
     max_chars: 800
   diplomacy_limits: {gifts_per_phase: 3, pact_proposals_per_phase: 3}
   systems: {espionage: true, conquest: true}
+  scoring: {territory: 1, science: 1, works: 1, war: 1, objectives: 1}
+  objectives: {dealt: 1}
   overrides:
     - {type: modify, target: combat.fortify_bonus, op: set, value: 0.15}
+    - {type: modify, target: combat.fortify_persists, op: set, value: 1}
+    - {type: modify, target: score.science.tier2, op: set, value: 1}
+    - {type: modify, target: score.war.per_point, op: set, value: 15}
 - id: blitz_test
   name: Блиц для тестов
   map: mirror3
@@ -54,6 +74,7 @@
   systems: {espionage: false, conquest: false}
   overrides:
     - {type: modify, target: combat.fortify_bonus, op: set, value: 0.15}
+    - {type: modify, target: combat.fortify_persists, op: set, value: 1}
 - id: blitz_spy
   name: Блиц со шпионажем и завоеванием
   map: mirror3
@@ -64,3 +85,19 @@
   systems: {espionage: true, conquest: true}
   overrides:
     - {type: modify, target: combat.fortify_bonus, op: set, value: 0.15}
+    - {type: modify, target: combat.fortify_persists, op: set, value: 1}
+- id: blitz_score
+  name: Блиц со счётом
+  map: mirror3
+  factions: [covenant, litany, synclite]
+  turn_limit: 6
+  phase_limits: {setup: 5s, negotiation_1: 5s, actions: 5s, negotiation_2: 5s}
+  setup: {artifacts: draft, artifact_offer: 3, artifact_points: 3}
+  systems: {espionage: true, conquest: true}
+  scoring: {territory: 1, science: 1, works: 1, war: 1, objectives: 1}
+  objectives: {dealt: 1}
+  overrides:
+    - {type: modify, target: combat.fortify_bonus, op: set, value: 0.15}
+    - {type: modify, target: combat.fortify_persists, op: set, value: 1}
+    - {type: modify, target: score.science.tier2, op: set, value: 1}
+    - {type: modify, target: score.war.per_point, op: set, value: 15}

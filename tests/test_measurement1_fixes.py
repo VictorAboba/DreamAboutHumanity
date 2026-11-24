@@ -243,7 +243,8 @@ def test_bridge_passes_estimate_to_server_and_adds_examples_to_argument_errors()
 
 def test_goal_text_says_to_finish_after_game_over(tmp_path):
     config = slice_config(game_id="g1", scenario="core:slice2", seats=SEATS, seed=7)
-    assert "После game_over сразу заверши цель одним коротким итогом (счёт, место)" in goal_text(config, "A")
+    assert "После game_over или своего выбывания" in goal_text(config, "A")
+    assert "сразу заверши цель одним коротким итогом (счёт, место)" in goal_text(config, "A")
 
 
 # ---------------------------------------------------------------- issue 6: player presence and waker skip

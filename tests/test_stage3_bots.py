@@ -189,6 +189,31 @@ def test_hire_rules_and_rehire_delay():
     assert spy.hire_order(off, mem, from_turn=1, max_shades=1, alloy=99, min_alloy=0) is None
 
 
+
+def test_bots_save_for_their_first_shade():
+    """m6: rush and diplomat spent every alloy on the army and never reached 35; now the first Shade needs only its
+    price, and until then they keep back what next turn's net income lacks for it (from SHADE_FROM_TURN)."""
+    cost = spy.shade_cost()
+    mem = spy.SpyMemory()
+    poor = parse_state(make_state(turn=2, alloy=18), ME)                 # net alloy income 10
+    assert spy.shade_savings(poor, mem, from_turn=2, alloy=18) == cost - 10
+    assert spy.shade_savings(poor, mem, from_turn=2, alloy=5) == 5       # never more than there is
+    assert spy.shade_savings(poor, mem, from_turn=3, alloy=18) == 0      # too early
+    assert spy.shade_savings(poor, mem, from_turn=2, alloy=cost) == 0    # hires now instead
+    held = parse_state(make_state(turn=2, alloy=14, shades=[{"id": "s1", "status": "idle"}]), ME)
+    assert spy.shade_savings(held, mem, from_turn=2, alloy=14) == 0
+    late = parse_state(make_state(turn=9, alloy=14), ME)                 # 2 turns left: no mission would follow
+    assert spy.shade_savings(late, mem, from_turn=2, alloy=14) == 0
+    off = parse_state(make_state(turn=2, alloy=14, espionage=False), ME)
+    assert spy.shade_savings(off, mem, from_turn=2, alloy=14) == 0
+    for bot in (RushBot("A", 1), DiplomatBot("A", 1)):
+        orders = bot.action_orders(parse_state(make_state(turn=2, alloy=cost), ME), estimate_all(0.0))
+        assert {"kind": "hire_shade"} in orders, bot.name                   # the price is enough
+        saving = bot.action_orders(poor, estimate_all(0.0))
+        spent = sum(bv.UNIT_COST_ALLOY.get(str(o.get("unit", "")).split(":")[-1], 0) * int(o.get("count", 0))
+                    for o in saving if o.get("kind") == "recruit")
+        assert spent <= 18 - (cost - 10), bot.name                          # the savings are not recruited
+
 def test_mission_styles_of_the_bots():
     idle = [{"id": "s1", "status": "idle"}]
     rush = RushBot("A", 2).action_orders(parse_state(make_state(shades=idle, whisper=2), ME), estimate_all(0.9))

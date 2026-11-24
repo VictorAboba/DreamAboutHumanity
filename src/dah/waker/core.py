@@ -7,7 +7,11 @@ session answers such a message 409 `not_running`; then the wake falls back to `c
 A message does not reopen a completed goal, resume a session the user paused, or answer a request that blocks the
 work: a phase wake of a session in state `done` (or with a done goal), `paused` or `waiting` is a `continue` too.
 `--wake-mode continue` is the old way, `both` sends the message and the `continue`. After a phase wake the waker
-watches the player's own game calls (host-only presence fields) and records `wake_answered` or `wake_unanswered`."""
+watches the player's own game calls (host-only presence fields) and records `wake_answered` or `wake_unanswered`.
+
+An eliminated seat (`alive: false` before game_over) is done with the game: the waker sends it one notice (`ты выбыл,
+партия для тебя окончена; заверши цель одним итоговым сообщением`), stops waking it and watches its spend as after
+game_over (`after_game_over` figures, `post_game_finished` with `eliminated: true`)."""
 
 from __future__ import annotations
 
@@ -17,7 +21,7 @@ from typing import Any, Callable
 
 from dah.bridge.client import GameApiError, GameClient
 from dah.waker.dreamteam import DreamTeamClient, DtResponse
-from dah.waker.text import wake_text, wrap_up_text
+from dah.waker.text import eliminated_text, wake_text, wrap_up_text
 
 ACTIVE_PHASES = frozenset({"setup", "negotiation_1", "actions", "negotiation_2"})  # setup: stage 2
 POLL_SECONDS = 45
@@ -94,6 +98,8 @@ class Waker:
         # True when the first poll of this process already saw game_over (a waker started or restarted after the
         # match): the wrap-up was due to an earlier process, so it is not sent again.
         self.started_after_game_over = False
+        # True once the seat is eliminated (the game goes on without it): its end comes before game_over.
+        self.eliminated = False
         self.wake_mode = wake_mode
         self.ack_seconds = max(0.0, ack_seconds)
         # The last phase wake not yet answered: {at, turn, phase, seq, reason} (`at` on this process's clock).
@@ -141,6 +147,18 @@ class Waker:
                 self._report_spend(self._phase_key)
             self._pending_ack = None  # _check_ack above resolved it with the game_over info
             self._log("партия окончена")
+            return True
+        if info.get("alive") is False:  # eliminated: the game is over for this seat
+            self._over_info = info
+            self.eliminated = True
+            if self._phase_key is None:  # eliminated before this process: the notice was due to an earlier one
+                self.started_after_game_over = True
+                self._report_spend(None, after_game=True)
+            else:
+                self._report_spend(self._phase_key)
+            if self._pending_ack is not None:
+                self._ack_resolved("wake_unanswered", self._clock() - self._pending_ack["at"], eliminated=True)
+            self._log("место выбыло: партия для него окончена, больше не бужу")
             return True
         key = (info.get("turn"), info.get("phase"))
         self._observe(info)
@@ -438,11 +456,12 @@ class Waker:
         started = self._clock()
         cost_at_over = _cost(self._session)
         reason = _stopped(self._session)  # already stopped at game_over: neither wake it nor stop it again
-        where = {"phase": "game_over", "turn": self._over_info.get("turn"), "session_state": self._session_state}
+        end = "eliminated" if self.eliminated else "game_over"
+        where = {"phase": end, "turn": self._over_info.get("turn"), "session_state": self._session_state}
         if reason:
             self._telemetry("continue_skipped", {**where, "reason": "session_final"})
         elif self.started_after_game_over:
-            self._telemetry("continue_skipped", {**where, "reason": "started_after_game_over"})
+            self._telemetry("continue_skipped", {**where, "reason": f"started_after_{end}"})
         elif self.stop_on_game_over:
             self._stop()
         else:
@@ -491,6 +510,8 @@ class Waker:
                   "state": state, "polls": polls}
         if self.started_after_game_over:
             detail["started_after_game_over"] = True
+        if self.eliminated:
+            detail["eliminated"] = True
         self._telemetry("post_game_finished", detail)
         self._log(f"после партии: {reason or 'timeout'}, ещё потрачено "
                   f"{'?' if delta is None else f'${delta:.2f}'}")
@@ -507,7 +528,9 @@ class Waker:
         return True
 
     def _wrap_up(self) -> None:
-        where = {"reason": "game_over", "turn": self._over_info.get("turn"), "phase": "game_over"}
+        """The one wrap-up message: the result at game_over, or the elimination notice."""
+        end = "eliminated" if self.eliminated else "game_over"
+        where = {"reason": end, "turn": self._over_info.get("turn"), "phase": end}
         if self.budget_exhausted:
             self._telemetry("continue_skipped", {**where, "reason": "budget_exhausted"})
             return
@@ -519,7 +542,9 @@ class Waker:
                 raise
             self._log(f"whoami: {exc.code} {exc.message}")
         restart = self.wake_mode == "continue"  # a message never starts a stopped session just to wrap up
-        self._deliver(wrap_up_text(self._over_info, seat if isinstance(seat, str) else None), where,
+        text = (eliminated_text if self.eliminated else wrap_up_text)(self._over_info,
+                                                                      seat if isinstance(seat, str) else None)
+        self._deliver(text, where,
                       DtResponse(200, None, {"session": self._session}) if self._session else None,
                       restart=restart)
 

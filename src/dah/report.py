@@ -29,7 +29,7 @@ def _seat_total() -> dict[str, Any]:
     return {"calls": 0, "req_chars": 0, "resp_chars": 0, "host_calls": 0, "host_req_chars": 0,
             "host_resp_chars": 0, "submits": 0, "edits": 0, "p2_edits": 0, "validate_rejected": 0,
             "submit_rejected": 0, "submits_by_phase": {p: 0 for p in PHASE_ORDER}, "idle_resources": {},
-            "idle_units": 0, "no_orders_turns": [], "not_ready_phases": [], "spent_usd": None,
+            "idle_resource_turns": {}, "final_resources": None, "idle_units": 0, "no_orders_turns": [], "not_ready_phases": [], "spent_usd": None,
             "budget_exhausted_turn": None, "telemetry": {}, "spent_in_game_usd": None,
             "spent_after_game_usd": None, "in_game_s": None, "after_game_s": None, "post_game_watch_s": None,
             "wakes_sent": 0, "wakes_answered": 0, "wakes_unanswered": 0, "wake_answer_median_s": None,
@@ -163,7 +163,8 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
         return round(ev["ts"] - phase["opened_ts"], 3) if phase else None
 
     def turn_entry(turn: int) -> dict[str, Any]:
-        return turns.setdefault(turn, {"turn": turn, "scores": {}, "idle_resources": {}, "idle_units": {},
+        return turns.setdefault(turn, {"turn": turn, "scores": {}, "idle_resources": {}, "resources": {},
+                                       "idle_units": {},
                                        "no_orders": [], "spent_usd": {}, "techs_completed": {},
                                        "research_started": {}})
 
@@ -271,14 +272,22 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
             ready_now.discard(seat)
         elif kind == "turn_resolved":
             entry = turn_entry(ev["turn"])
+            if "score_parts" in ev:        # non-default scoring (SCORING.md 9): the breakdown of every seat
+                entry["score_parts"] = ev["score_parts"]
             entry.update(scores=ev.get("scores", {}), idle_resources=ev.get("idle_resources", {}),
-                         idle_units=ev.get("idle_units", {}), no_orders=ev.get("autopilot", []),
-                         state_hash=ev.get("state_hash"))
+                         resources=ev.get("resources", {}), idle_units=ev.get("idle_units", {}),
+                         no_orders=ev.get("autopilot", []), state_hash=ev.get("state_hash"))
             for s, res in entry["idle_resources"].items():
                 if s in report["totals"]:
-                    acc = report["totals"][s]["idle_resources"]
+                    # the stock left after the turn's orders, summed over turns (resource-turns, not a stock);
+                    # `idle_resources` is the old key of the same sum, kept for compatibility
+                    acc = report["totals"][s]["idle_resource_turns"]
                     for r, n in res.items():
                         acc[r] = acc.get(r, 0) + n
+                    report["totals"][s]["idle_resources"] = dict(acc)
+            for s, res in entry["resources"].items():      # journals since m6: the stock at the end of the turn
+                if s in report["totals"]:
+                    report["totals"][s]["final_resources"] = dict(res)
             for s, n in entry["idle_units"].items():
                 if s in report["totals"]:
                     report["totals"][s]["idle_units"] += n
@@ -338,7 +347,13 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
             over_ts = ev["ts"]
             report["result"] = {"winners": ev.get("winners", []), "reason": ev.get("reason"),
                                 "scores": ev.get("scores", {}), "turn": ev.get("turn")}
+            for key in ("score_parts", "objectives", "winners_open"):
+                if key in ev:
+                    report["result"][key] = ev[key]
     report["turns"] = [turns[t] for t in sorted(turns)]
+    scoring = _scoring(events, report)
+    if scoring is not None:
+        report["scoring"] = scoring
     in_game_s = round(over_ts - first_open_ts, 3) if over_ts is not None and first_open_ts is not None else None
     report["in_game_s"] = in_game_s
     for seat, totals in report["totals"].items():
@@ -365,6 +380,145 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
         if isinstance(detail.get("duration_s"), (int, float)):
             totals["post_game_watch_s"] = float(detail["duration_s"])
     return report
+
+
+SCORE_LABELS = {"territory": "зем", "science": "нау", "works": "стр", "war": "вой", "objectives": "цель"}
+
+
+def _scoring(events: list[dict[str, Any]], report: dict[str, Any]) -> dict[str, Any] | None:
+    """Stage 4 (SCORING.md 9), journals with a non-default scoring only: per seat the final `score_parts`, the revealed
+    `objectives` and `strategy_profile` (share of each source in the final total); `reveal_flip` (did the objectives
+    change the winners); `war_pairs` [{killer, victim, value, defense_value, fights}]; `works` {started, completed,
+    lost} per seat (lost: a completed work whose province was captured later); `fights` per turn (war_credit events
+    and attacks suffered by each seat). Metrics are for the checking side (decision 18): the game only journals."""
+    created = next((e for e in events if e.get("type") == "game_created"), {})
+    scored = bool(created.get("scoring")) or any(e.get("type") in ("war_credit", "work_started", "objectives_dealt")
+                                                 or "score_parts" in e for e in events)
+    if not scored:
+        return None
+    result = report.get("result") or {}
+    parts = result.get("score_parts") or {}
+    finals = result.get("scores") or {}
+    seats: dict[str, Any] = {}
+    for seat in report["seats"]:
+        p = parts.get(seat) or {}
+        total = sum(p.values())
+        seats[seat] = {"score_parts": p, "objectives": (result.get("objectives") or {}).get(seat, []),
+                       "strategy_profile": {k: round(v / total, 3) for k, v in p.items()} if total > 0 else {},
+                       "final": finals.get(seat)}
+    flip = None
+    if result.get("winners_open") is not None and result.get("reason") == "turn_limit":
+        flip = sorted(result["winners_open"]) != sorted(result.get("winners") or [])
+    revealed = {(e.get("seat"), e.get("id")): e for e in events if e.get("type") == "objectives_revealed"}
+    for seat, t in seats.items():
+        t["objectives"] = [{**o, **{k: revealed[(seat, o.get("id"))][k] for k in ("counted", "evidence")
+                                    if k in revealed.get((seat, o.get("id")), {})}} for o in t["objectives"]]
+    pairs: dict[tuple[str, str], dict[str, Any]] = {}
+    fights: dict[int, dict[str, Any]] = {}
+    works: dict[str, dict[str, int]] = {s: {"started": 0, "completed": 0, "lost": 0} for s in report["seats"]}
+    done: dict[str, str] = {}        # province -> seat whose completed work stands there
+    for e in events:
+        kind = e.get("type")
+        if kind == "war_credit":
+            key = (e["killer"], e["victim"])
+            row = pairs.setdefault(key, {"killer": key[0], "victim": key[1], "value": 0, "defense_value": 0,
+                                         "fights": 0})
+            row["value"] += e.get("value", 0)
+            row["fights"] += 1
+            if e.get("defender"):
+                row["defense_value"] += e.get("value", 0)
+            f = fights.setdefault(e.get("turn", 0), {"turn": e.get("turn", 0), "credits": 0, "attacked": {}})
+            f["credits"] += 1
+            if e.get("defender"):
+                f["attacked"][e["killer"]] = f["attacked"].get(e["killer"], 0) + 1
+        elif kind == "work_started" and e.get("seat") in works:
+            works[e["seat"]]["started"] += 1
+        elif kind == "work_completed" and e.get("seat") in works:
+            works[e["seat"]]["completed"] += 1
+            done[e["province"]] = e["seat"]
+        elif kind == "province_captured" and done.get(e.get("province")) in works:
+            works[done.pop(e["province"])]["lost"] += 1
+    total_war = sum(r["value"] for r in pairs.values())
+    return {"seats": seats, "reveal_flip": flip, "war_pairs": sorted(pairs.values(), key=lambda r: (r["killer"],
+                                                                                                    r["victim"])),
+            "defense_share": round(sum(r["defense_value"] for r in pairs.values()) / total_war, 3) if total_war
+            else None,
+            "works": works, "fights": [fights[t] for t in sorted(fights)],
+            "gift_share_of_score_spend": _gift_share(events, list(report["seats"]))}
+
+
+GIFT_WINDOW = 3     # turns: a gift counts towards the recipient's score spend of this turn and the next two
+
+
+def _gift_share(events: list[dict[str, Any]], seat_ids: list[str]) -> dict[str, float | None]:
+    """Per seat: the share of what it paid for great works and research (journaled `cost` of `work_started` and
+    `tech_completed`) that gifts received in the last GIFT_WINDOW turns covered (each gift counted once, all
+    resources summed). None: no such spend (or a journal from before the costs were journaled). Report only
+    (decision 18): the game neither knows nor uses it."""
+    gifts: dict[str, list[list[int]]] = {s: [] for s in seat_ids}      # recipient -> [[turn, amount left]]
+    spend: dict[str, list[int]] = {s: [0, 0] for s in seat_ids}         # [spent, covered by gifts]
+    for e in events:
+        kind = e.get("type")
+        if kind == "gift" and e.get("to") in gifts:
+            amount = sum(n for n in (e.get("resources") or {}).values() if isinstance(n, int))
+            gifts[e["to"]].append([int(e.get("turn") or 0), amount])
+        elif kind in ("work_started", "tech_completed") and e.get("seat") in spend and "cost" in e:
+            cost = e["cost"] if isinstance(e["cost"], int) else sum((e["cost"] or {}).values())
+            turn = int(e.get("turn") or 0)
+            row = spend[e["seat"]]
+            row[0] += cost
+            need = cost
+            for g in gifts[e["seat"]]:
+                if need <= 0:
+                    break
+                if turn - GIFT_WINDOW < g[0] <= turn and g[1] > 0:
+                    used = min(need, g[1])
+                    g[1] -= used
+                    need -= used
+                    row[1] += used
+    return {s: (round(c / p, 3) if p else None) for s, (p, c) in spend.items()}
+
+
+def _score_lines(report: dict[str, Any], nick: dict[str, str]) -> list[str]:
+    """«Аргос 21 = зем 10 + нау 4 + стр 2 + вой 2 + цель 3 (forge_lord ✓)» per seat."""
+    sc = report.get("scoring")
+    if not sc:
+        return []
+    lines = ["", "ОЧКИ (итог по источникам):"]
+    for seat, t in sc["seats"].items():
+        body = " + ".join(f"{SCORE_LABELS.get(k, k)} {v}" for k, v in t["score_parts"].items()) or "—"
+        objs = ", ".join(_objective_line(o, nick) for o in t["objectives"])
+        lines.append(f"{nick.get(seat, seat)} {t['final'] if t['final'] is not None else '—'} = {body}"
+                     + (f" ({objs})" if objs else ""))
+    if sc.get("reveal_flip") is not None:
+        lines.append(f"Цели поменяли победителя: {'да' if sc['reveal_flip'] else 'нет'}")
+    for row in sc["war_pairs"]:
+        lines.append(f"война: {nick.get(row['killer'], row['killer'])} ← {nick.get(row['victim'], row['victim'])} "
+                     f"{row['value']} (в обороне {row['defense_value']}), боёв {row['fights']}")
+    if sc.get("defense_share") is not None:
+        lines.append(f"доля обороны в очках войны: {round(100 * sc['defense_share'])}%")
+    works = "; ".join(f"{nick.get(s, s)} {w['started']}/{w['completed']}/{w['lost']}"
+                      for s, w in sc["works"].items() if any(w.values()))
+    if works:
+        lines.append(f"великие стройки (начато/достроено/потеряно): {works}")
+    gifts = "; ".join(f"{nick.get(s, s)} {round(100 * v)}%" for s, v in (sc.get("gift_share_of_score_spend") or {}).items()
+                      if v)
+    if gifts:
+        lines.append(f"подношения в цене строек и исследований получателя (за 3 хода): {gifts}")
+    return lines
+
+
+def _objective_line(o: dict[str, Any], nick: dict[str, str]) -> str:
+    """«forge_lord +3 ✓ (2/2)», «kingbreaker → Ник ✗ (0/1)»; «не в счёт» for an eliminated seat's objective."""
+    target = f" → {nick.get(o['target'], o['target'])}" if o.get("target") else ""
+    ev = o.get("evidence") or {}
+    have = f" ({ev['have']}/{ev['need']})" if "have" in ev and "need" in ev else ""
+    counted = " не в счёт" if o.get("met") and o.get("counted") is False else ""
+    return f"{_short(o['id'])}{target} +{o.get('points', 0)} {'✓' if o.get('met') else '✗'}{have}{counted}"
+
+
+def _parts_short(parts: dict[str, Any]) -> str:
+    return " ".join(f"{SCORE_LABELS.get(k, k)} {v}" for k, v in parts.items())
 
 
 def _add(acc: dict[str, int], amounts: dict[str, Any]) -> None:
@@ -446,6 +600,11 @@ def _stage3_line(t: dict[str, Any]) -> str:
             f"бунтов {t['revolts']}, притязаний {t['claims']}, политика не по средствам {t['policy_unaffordable']}")
 
 
+def _amounts(amounts: dict[str, Any]) -> str:
+    """`alloy 12 provisions 5` (short resource ids), or `0`."""
+    return " ".join(f"{r.rsplit(':', 1)[-1]} {n}" for r, n in sorted(amounts.items())) or "0"
+
+
 def render_report(report: dict[str, Any]) -> str:
     """Russian text version of build_report()."""
     nick = {s: info["nick"] for s, info in report["seats"].items()}
@@ -465,7 +624,8 @@ def render_report(report: dict[str, Any]) -> str:
     lines.append("МЕСТА:")
     for seat, t in report["totals"].items():
         info = report["seats"][seat]
-        idle_res = " ".join(f"{r.rsplit(':', 1)[-1]} {n}" for r, n in sorted(t["idle_resources"].items())) or "0"
+        idle_res = _amounts(t.get("idle_resource_turns", t["idle_resources"]))
+        final_res = "—" if t.get("final_resources") is None else _amounts(t["final_resources"])
         by_phase = " / ".join(str(t["submits_by_phase"][p]) for p in PHASE_ORDER)
         not_ready = ", ".join(f"{n} {PHASE_SHORT.get(p, p)}" for n, p in t["not_ready_phases"]) or "—"
         money = "—" if t["spent_usd"] is None else f"${t['spent_usd']:.2f}"
@@ -475,8 +635,9 @@ def render_report(report: dict[str, Any]) -> str:
             f"{t['resp_chars']} симв.; служебных вызовов (waker) {t['host_calls']}; подач {t['submits']} "
             f"(подач в П1 / Д / П2: {by_phase}), правок "
             f"{t['edits']}, изменений в П2 {t['p2_edits']}; отклонено: validate "
-            f"{t['validate_rejected']}, submit {t['submit_rejected']}; простой: ресурсы {idle_res}, юниты-ходы "
-            f"{t['idle_units']}; не подал приказов в ходах {t['no_orders_turns'] or '—'}; не нажал готово "
+            f"{t['validate_rejected']}, submit {t['submit_rejected']}; простой: остаток ресурсов после приказов, "
+            f"сумма по ходам (ресурс-ходы) {idle_res}, юниты-ходы {t['idle_units']}; запасы к концу партии "
+            f"{final_res}; не подал приказов в ходах {t['no_orders_turns'] or '—'}; не нажал готово "
             f"(закрыто по таймеру): {not_ready}; деньги {money}{_money_split(t)}"
             + (f", кончились на ходу {t['budget_exhausted_turn']}" if t["budget_exhausted_turn"] else "")
             + _wakes(t) + _diplomacy(t) + f"; телеметрия: {telemetry}")
@@ -485,6 +646,7 @@ def render_report(report: dict[str, Any]) -> str:
         lines.append("ШПИОНАЖ И ЗАВОЕВАНИЕ:")
         for seat, t in report["stage3"].items():
             lines.append(f"{seat} {nick.get(seat, seat)}: " + _stage3_line(t))
+    lines += _score_lines(report, nick)
     lines.append("")
     lines.append("ФАЗЫ (до первого вызова / первой принятой подачи / ready; вызовы; правки):")
     for ph in report["phases"]:
@@ -496,12 +658,16 @@ def render_report(report: dict[str, Any]) -> str:
         lines.append(head + ("; " + "; ".join(parts) if parts else "")
                      + (f"; деньги к концу фазы: {money}" if money else ""))
     lines.append("")
-    lines.append("ХОДЫ (счёт; деньги нарастающим итогом):")
+    lines.append("ХОДЫ (счёт [по источникам]; запасы к концу хода; деньги нарастающим итогом):")
     for t in report["turns"]:
-        sc = ", ".join(f"{nick.get(s, s)} {n}" for s, n in sorted(t["scores"].items()))
+        by_src = t.get("score_parts") or {}
+        sc = ", ".join(f"{nick.get(s, s)} {n}" + (f" [{_parts_short(by_src[s])}]" if by_src.get(s) else "")
+                       for s, n in sorted(t["scores"].items()))
         money = ", ".join(f"{nick.get(s, s)} ${v:.2f}" for s, v in sorted(t["spent_usd"].items()))
         techs = "; ".join(f"{nick.get(s, s)} {', '.join(_short(x) for x in v)}"
                           for s, v in sorted(t.get("techs_completed", {}).items()))
-        lines.append(f"ход {t['turn']}: {sc or '—'}" + (f"; изучено: {techs}" if techs else "")
+        stock = "; ".join(f"{nick.get(s, s)} {_amounts(v)}" for s, v in sorted(t.get("resources", {}).items()))
+        lines.append(f"ход {t['turn']}: {sc or '—'}" + (f"; запасы: {stock}" if stock else "")
+                     + (f"; изучено: {techs}" if techs else "")
                      + (f"; деньги: {money}" if money else ""))
     return "\n".join(lines)

@@ -116,6 +116,9 @@ STATS: tuple[StatSpec, ...] = (
     StatSpec("command_points", int, 0, 10, 3),
     StatSpec("combat.fortify_bonus", float, 0.0, 1.0, 0.25),
     StatSpec("combat.counter_mul", float, 1.0, 3.0, 1.5),
+    # core 0.5.0 (m6 fixes): 1 = a fortification lasts while the owner keeps units in the province (lost when it is
+    # emptied or captured); 0 = one turn only, as before. Never seeded: stats tables (hashes) of older packs stay.
+    StatSpec("combat.fortify_persists", int, 0, 1, 0, seeded=False),
     StatSpec("starvation.loss_frac", float, 0.0, 1.0, 0.10),
     # stage 2 (TECH_AND_SETUP.md): movement, abilities, techs, province characteristics
     StatSpec(MOVE_STAT, int, 1, 5, DEFAULT_UNIT_MOVE),   # default: default_unit_move()
@@ -171,6 +174,44 @@ STAGE3_STATS: tuple[StatSpec, ...] = (
     _s3("conquest.loot_cooldown", int, 0, 20, 4, _C),
 )
 STATS = STATS + STAGE3_STATS
+
+# Stage 4 (docs/SCORING.md 1, 3): sources of victory points in a fixed order. A source with weight 0 is off like a
+# switchable system: its "system" is `scoring.<src>` (requires_system, stats), so its content and stats leave no trace.
+SCORE_SOURCES: tuple[str, ...] = ("territory", "science", "works", "war", "objectives")
+TURN_SOURCES: tuple[str, ...] = SCORE_SOURCES[:4]          # the turn score; objectives count only in the final total
+DEFAULT_SCORING: dict[str, int] = {"territory": 1}          # no `scoring` key: territory only, as before stage 4
+SCORE_WEIGHT_MAX = 5
+SCORING_SYSTEMS: tuple[str, ...] = tuple(f"scoring.{src}" for src in SCORE_SOURCES)
+
+# Kinds of secret objectives (SCORING.md 2.5): behaviour in engine/scoring.py, numbers in the pack.
+# kind -> {"params": {name: "province_type" | "branch" | "count"}, "target": "none" | "seat"}
+OBJECTIVE_KINDS: dict[str, dict[str, Any]] = {
+    "hold_type": {"params": {"type": "province_type", "count": "count"}, "target": "none"},
+    "hold_count": {"params": {"count": "count"}, "target": "none"},
+    "hold_foreign": {"params": {"count": "count"}, "target": "none"},
+    "capital_other": {"params": {"count": "count"}, "target": "none"},
+    "techs_branch": {"params": {"branch": "branch", "count": "count"}, "target": "none"},
+    "great_work": {"params": {"count": "count"}, "target": "none"},
+    "rival_capital_taken": {"params": {}, "target": "seat"},
+}
+
+
+def _s4(pattern: str, lo: float, hi: float, default: float | None, src: str) -> StatSpec:
+    return StatSpec(pattern, int, lo, hi, default, seeded=False, system=f"scoring.{src}")
+
+
+SCORING_STATS: tuple[StatSpec, ...] = (
+    _s4("score.territory.province", 0, 5, 1, "territory"),
+    _s4("score.territory.capital", 0, 10, 3, "territory"),
+    *(_s4(f"score.science.tier{t}", 0, 5, t, "science") for t in (1, 2, 3, 4)),
+    _s4("score.science.branch", 0, 5, 1, "science"),
+    _s4("building.*.score", 0, 10, None, "works"),
+    _s4("score.war.per_point", 5, 200, 30, "war"),
+    _s4("score.war.cap_per_victim", 0, 20, 3, "war"),
+    _s4("score.war.cap", 0, 20, 5, "war"),
+    _s4("score.war.defense_pct", 0, 100, 50, "war"),
+)
+STATS = STATS + SCORING_STATS
 
 _ID = r"[a-z0-9_]+:[a-z0-9_]+"
 

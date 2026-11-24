@@ -7,19 +7,25 @@ bot by its seed), marches interior armies towards the border and fortifies what 
 hasty attack if CP allow.
 Stage 2: it prefers aggressive factions (captains, growth, synclite), artifacts that give armies, and researches war
 first (then logistics).
-Stage 3 (docs/SPY_AND_CONQUEST.md section 7): from turn 2 it hires one Shade when it has 35 alloy (before recruiting),
+Stage 3 (docs/SPY_AND_CONQUEST.md section 7): from turn 2 it hires its first Shade as soon as it has the price
+(before recruiting; until then it keeps back what next turn's income lacks for it: m6, hired by turn 3-4, not 5-8)
+and a replacement for a lost one with 35 alloy;
 sabotages the province it attacks when S >= 2 (an enemy one next to it otherwise), else watches its next target
 (observe, 2 rounds; a province the fog hides first). In negotiation_2 a found window (its strike landed) gets a hasty
 attack when CP allow. In 30% of turns it writes one false entry at a neighbour it does not attack. Fates: an enemy
 capital it attacks gets a directive (subjugate when the provisions cover it, else exterminate); the policy is
 subjugate while 15 provisions are free; it subjugates the occupations it can pay for and raids those it could not pay
 for within 2 turns; one unit stays in every occupation.
+Stage 4 (docs/SCORING.md section 10, dah.bots.score): war scores by itself; while the war cap is not reached a seat's
+province gets a small bonus over a neutral one. Its objective makes the provinces that advance it preferred targets
+(one unit stays in those held), puts its branch first in research, or (great_work) has it save for the Monument
+(recruits only what the net income leaves) and lay it.
 """
 
 from __future__ import annotations
 
 from dah.bots import conquest as cq
-from dah.bots import spy
+from dah.bots import score, spy
 from dah.bots.base import Bot, Estimator, Order
 from dah.bots.tactics import (
     Reserved,
@@ -38,6 +44,7 @@ from dah.bots.tactics import (
 from dah.bots.view import (
     BUILD_RESOURCE,
     BUILDING_COST_ALLOY,
+    FOOD_RESOURCE,
     UNIT_COST_ALLOY,
     Province,
     StateView,
@@ -51,10 +58,11 @@ GARRISONS = (0, 1, 2)  # units the capital keeps: one of these per bot (its seed
 P2_NEW_ATTACK_CP = 2  # registry default of p2.cost.new_attack
 UNIQUE_PER_TURN = 2  # unique units recruited per turn at most
 SHADE_FROM_TURN = 2
-SHADE_MIN_ALLOY = 35  # hires its Shade only with this much alloy (25 for the Shade, the rest for the army)
+SHADE_MIN_ALLOY = 35  # a replacement Shade; the first needs only its price, saved for (m6: 35 was never reached)
 OBSERVE_ROUNDS = 2
 SABOTAGE_ROUNDS = 2
 FEINT_CHANCE = 0.3
+MONUMENT = "monument"   # stage 4: built only for a great_work objective
 WINDOW_WIN = 0.5  # a hasty attack into a struck province needs this estimate (the strike is not counted in it)
 
 __all__ = ["RushBot", "advance", "best_attack", "distance_to_foreign"]
@@ -72,15 +80,23 @@ class RushBot(Bot):
         self.garrison = self.rng.choice(GARRISONS)
 
     def action_orders(self, view: StateView, estimate: Estimator) -> list[Order]:
-        keep = garrison(capital_of(view), self.garrison)
+        keep = merge_reserved(garrison(capital_of(view), self.garrison), score.objective_garrison(view))
         if view.conquest:
             keep = merge_reserved(keep, cq.occupation_garrison(view))
-        moves = plan_moves(view, estimate, WIN_THRESHOLD, self.rng, keep)
+        moves = plan_moves(view, estimate, WIN_THRESHOLD, self.rng, keep, bonus=score.attack_bonus(view, war=True))
         extra, food, alloy = self._stage3(view, moves, keep)
         plan = spy.food_view(view, food, alloy)
+        works: list[Order] = []
+        saving = None
+        if score.wants_work(plan):      # stage 4: only its objective makes it save for and build a great work
+            works, plan = score.lay_works(plan, [(MONUMENT, True)], FOOD_TURNS)
+            saving = None if works else score.saving_rate(plan, MONUMENT, FOOD_TURNS)
+            if saving is not None:
+                plan = spy.food_view(plan, plan.resource(FOOD_RESOURCE))
+        cap = None if saving is None else (plan.net_income or {}).get(FOOD_RESOURCE, 0) - saving
         orders = recruit_orders(plan, plan.resource(BUILD_RESOURCE), FOOD_TURNS, farm_first=True,
-                                unique_max=UNIQUE_PER_TURN)
-        return orders + moves + fortify_orders(view, moves) + extra
+                                unique_max=UNIQUE_PER_TURN, food_cap=cap)
+        return works + orders + moves + fortify_orders(view, moves) + extra
 
     def _stage3(self, view: StateView, moves: list[Order], keep: Reserved) -> tuple[list[Order], int, int]:
         """Conquest and espionage orders of the actions phase: (orders, provisions held, alloy held)."""
@@ -94,7 +110,7 @@ class RushBot(Bot):
             out += directives + fates + ([policy] if policy else [])
         if view.espionage is not None:
             hire = spy.hire_order(view, self.memory, from_turn=SHADE_FROM_TURN, max_shades=1, alloy=alloy,
-                                  min_alloy=SHADE_MIN_ALLOY)
+                                  min_alloy=0 if spy.first_shade(view, self.memory) else SHADE_MIN_ALLOY)
             if hire is not None:
                 out.append(hire)
                 alloy -= spy.shade_cost()
@@ -103,6 +119,8 @@ class RushBot(Bot):
                 out.append(mission[0])
                 alloy -= mission[1]
                 food -= mission[2]
+            if hire is None:
+                alloy -= spy.shade_savings(view, self.memory, from_turn=SHADE_FROM_TURN, alloy=alloy)
             if self.rng.random() < FEINT_CHANCE:
                 attacked = {view.provinces[str(m["to"])].owner for m in moves if str(m["to"]) in view.provinces}
                 feint = spy.feint_order(view, keep, moves, lambda t: t.owner not in attacked, self.rng)
@@ -174,13 +192,15 @@ class RushBot(Bot):
 
 
 def recruit_orders(view: StateView, alloy: int, food_turns: int, *, farm_first: bool,
-                   unique_max: int = 0) -> list[Order]:
+                   unique_max: int = 0, food_cap: int | None = None) -> list[Order]:
     """Recruit the most `alloy` pays for and the food keeps fed for `food_turns` turns; with `farm_first`, when food
     rather than alloy is the limit, lay a farm first (an agri world first). Up to `unique_max` of the faction's unique
-    unit come first, assault with the rest."""
+    unit come first, assault with the rest. `food_cap` (stage 4, saving for a work): at most this much new upkeep."""
     orders: list[Order] = []
     count = alloy // UNIT_COST_ALLOY[RECRUIT_UNIT]
     feedable = view.feedable(RECRUIT_UNIT, food_turns)
+    if food_cap is not None:
+        feedable = max(0, min(feedable if feedable is not None else food_cap, food_cap))
     if feedable is not None and feedable < count:
         site = farm_site(view)
         if farm_first and site is not None and alloy >= BUILDING_COST_ALLOY["farm"]:

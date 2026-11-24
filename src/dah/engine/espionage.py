@@ -354,6 +354,10 @@ def _ledger(snap: GameState, rs: Ruleset, seed: int | str, spy: str, target: str
     truth = {"seat": target, "stock": stock, "techs": list(player.techs), "researching": research,
              "progress": player.research.get(research, 0) if research else None, "artifacts": list(player.artifacts),
              "whisper": whisper(rs, key), "mirrors": mirrors(rs, key), "shades": len(player.shades)}
+    if not rs.default_scoring:
+        # the target's exact turn score by source, without its secret objective (SCORING.md 5, decision 24)
+        from .scoring import score_parts
+        truth["score_parts"] = score_parts(snap, rs)[target]
     facts = {**truth, "stock": {r: honest_range(seed, spy, target, "stock", r, n, width) for r, n in stock.items()}}
     if research:
         facts["progress"] = honest_range(seed, spy, target, "research", research, truth["progress"], width)
@@ -954,6 +958,11 @@ def report_text(report: Mapping[str, Any], rs: Ruleset, state: GameState, me: st
             body += "; артефакты: " + ", ".join(rs.artifacts[a].name if a in rs.artifacts else a
                                                for a in facts["artifacts"])
         body += f"; S{facts.get('whisper')} C{facts.get('mirrors')}; Теней {facts.get('shades')}"
+        if facts.get("score_parts") is not None:
+            from .scoring import LABELS
+            parts = facts["score_parts"]
+            body += (f"; счёт {sum(parts.values())} [" + " ".join(f"{LABELS[k]} {v}" for k, v in parts.items())
+                     + "] без цели")
         lines.append(body)
     else:
         lines += _orders_body(rs, state, facts, me, full)

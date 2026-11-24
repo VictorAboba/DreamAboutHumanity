@@ -1,0 +1,38 @@
+- id: drill
+  name: Муштра
+  branch: war
+  tier: 1
+  cost: 5
+  effects:
+    - {effect: modify, target: command_points, op: add, value: 1}
+    - {effect: modify, target: conquest.claim_turns, op: add, value: 2}
+- id: plunder
+  name: Грабёж
+  branch: spoils
+  tier: 1
+  cost: 5
+  effects:
+    - {effect: modify, target: disposition.raid.loot_mul, op: mul, value: 2}
+- id: veil
+  name: Завеса
+  branch: war
+  tier: 1
+  cost: 5
+  requires_system: espionage
+  effects:
+    - {effect: modify, target: spy.whisper, op: add, value: 1}
+- id: glass
+  name: Дознаватель
+  branch: war
+  tier: 1
+  cost: 5
+  requires_system: espionage
+  effects:
+    - {effect: modify, target: spy.mirrors, op: add, value: 1}
+    - {effect: modify, target: spy.attribution.base, op: add, value: 0.15}
+- id: rite
+  name: Обряд пепла
+  branch: war
+  tier: 2
+  cost: 5
+  factions: [ash]

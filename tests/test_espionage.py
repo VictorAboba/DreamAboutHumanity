@@ -602,6 +602,23 @@ def _strike(rs, st, a, extra=None):
                       lambda o: any(r["outcome"] == "struck" for r in rounds_of(o[1], "A")))
 
 
+
+def test_sabotage_denies_a_kept_fortification_for_its_turn_only():
+    """combat.fortify_persists: the strike's deny_fortify takes the fortification away in its turn's battles; it is
+    back the turn after (the army never left)."""
+    rs = ruleset("tri_spy_hold")
+    st = board(rs, {"A1": {MIL: 3}, "A2": {MIL: 3}, "B1": {MIL: 3}, "B2": {MIL: 2}, "C1": {MIL: 3}})
+    st.provinces["B2"].fortified = True                        # fortified earlier, kept since
+    st.players["A"].techs = ["t3:veil"]
+    give_shade(st, "A")
+    a = book(st, rs, "A", [spy(1, "sabotage", "B2", 2), mv("A2", "B2", 1)])
+    seed, (new, rep) = _strike(rs, st, a)
+    after, report = resolve(new, {"A": a}, rs, seed)
+    battle = next(e for e in kinds(report, "battle") if e["province"] == "B2")
+    assert not battle["fortified"] and not battle["sides"][0]["won"]     # denied in this turn; the attack failed
+    assert after.provinces["B2"].owner == "B" and after.provinces["B2"].fortified     # kept: back next turn
+    assert resolve(after, {}, rs, seed)[0].provinces["B2"].fortified
+
 def test_sabotage_strikes_in_this_resolution(rs):
     st = board(rs, {"A1": {MIL: 3}, "A2": {MIL: 3}, "B1": {MIL: 3}, "B2": {MIL: 2}, "C1": {MIL: 3}})
     st.players["A"].techs = ["t3:veil"]

@@ -13,6 +13,7 @@ from typing import Any, Mapping, Sequence
 
 from . import espionage as esp
 from . import registry
+from . import scoring as sc_
 from .catalog import ABILITY_TEXT, describe, describe_effect
 from .conquest import ordered_dispositions
 from .content import DEFAULT_SETUP_LIMIT, Ruleset
@@ -53,6 +54,8 @@ ALIASES = {
     "claims": "conquest", "espionage": "spying", "spies": "spying", "spy": "spying", "intel": "spying",
     "feint": "spying", "feints": "spying", "shade": "spying", "shades": "spying", "шпионаж": "spying",
     "тени": "spying", "тень": "spying",
+    "score": "victory", "scoring": "victory", "objectives": "victory", "objective": "victory", "очки": "victory",
+    "цели": "victory", "цель": "victory", "счёт": "victory", "works": "victory", "стройки": "victory",
 }
 
 
@@ -227,10 +230,23 @@ def _abilities(rs: Ruleset) -> Section | None:
     return Section("abilities", core, "\n".join(lines))
 
 
+def _type_names(rs: Ruleset, types: Sequence[str]) -> str:
+    return ", ".join(rs.province_types[x].name if x in rs.province_types else x for x in types)
+
+
 def _building_line(rs: Ruleset, b: str, full: bool) -> str:
     d = rs.buildings[b]
     line = (f"- {_short(b)} «{d.name}»: {_amounts(rs, rs.building_cost(b))}, {d.build_turns} ход(а)"
             + (f", доход +{_amounts(rs, d.income)}" if d.income else "") + (", позволяет найм" if d.recruit else ""))
+    if d.score and sc_.on(rs, "works"):
+        # a great work (SCORING.md 2.3): its points in the core line, where and how many in the topic
+        line += f", великая стройка +{int(rs.stat(f'building.{b}.score'))} очк."
+        if full and d.allowed_types:
+            line += " (только " + _type_names(rs, d.allowed_types) + ")"
+        if full and d.max_per_owner:
+            line += f"; не больше {d.max_per_owner} у игрока (готовые и строящиеся)"
+    elif full and d.allowed_types:
+        line += "; только " + _type_names(rs, d.allowed_types)
     if full:
         effects = [describe_effect(rs, e) for e in (*d.province_mods, *d.owner_mods)]
         if effects:
@@ -252,8 +268,18 @@ def _buildings(rs: Ruleset) -> Section:
     return Section("buildings", core, detail if detail != core else "", short)
 
 
+def _fortify_text(rs: Ruleset, short: bool) -> str:
+    """The fortify rule as this game has it: one turn (core 0.4.0 and older) or lasting (combat.fortify_persists)."""
+    bonus = f'+{rs.stat("combat.fortify_bonus"):.0%}'
+    if not rs.stat("combat.fortify_persists"):
+        return f"оборона {bonus}, если " + ("никто не уходит." if short else "из провинции никто не уходит.")
+    if short:
+        return f"оборона {bonus}; держится, пока там твои войска (часть может уйти)."
+    return (f"оборона {bonus}. Один приказ — и укрепление держится, пока в провинции есть твои войска: часть может "
+            "уйти, найм на месте его не снимает. Снимается, если все ушли или провинцию взяли.")
+
+
 def _orders(rs: Ruleset) -> Section:
-    st = rs.stat
     errors = ["NOT_ADJACENT", "NOT_OWNER", "NOT_ENOUGH_UNITS", "NOT_ENOUGH_RESOURCES", "NO_RECRUIT_BUILDING",
               "ALREADY_BUILT", "PHASE_LOCKED", "NOT_ENOUGH_CP", "UNKNOWN_ID", "INVALID"]
     research = ""
@@ -263,6 +289,13 @@ def _orders(rs: Ruleset) -> Section:
         errors += ["NOT_AVAILABLE", "ALREADY_RESEARCHED"]
     elif rs.units and any(d.requires_tech or d.requires_building or d.factions for d in rs.units.values()):
         errors.append("NOT_AVAILABLE")
+    limits = []
+    if any(d.max_per_owner for d in rs.buildings.values()):
+        limits.append("ALREADY_BUILT — и предел здания на игрока («у тебя уже есть N из N»)")
+    if any(d.allowed_types for d in rs.buildings.values()):
+        if "NOT_AVAILABLE" not in errors:
+            errors.append("NOT_AVAILABLE")
+        limits.append("NOT_AVAILABLE — и тип провинции, где здание строить нельзя")
     text = (
         "ПРИКАЗЫ (JSON, id выдаёт сервер; ид юнитов/зданий можно короткие):\n"
         '- {"kind":"move","from":"P01","to":"P02","unit":"assault","count":2} — на соседнюю провинцию'
@@ -275,21 +308,20 @@ def _orders(rs: Ruleset) -> Section:
         '- {"kind":"recruit","province":"P01","unit":"assault","count":1} — ресурсы резервируются сразу, юниты '
         "появляются в начале расчёта (в этом ходу не ходят).\n"
         '- {"kind":"build","province":"P02","building":"mine"} — своя провинция без такого здания.\n'
-        f'- {{"kind":"fortify","province":"P01"}} — оборона +{st("combat.fortify_bonus"):.0%}, если из провинции '
-        f"никто не уходит.{research}")
+        '- {"kind":"fortify","province":"P01"} — ' + _fortify_text(rs, False) + research)
     rng = _move_range(rs)
     short = ('ПРИКАЗЫ (JSON; ид можно короткие): {"kind":"move","from":"P01","to":"P02","unit":"assault",'
              '"count":2} или "units":{...} — на соседнюю'
              + (f" (по своей земле до {rng} рёбер)" if rng != "1" else "")
              + '; в чужую/нейтральную с армией — атака; "pact":"honor"|"break". recruit {province,unit,count} — '
-             "резерв сразу, юниты в начале расчёта. build {province,building}. fortify {province} — оборона "
-             f'+{st("combat.fortify_bonus"):.0%}, если никто не уходит.'
+             "резерв сразу, юниты в начале расчёта. build {province,building}. fortify {province} — "
+             + _fortify_text(rs, True)
              + (" research {tech} — только в Д." if research else "")
              + " Теряются вложенные объекты — orders одной JSON-строкой. Примеры и коды ошибок — "
              'rules(topic="orders").')
     # the error codes only in the topic: every refusal names its code and how to fix it anyway
     return Section("orders", text + "\nКоды ошибок — rules(topic=\"orders\").",
-                   text + f"\nОшибки: {', '.join(errors)}.", short)
+                   text + f"\nОшибки: {', '.join(errors)}." + (f" {'; '.join(limits)}." if limits else ""), short)
 
 
 def _p2(rs: Ruleset) -> Section:
@@ -309,16 +341,22 @@ def _combat(rs: Ruleset) -> Section:
     core = ("РАСЧЁТ: резервы списываются, найм, закладка строек → движение одновременно (встречные A→B и B→A бьются "
             "на ребре, проигравший отходит назад) → бои: сила = Σ атака (оборона у защитника) × контр × оборона "
             "провинции × укрепление × наспех × случайность 0.9–1.1. Несколько атакующих сначала бьются между собой "
-            "(сильнейший со следующим), победитель — с защитником. Проигравший теряет min(1, 0.5·Sпоб/Sпр) войск, "
+            "(сильнейший со следующим), победитель — с защитником. Равная сила — победа защитника. Проигравший теряет min(1, 0.5·Sпоб/Sпр) войск, "
             "победитель 0.3·Sпр/Sпоб. Отбитый атакующий отходит туда, откуда пришёл; разбитый защитник — в соседнюю "
             "свою провинцию, иначе гибнет. Провинция с войсками только атакующего — его. Пустая чужая/нейтральная "
             f"провинция берётся без боя. → экономика → стройки ({builds} ход){research} → выбывание.")
     short = ("РАСЧЁТ: найм → одновременное движение → бои (сила = Σ атака/оборона × контр × оборона провинции × "
-             "укрепление × наспех × 0.9–1.1; проигравший отходит или гибнет) → экономика → стройки"
+             "укрепление × наспех × 0.9–1.1; равенство — защитнику; проигравший отходит или гибнет) → экономика → стройки"
              f"{research} → выбывание. Подробно: rules(topic=\"combat\").")
-    extra = ["Оборона провинции = множитель типа × бонусы зданий (province.defense_mul). Прогноз боя: "
+    extra = ["Ничья: атакующий побеждает только при строго большей силе после случайности 0.9–1.1, равенство — "
+             "победа защитника; между атакующими равенство — за тем, кто был слабее до боя (бросившим вызов); "
+             "на ребре — за ходом из провинции с большим id.",
+             "Оборона провинции = множитель типа × бонусы зданий (province.defense_mul). Прогноз боя: "
              "estimate(attacker, defender, province_type, fortified, hasty) — с твоими технологиями и артефактами "
              "на стороне side (без него — по своей провинции, иначе attacker)."]
+    if not rs.default_scoring:
+        extra.append("Счёт хода считается в конце расчёта, после строек и исследований: достроенная в этом ходу "
+                     'стройка и изученная технология уже в нём (rules(topic="victory")).')
     if any(_abilities_of(rs, u) for u in rs.units):
         extra.append("Способности: siege — оборона провинции против доли таких юнитов не выше cap; ignore_fortify — "
                      "укрепление защитника слабеет на долю таких юнитов; garrison — +оборона юнита в своей провинции.")
@@ -327,8 +365,70 @@ def _combat(rs: Ruleset) -> Section:
 
 def _victory(rs: Ruleset) -> Section:
     t = rs.scenario.turn_limit
-    return Section("victory", f"ПОБЕДА: последний живой; иначе после {t} хода — больше очков (1 за провинцию, +3 за "
-                              "столицу). Ничья возможна.")
+    if rs.default_scoring:
+        return Section("victory", f"ПОБЕДА: последний живой; иначе после {t} хода — больше очков (1 за провинцию, +3 "
+                                  "за столицу). Ничья возможна. Чужой счёт — «≥» по видимому.")
+    # SCORING.md 8: only the list of sources in the core (<= 150 chars), every number in the topic
+    names = []
+    for src in sc_.SOURCES:
+        w = rs.weight(src)
+        if w:
+            names.append(sc_.NAMES[src] + (f"×{w}" if w != 1 else ""))
+    own = " (своя: get_state)" if sc_.on(rs, "objectives") else ""
+    core = (f"ПОБЕДА: последний живой, иначе после {t} хода — больший итог: {'+'.join(names)}{own}. Ничья возможна. "
+            "rules('victory')")
+    return Section("victory", core, _victory_detail(rs, core))
+
+
+def _victory_detail(rs: Ruleset, core: str) -> str:
+    st = rs.stat
+    lines = [core, "Итог = Σ вес × очки источника; счёт хода — без тайной цели, она добавляется в конце (game_over). "
+                   "Равный итог — победители все, у кого он (ничья). Выбывший не побеждает, его цель раскрывается, "
+                   "но не засчитывается."]
+    if sc_.on(rs, "territory"):
+        lines.append(f"- Земля: {int(st('score.territory.province'))} за каждую свою полноценную провинцию, "
+                     f"+{int(st('score.territory.capital'))} за столицу карты (любую: свою, чужую, Заброшенных "
+                     "земель). Оккупация и Пепелище — 0, Разорённая — полная.")
+    if sc_.on(rs, "science"):
+        tiers = ", ".join(f"ярус {t} — {int(st(f'score.science.tier{t}'))}" for t in (1, 2, 3, 4)
+                          if any(d.tier == t or (t == 4 and d.tier > 4) for d in rs.techs.values()))
+        lines.append(f"- Наука: за технологию, изученную приказом ({tiers or 'нет технологий'}); подарки артефактов и "
+                     f"стартовые — 0. +{int(st('score.science.branch'))} за завершённую ветку (все её доступные "
+                     "тебе технологии, подарки в счёт).")
+    if sc_.on(rs, "works"):
+        great = [(b, d) for b, d in rs.buildings.items() if d.score]
+        items = []
+        for b, d in great:
+            where = f" только {_type_names(rs, d.allowed_types)}" if d.allowed_types else ""
+            limit = f", не больше {d.max_per_owner}" if d.max_per_owner else ""
+            items.append(f"{_short(b)} «{d.name}» +{int(st(f'building.{b}.score'))}: {_amounts(rs, rs.building_cost(b))},"
+                         f" {d.build_turns} х.{where}{limit}")
+        lines.append("- Стройки: очки готовой великой стройки, пока она в твоей полноценной провинции; захват "
+                     "передаёт её с провинцией. Начало и готовность видят все. " + ("; ".join(items) or "нет строек") + ".")
+    if sc_.on(rs, "war"):
+        lines.append(f"- Война: цена убитых юнитов других игроков (по фракции хозяина), в обороне — "
+                     f"{int(st('score.war.defense_pct'))}%; 1 очко за {int(st('score.war.per_point'))}, не больше "
+                     f"{int(st('score.war.cap_per_victim'))} с одного соперника и {int(st('score.war.cap'))} всего. "
+                     "Нейтралы, голод, бунт, гибель при отступлении — 0.")
+    if sc_.on(rs, "objectives"):
+        dealt = rs.scenario.objectives.get("dealt", 1)
+        pool = "; ".join(f"«{o.name}» +{o.points * rs.weight('objectives')}: {sc_.objective_text(rs, None, {'id': oid})}"
+                         for oid, o in rs.objectives.items())
+        where = "get_setup и get_state" if rs.scenario.setup else "get_state"
+        lines.append(f"- Тайная цель: {dealt} на игрока при старте (раздаёт жребий, выбора нет), своя — в {where} "
+                     "(you.objectives: выполнена ли сейчас); чужие — «?» до конца. «Держать» = своя полноценная "
+                     "провинция в конце; цель против соперника называет его. Проверка — при game_over. "
+                     f"Пул партии: {pool}.")
+    ledger = next((m.name for m in rs.missions.values() if m.behavior == "read_ledger"), None)
+    lines.append("Видимость: свой счёт — полностью; чужой — нижняя граница «≥»: земля по провинциям, которые ты видишь, "
+                 "стройки — по публичным событиям, наука и война — «?». "
+                 + (f"Точную разбивку (без цели) даёт шпион: миссия «{ledger}». " if ledger else "")
+                 + "После партии раскрыто всё: итог, разбивка, цели.")
+    lines.append("Где смотреть: строка «Счёт:» в get_state (ты — разбивка, соперники — «≥»), you.score_parts"
+                 + (", you.war (очки и остаток предела)" if sc_.on(rs, "war") else "")
+                 + ("; очки науки и ветки — list_techs" if sc_.on(rs, "science") and rs.techs else "")
+                 + "; после партии итог — phase() и «Итог:» в get_state.")
+    return "\n".join(lines)
 
 
 def _pacts(rs: Ruleset) -> Section:
@@ -526,7 +626,11 @@ def _fog(rs: Ruleset) -> Section:
         text += " Чужие технологии и артефакты не видны до конца партии" + \
             (" (видно только число изученных технологий)." if rs.techs else ".")
     text += " estimate(attacker, defender, province_type, fortified, hasty) — прогноз боя."
-    return Section("fog", text)
+    # the score under fog (SCORING.md 5) holds in every game: only in the topic, the core has no room for it
+    score = ("Счёт: свой — точно; чужой — нижняя граница «≥» по провинциям, которые ты видишь сейчас"
+             + ("; стройки — по публичным событиям, наука и война — «?»" if not rs.default_scoring else "")
+             + ". После партии открыто всё" + (' (rules(topic="victory")).' if not rs.default_scoring else "."))
+    return Section("fog", text, text + "\n" + score)
 
 
 def _techs(rs: Ruleset) -> Section | None:

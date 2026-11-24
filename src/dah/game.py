@@ -25,6 +25,7 @@ from dah.engine import (DeadlineInfo, GameState, Ruleset, SeatOrders, SetupChoic
                         techs_view, upkeep_of, view_state, visible_provinces)
 from dah.engine import diplomacy as dip
 from dah.engine import espionage as esp
+from dah.engine import scoring as sc_
 from dah.engine.content import ContentError, legacy_pack_sets
 from dah.engine.catalog import KIND_LABELS
 from dah.engine.content import DEFAULT_DIPLOMACY_LIMITS, DEFAULT_SETUP_LIMIT
@@ -37,7 +38,7 @@ from dah.engine.rules import topics as rule_topics
 from dah.engine.techs import province_defense_mul
 from dah.engine.setup import unfit_artifacts
 from dah.engine.techs import short_techs_view, techs_text_short
-from dah.engine.view import PHASE_LABELS
+from dah.engine.view import PHASE_LABELS, pending_research
 from dah.journal import Journal, read_events
 from dah.store import GameDir, write_json, read_json
 
@@ -113,6 +114,10 @@ PHASE_READY_HINTS = {
     "negotiation_2": "П2: ответь, поправь приказы при нужде и нажми ready(confirm_hash=\"{orders_hash}\") (orders_hash "
                      "меняется с каждой правкой), как только сказать и сделать больше нечего",
 }
+# An eliminated seat (no provinces left; the game goes on without it): phase(), get_state() and the waker's one notice
+# tell it that the game is over for it, so its goal ends now (as at game_over).
+ELIMINATED_NOTE = ("ты выбыл: провинций не осталось, партия для тебя окончена — приказов и переговоров больше нет; "
+                   "заверши цель одним итоговым сообщением")
 SETUP_STATE_NOTE = ("ФАЗА СТАРТА: состояние предварительное — фракции и артефакты ещё не выбраны (твой выбор и "
                     "предложения — get_setup()); ход 1 строится заново, когда фаза закроется. Фракции соперников "
                     "станут известны после фазы.")
@@ -121,6 +126,7 @@ CONQUEST_JOURNAL = ("disposition", "policy_set", "policy_unaffordable", "dispose
                     "claim_created", "claim_ended", "ruin_ended")
 # Espionage events of a resolution written to the journal in full (SPY_AND_CONQUEST.md 8)
 ESPIONAGE_JOURNAL = ("mission_started", "mission_end", "sabotage", "strike_cancelled")
+SCORING_JOURNAL = ("war_credit", "work_started", "work_completed")     # stage 4 (SCORING.md 9)
 SYSTEM_SENDER = "ИГРА"   # inbox entries written by the game itself (gifts, pacts): not player text, not wrapped
 OWN_SENDER = "ты"        # inbox entries the seat sent itself (`own: true`): a swarm's members see each other's words
 
@@ -146,7 +152,9 @@ class GameError(Exception):
 def make_config(*, game_id: str, scenario: str, seats: list[dict[str, Any]], seed: int,
                 phase_limits: dict[str, int] | None = None, turn_limit: int | None = None,
                 pack_dirs: list[str] | None = None, artifacts: str | None = None, artifact_offer: int | None = None,
-                artifact_points: int | None = None, systems: dict[str, bool | None] | None = None) -> dict[str, Any]:
+                artifact_points: int | None = None, systems: dict[str, bool | None] | None = None,
+                scoring: dict[str, int] | None = None, objectives: int | None = None,
+                objectives_salt: int | None = None) -> dict[str, Any]:
     """Game config (SLICE.md section 5). Limits default to the scenario's. Seats: {seat, nick, kind, bot?,
     declared?, dreamteam_session_id?, faction?}.
 
@@ -157,9 +165,16 @@ def make_config(*, game_id: str, scenario: str, seats: list[dict[str, Any]], see
 
     Stage 3 (SPY_AND_CONQUEST.md 1.1): `systems` {espionage|conquest: bool | None} overrides the scenario's switches
     (None: the scenario's). The resulting switches go into `config["systems"]` when the host overrode one or some
-    system is on; a config without the key plays the scenario's switches (all off before stage 3)."""
+    system is on; a config without the key plays the scenario's switches (all off before stage 3).
+
+    Stage 4 (SCORING.md 1.2): `scoring` {source: weight} replaces the scenario's weights (a source not named: 0) and
+    `objectives` N sets the objectives dealt (and offered) per seat. The resulting weights go into
+    `config["scoring"]` when the host overrode them or they are not the default {territory: 1}; `--objectives` into
+    `config["objectives"]`. A config without the keys plays the scenario's scoring. `objectives_salt` (a large
+    random int from the host, secret like the seed) goes into `config["objectives_salt"]` only while objectives have
+    weight > 0; the deal then comes from seed and salt (SCORING.md «Реализация: уточнения», FOG-1)."""
     overrides = {k: v for k, v in (systems or {}).items() if v is not None}
-    rs = build_ruleset(pack_dirs, scenario, overrides or None)
+    rs = build_ruleset(pack_dirs, scenario, overrides or None, scoring, objectives)
     setup = setup_config(rs, artifacts, artifact_offer, artifact_points)
     limits = {k: v for k, v in rs.scenario.phase_limits.items() if k != SETUP}
     if setup is not None:
@@ -185,7 +200,18 @@ def make_config(*, game_id: str, scenario: str, seats: list[dict[str, Any]], see
         config["setup"] = setup
     if overrides or rs.scenario.systems:
         config["systems"] = {name: rs.system(name) for name in SYSTEMS}
+    if scoring is not None or not rs.default_scoring:
+        config["scoring"] = dict(rs.scenario.scoring)
+    if objectives is not None:
+        config["objectives"] = int(objectives)
+    if objectives_salt is not None and rs.weight("objectives") > 0:
+        config["objectives_salt"] = int(objectives_salt)
     return config
+
+
+def _salt(config: dict[str, Any]) -> dict[str, Any]:
+    """The objectives salt of a config as a `new_game_state` keyword (none in games before it: the seed alone)."""
+    return {"objectives_salt": config["objectives_salt"]} if "objectives_salt" in config else {}
 
 
 def diplomacy_limits(config: dict[str, Any]) -> dict[str, int]:
@@ -197,7 +223,7 @@ def game_ruleset(config: dict[str, Any], pack_dirs: list[str] | None = None) -> 
     """The scenario's ruleset with this game's turn and phase limits (so rules text matches the game). `pack_dirs`
     overrides the config's packs."""
     rs = build_ruleset(pack_dirs if pack_dirs is not None else config.get("pack_dirs"), config["scenario"],
-                       config.get("systems"))
+                       config.get("systems"), config.get("scoring"), config.get("objectives"))
     scenario = replace(rs.scenario, turn_limit=config["turn_limit"], phase_limits=dict(config["phase_limits"]),
                        message_limits=config["message_limits"], diplomacy_limits=diplomacy_limits(config))
     return replace(rs, scenario=scenario)
@@ -369,7 +395,7 @@ class Game:
         """
         config = gdir.load_config()
         rs = game_ruleset(config)
-        state = new_game_state(rs, _seat_specs(config), config["seed"])
+        state = new_game_state(rs, _seat_specs(config), config["seed"], **_salt(config))
         if config.get("setup"):
             # provisional (default factions, no artifacts) until the setup phase closes; starts do not depend on it
             state.phase = SETUP
@@ -377,11 +403,19 @@ class Game:
         if config.get("setup"):
             game.setup_offers = draft_offers(rs, config["setup"], list(state.players), config["seed"])
         systems = {"systems": list(rs.scenario.systems)} if "systems" in config else {}
+        if not rs.default_scoring:
+            systems["scoring"] = dict(rs.scenario.scoring)
+        # the seed is a secret until game_over (it deals the objectives): only the admin's journal has it
+        # (journal.view_events strips it from every other view)
         game.journal.append("game_created", config=config, ruleset_hash=rs.hash, seed=config["seed"],
                             rules_chars=len(game.rules()), **systems)
         for s in config["seats"]:
             game.journal.append("seat_info", seat=s["seat"], kind=s["kind"], declared=s["declared"],
                                 dreamteam_session_id=s.get("dreamteam_session_id"))
+        for seat, p in state.players.items():
+            if p.objectives:        # private to the seat until game_over (SCORING.md 9)
+                game.journal.append("objectives_dealt", seat=seat, objectives=[dict(o) for o in p.objectives],
+                                    turn=0)
         gdir.save_turn("states", 1, state.to_dict())
         if start:
             game.start()
@@ -617,23 +651,48 @@ class Game:
         self._pact_results(turn, report)
         for e in report.events:
             if e["kind"] in ("research_started", "tech_completed"):
-                self.journal.append(e["kind"], seat=e["seats"][0], tech=e["tech"], turn=turn)
+                extra = {}
+                if e["kind"] == "tech_completed" and not self.ruleset.default_scoring and e["tech"] in self.ruleset.techs:
+                    # what the seat paid (report: gift_share_of_score_spend, SCORING.md 9); journal only
+                    extra["cost"] = self.ruleset.tech_cost(e["tech"], stat_key(self.state, self.ruleset, e["seats"][0]))
+                self.journal.append(e["kind"], seat=e["seats"][0], tech=e["tech"], turn=turn, **extra)
             elif e["kind"] in CONQUEST_JOURNAL or (e["kind"] == "captured" and "mode" in e):
                 self._journal_conquest(e, turn)
             elif e["kind"] in ESPIONAGE_JOURNAL:
                 data = {k: v for k, v in e.items() if k not in ("kind", "seats")}
                 self.journal.append(e["kind"], turn=turn, **data)
+            elif e["kind"] in SCORING_JOURNAL:
+                data = {k: v for k, v in e.items() if k not in ("kind", "seats")}
+                if e["kind"] == "work_started" and e.get("building") in self.ruleset.buildings:
+                    # the price the seat paid, journal only (the public event carries none)
+                    data["cost"] = dict(self.ruleset.building_cost(e["building"],
+                                                                   stat_key(self.state, self.ruleset, e["seat"])))
+                self.journal.append(e["kind"], turn=turn, **data)
+        # `scores` (and `score_parts` with a non-default scoring) are private per seat (SCORING.md 9): the journal is the
+        # admin's; journal.view_events gives each seat its own entry
+        parts = {"score_parts": report.score_parts} if report.score_parts else {}
         self.journal.append(
-            "turn_resolved", turn=turn, state_hash=state_hash(new_state), scores=report.public["scores"],
+            "turn_resolved", turn=turn, state_hash=state_hash(new_state), scores=report.scores_of(), **parts,
             idle_resources={s: v["resources"] for s, v in report.idle.items()},
             idle_units={s: v["units"] for s, v in report.idle.items()},
+            resources={s: dict(p.resources) for s, p in new_state.players.items()},   # stocks at the turn's end
             autopilot=sorted(s for s, b in books.items() if not b.orders))
         self.state = new_state
         self.books = {}
         if new_state.phase == GAME_OVER:
             result = new_state.result or {}
+            if "objectives" in result:
+                # every secret objective is revealed at the end (SCORING.md 9), met or not, with its evidence
+                for seat in sorted(result["objectives"]):
+                    for o in result["objectives"][seat]:
+                        met, have, need = sc_.objective_progress(new_state, self.ruleset, seat, o)
+                        self.journal.append("objectives_revealed", seat=seat, id=o["id"], target=o.get("target"),
+                                            met=o["met"], points=o["points"],
+                                            counted=bool(o["met"] and new_state.players[seat].alive),
+                                            evidence={"have": have, "need": need}, turn=turn)
+            extra = {k: result[k] for k in ("score_parts", "objectives", "winners_open") if k in result}
             self.journal.append("game_over", winners=result.get("winners", []), reason=result.get("reason"),
-                                scores=result.get("scores", {}), turn=turn)
+                                scores=result.get("scores", {}), turn=turn, **extra)
             self.polled_at_open = {s for s, n in self.player_polls.items() if n > 0}
             self.phase_seq += 1
             self.ready_seats.clear()
@@ -741,6 +800,9 @@ class Game:
         }
         if self.game_over:
             info["result"] = self.state.result
+        elif not seat_alive:
+            info["eliminated"] = True
+            info["hint"] = ELIMINATED_NOTE
         if self.phase == SETUP:
             info["hint"] = SETUP_HINT
         elif self.phase in PHASE_READY_HINTS and seat_alive and not self.game_over:
@@ -776,10 +838,16 @@ class Game:
         parts = [f"Ход {info['turn']}/{info['turn_limit']}", PHASE_LABELS.get(self.phase, self.phase)]
         if self.game_over:
             winners = ", ".join(self.state.players[w].nick for w in (self.state.result or {}).get("winners", []))
-            return " | ".join(parts + [f"победители: {winners or 'никто'}", "game_over"])
+            # the final scores are public after the game (SCORING.md 9): totals here, the breakdown in get_state
+            final = (self.state.result or {}).get("scores") or {}
+            totals = ", ".join(f"{p.nick} {final[s]}" for s, p in self.state.players.items() if s in final)
+            return " | ".join(parts + [f"победители: {winners or 'никто'}"] + ([f"итог: {totals}"] if totals else [])
+                              + ["game_over"])
         if self.deadline is not None:
             parts.append(f"до {datetime.fromtimestamp(self.deadline, timezone.utc):%H:%MZ} "
                          f"(ещё {info['seconds_left']} с)")
+        if info.get("eliminated"):
+            return " | ".join(parts + [ELIMINATED_NOTE])
         parts.append(f"готово {info['ready']}" + (", ты готов" if info["you_ready"] else ", ты не готов"))
         if info.get("intel"):
             parts.append(intel_tail(info["intel"]))
@@ -863,6 +931,8 @@ class Game:
                 self.journal.append("intel_read", seat=seat, report_ids=[r["id"] for r in
                                                                          (rep["reports"] or {}).get(seat, [])],
                                     via="get_state", turn=self.state.turn, phase=self.phase)
+        if not self.state.players[seat].alive and not self.game_over:
+            text = f"ВЫБЫЛ: {ELIMINATED_NOTE}.\n" + text
         return SETUP_STATE_NOTE + "\n" + text if self.phase == SETUP else text
 
     def state_json(self, seat: str) -> dict[str, Any]:
@@ -880,6 +950,8 @@ class Game:
             for entry in view["players"]:
                 if entry["seat"] == seat:
                     entry["faction"] = None
+        if not self.state.players[seat].alive and not self.game_over:
+            view["eliminated"] = {"note": ELIMINATED_NOTE}
         return view
 
     def history(self, seat: str, turn: int | None = None) -> dict[str, Any]:
@@ -1859,6 +1931,9 @@ class Game:
             "your_choice": {"factions": choice.get("factions"), "artifacts": choice.get("artifacts")},
             "confirm_hash": self.setup_hash(seat),
         }
+        if sc_.on(self.ruleset, "objectives") and seat in self.state.players:
+            # the seat's secret objectives are dealt when the setup phase opens: a faction can be picked for them
+            out["objectives"] = sc_.objectives_view(self.state, self.ruleset, seat)
         if not open_ and self.setup_result:
             mine = self.setup_result.get(seat) or {}
             out["result"] = {k: mine.get(k) for k in ("faction", "prefs", "artifacts", "auto_faction",
@@ -1879,6 +1954,8 @@ class Game:
             lines += [f"{p['nick']}: {rs.factions[p['faction']].name}" for p in view.get("players") or []]
             return "\n".join(lines)
         mode = view["artifacts_mode"]
+        objectives = [f"Твоя тайная цель «{o['name']}» +{o['points'] * rs.weight('objectives')}: {o['text']}"
+                      for o in view.get("objectives") or []]
         lines = [f"ФАЗА СТАРТА: ещё {view['seconds_left']} с, готово {view['ready']}. Выбери фракцию "
                  "(choose_faction([...] — список по предпочтению)"
                  + (", артефакт (choose_artifacts([...]))" if mode != "none" else "") + " и нажми ready.",
@@ -1904,7 +1981,7 @@ class Game:
 
         lines.append(f"Твой выбор: фракции {named(rs.factions, choice['factions'])}, "
                      f"артефакты {named(rs.artifacts, choice['artifacts'])}")
-        return "\n".join(lines)
+        return "\n".join(lines + objectives)
 
     def _close_setup(self, reason: str) -> None:
         """Settle factions and artifacts, rebuild turn 1 from them and open П1 (journal: setup_closed)."""
@@ -1912,7 +1989,8 @@ class Game:
         result = resolve_setup(self.ruleset, setup, self.config["seed"], self.config["seats"], self.setup_choices,
                                self.setup_offers)
         self.setup_result = result
-        state = new_game_state(self.ruleset, _seat_specs(self.config, result), self.config["seed"])
+        state = new_game_state(self.ruleset, _seat_specs(self.config, result), self.config["seed"],
+                               **_salt(self.config))
         write_json(self.gdir.private / "setup.json", {"offers": self.setup_offers, "choices": self.setup_choices,
                                                        "result": result})
         self.gdir.save_turn("states", 1, state.to_dict())
@@ -1936,12 +2014,23 @@ class Game:
             income = (income_of(self.state, self.ruleset, seat, key)[res]
                       - upkeep_of(self.state, self.ruleset, seat, key)[res])
         view = techs_view(self.state, self.ruleset, seat, income)
+        ordered = pending_research(self._book(seat)) if seat in self.state.players else None
+        if ordered is not None and ordered["tech"] != (view["active"] or {}).get("tech"):
+            view["ordered"] = ordered       # the research order in the book; active only after resolution (LIVE-5)
+        science = (sc_.science_view(self.state, self.ruleset, seat)
+                   if sc_.on(self.ruleset, "science") and seat in self.state.players and self.ruleset.techs else None)
         if not full:
             short = short_techs_view(view)
             short["text"] = techs_text_short(short, self.ruleset)
+            if science is not None:
+                short["science"] = science
+                short["text"] += "\n" + sc_.science_text(science)
             return short
         view["full"] = True
         view["text"] = techs_text(view, self.ruleset)
+        if science is not None:
+            view["science"] = science
+            view["text"] += "\n" + sc_.science_text(science)
         return view
 
     def describe(self, seat: str, ref: Any) -> dict[str, Any]:
@@ -2135,7 +2224,8 @@ def replay(gdir: GameDir, pack_dirs: list[str] | None = None) -> Replay:
     rs = pick.ruleset
     over = next((e for e in events if e["type"] == "game_over"), None)
     setup = next((e for e in events if e["type"] == "setup_closed"), None)
-    state = new_game_state(rs, _seat_specs(config, setup["results"] if setup else None), config["seed"])
+    state = new_game_state(rs, _seat_specs(config, setup["results"] if setup else None), config["seed"],
+                           **_salt(config))
     expected = {e["turn"]: e["state_hash"] for e in events if e["type"] == "turn_resolved"}
     recon_hashes = {e["turn"]: e["state_hash"] for e in events if e["type"] == "recon" and "state_hash" in e}
     turns: list[ReplayTurn] = []

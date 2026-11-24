@@ -85,7 +85,7 @@ _ORDERS_HINT = (f" Плоская форма move: {FLAT_MOVE}; исследов
                 "передай orders одной JSON-строкой.")
 _LIST_OR_STRING = {"anyOf": [{"type": "array", "items": {"type": "string"}}, {"type": "string"}]}
 RULE_TOPICS = ("turn, setup, units, buildings, orders, p2, combat, pacts, spying, conquest, fog, messages, techs, "
-               "factions, artifacts, abilities, resources, provinces, victory")
+               "factions, artifacts, abilities, resources, provinces, victory (очки, стройки, тайные цели)")
 DISPOSE = '{"kind": "dispose", "province": "P07", "disposition": "subjugate"}'
 SPY = '{"kind": "spy", "shade": "s1", "mission": "observe", "target": "P07", "rounds": 2}'
 SPY_ONLY = " Только в партиях со шпионажем."
@@ -112,10 +112,12 @@ TOOLS: tuple[ToolSpec, ...] = (
              _schema({"topic": {"type": "string", "description": f"Раздел правил: {RULE_TOPICS}"}})),
     ToolSpec("phase", "Текущая фаза (setup — фаза старта перед ходом 1, затем П1/Д/П2): ход, дедлайн, готовность, "
                       "разрешённые действия, game_over, подсказка, как нажать ready; в Д и П2 — ещё orders_hash для "
-                      "ready(confirm_hash=...).", _schema()),
+                      "ready(confirm_hash=...). После game_over — result: победители, итог (scores), разбивка "
+                      "(score_parts) и раскрытые тайные цели.", _schema()),
     ToolSpec("get_setup", "Фаза старта: все фракции с описаниями, предложенные тебе артефакты (драфт) или пул и "
-                          "бюджет (очки), твой текущий выбор; после фазы — итог и фракции всех игроков. Чужой выбор "
-                          "не виден.", _schema()),
+                          "бюджет (очки), твой текущий выбор, твоя тайная цель (если она есть в партии; под неё можно "
+                          "выбрать фракцию); после фазы — итог и фракции всех игроков. Чужой выбор и чужие цели не "
+                          "видны.", _schema()),
     ToolSpec("choose_faction", "Фаза старта: фракции по предпочтению (лучшая первой; ID или название). При "
                                "совпадении с соперником спор решает жребий, проигравший получает следующую из списка. "
                                "Пример: choose_faction(prefs=[\"litany\", \"captains\"]).",
@@ -126,17 +128,21 @@ TOOLS: tuple[ToolSpec, ...] = (
              _schema({"ids": {**_LIST_OR_STRING, "description": "ID или названия артефактов из get_setup"}},
                      ["ids"])),
     ToolSpec("list_techs", "Твои технологии коротко: изученные, активная (прогресс/цена), доступные сейчас (цена, "
-                           "эффект), очки и доход ресурса исследований. full=true — всё дерево с закрытыми и их "
+                           "эффект), очки и доход ресурса исследований, очки науки к счёту и прогресс веток (если наука "
+                           "приносит очки). full=true — всё дерево с закрытыми и их "
                            f"требованиями (примерно вдвое длиннее). Изучать — приказ {RESEARCH} в фазе Д.",
              _schema({"full": {"type": "boolean", "default": False,
                                "description": "true — всё дерево с закрытыми технологиями и требованиями"}})),
     ToolSpec("describe", "Полное описание любого контента партии по ID или названию: юнит, здание, технология, "
-                         "артефакт, фракция, ветка, ресурс, тип провинции. Пример: describe(id=\"throne_warden\").",
+                         "артефакт, фракция, ветка, ресурс, тип провинции, тайная цель пула (что нужно и сколько "
+                         "очков), великая стройка (очки, где строить). Пример: describe(id=\"throne_warden\").",
              _schema({"id": {"type": "string", "description": "ID (assault, core:assault) или название (можно начало)"}}, ["id"])),
     ToolSpec("wait_phase", "Ждать смены фазы (до max_seconds, по умолчанию 45).",
              _schema({"max_seconds": {"type": "integer", "minimum": 1, "maximum": 55, "default": 45}})),
-    ToolSpec("get_state", "Состояние твоей державы и видимой карты. Без аргументов — всё; since_turn=N — только "
-                          "изменения с хода N (обычно прошлый ход; 0 — всё). Пример: get_state(since_turn=2).",
+    ToolSpec("get_state", "Состояние твоей державы и видимой карты. Без аргументов — всё, со строкой «Счёт:» (твой "
+                          "счёт с разбивкой, у соперников — известная нижняя граница «≥», твоя тайная цель и "
+                          "выполнена ли она сейчас; после партии — «Итог:» всех); since_turn=N — только изменения с "
+                          "хода N (обычно прошлый ход; 0 — всё). Пример: get_state(since_turn=2).",
              _schema({"since_turn": {"type": "integer", "minimum": 0,
                                      "description": "Ход 1..текущий: показать только изменения с него; 0 или без "
                                                     "него — всё состояние"},
@@ -244,7 +250,8 @@ TOOLS: tuple[ToolSpec, ...] = (
                                                                          "list_orders() или submit_orders; в фазе "
                                                                          "старта и П1 не нужен"}})),
     ToolSpec("unready", "Снять «готово».", _schema()),
-    ToolSpec("history", "Отчёт рассчитанного хода; без turn — последний. До расчёта хода 1 отчётов нет. "
+    ToolSpec("history", "Отчёт рассчитанного хода (события и твой счёт после хода); без turn — последний. До "
+                        "расчёта хода 1 отчётов нет. "
                         "Пример: history(turn=1).",
              _schema({"turn": {"type": "integer", "minimum": 1,
                                "description": "Номер уже рассчитанного хода (1..текущий-1)"}})),

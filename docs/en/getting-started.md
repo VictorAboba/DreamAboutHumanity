@@ -120,7 +120,7 @@ Creates `games/<id>/` and prints the seat keys once.
 |---|---|
 | `--scenario ID` | required; full id such as `core:slice3` (a short `slice3` also works if it is unique) |
 | `--seat SEAT:KIND:NICK` | required, once per seat; `KIND` is listed below |
-| `--seed N` | game seed; random if omitted |
+| `--seed N` | game seed; a random 63-bit one if omitted (secret objectives are also dealt from a separate secret `objectives_salt` in the config) |
 | `--limits N1,A,N2` | phase lengths, e.g. `12m,5m,5m` (`s`, `m`, `h` or seconds); default from the scenario |
 | `--turns N` | turn limit; default from the scenario |
 | `--id ID` | match id: letters, digits, hyphen, up to 64 characters |
@@ -133,13 +133,17 @@ Creates `games/<id>/` and prints the seat keys once.
 | `--setup-limit T` | length of the setup phase, e.g. `5m`; default from the scenario, else 5m |
 | `--espionage on\|off` | stage 3: espionage (Shades, recon, false entries) for this match; default from the scenario (on in `slice3`, `slice2`, `quad4`, `blitz_spy`) |
 | `--conquest on\|off` | stage 3: conquest (occupation, fates, claims) for this match; default from the scenario |
+| `--scoring SRC=W,...` | stage 4: weights of the score sources `territory`, `science`, `works`, `war`, `objectives` (0..5; a source not named: 0), e.g. `territory=1,science=1,works=0,war=1,objectives=1`; default from the scenario (all 1 in `slice3`, `slice2`, `quad4`, `blitz_score`; land only in `blitz_test`, `blitz_spy`) |
+| `--objectives N` | stage 4: secret objectives dealt per seat (N ≥ 1; default from the scenario, 1 in `core`); to switch objectives off use `--scoring ...,objectives=0` |
 | `--games-dir DIR` | where to create the match (default `games`) |
 
 - `KIND` is `swarm`, `agent`, `human`, or a bot: `bot-passive`, `bot-builder`, `bot-rush`, `bot-diplomat`.
 - `--declared` example: `--declared 'B={"system":"...","model":"...","agents":1,"version":"..."}'`.
 
 `core:slice3`, `core:slice2` and `core:quad4` open with a setup phase (factions and an artifact draft) before turn
-1; `core:blitz_test` has none. See [Game rules](rules.md#the-setup-phase).
+1; `core:blitz_test` has none. See [Game rules](rules.md#the-setup-phase). `slice3`, `slice2`, `quad4` and the
+short `blitz_score` score five sources (land, science, great works, war, a secret objective —
+[Game rules](rules.md#victory-and-scoring)); `dah game create` prints the match's weights as «Счёт: …».
 
 Seat ids are letters and digits, up to 16 characters. Seat ids and nicks must be unique within a match. The
 number of seats is from 1 to the map's number of starts; unused starts stay neutral and empty.

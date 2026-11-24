@@ -13,12 +13,17 @@ Stage 3 (docs/SPY_AND_CONQUEST.md section 7): after the economy techs it researc
 (mirror_wards, watch_drill); from turn 3 it hires one Shade (with 35 alloy, before building) and reads the ledger of its
 strongest neighbour. Fates: the policy is subjugate while 15 provisions are free; it subjugates the occupations it can
 pay for and holds the rest (one unit stays in each) until it can.
+Stage 4 (docs/SCORING.md section 10, dah.bots.score): with great works on it saves provisions for the Monument (held
+back from recruiting while they reach the price in time) and lays it once the free provisions cover it and still feed
+the army 3 turns, and the Spire after a mine and a temple, outside the capital, in its most
+protected allowed province. Its objective makes the provinces that advance it preferred targets (and keeps one unit
+in those held) or its branch first in research.
 """
 
 from __future__ import annotations
 
 from dah.bots import conquest as cq
-from dah.bots import spy
+from dah.bots import score, spy
 from dah.bots.base import Bot, DiplomacyApi, Estimator, Order
 from dah.bots.tactics import (
     capital_of,
@@ -38,6 +43,7 @@ from dah.bots.view import (
     UNIT_UPKEEP_FOOD,
     Province,
     StateView,
+    farm_site,
 )
 
 GREETINGS = (
@@ -60,6 +66,8 @@ CITADEL_SPARE = 12  # alloy left after a citadel (one assault)
 SHADE_FROM_TURN = 3
 SHADE_MIN_ALLOY = 35
 LEDGER_ROUNDS = 2
+MONUMENT = "monument"   # stage 4: great works (docs/SCORING.md 10)
+SPIRE = "dream_spire"
 
 
 class BuilderBot(Bot):
@@ -93,12 +101,20 @@ class BuilderBot(Bot):
         extra, food_held, alloy_held = self._stage3(view)
         full = view
         view = spy.food_view(view, food_held, alloy_held)
-        orders: list[Order] = []
+        works, view = score.lay_works(view, self._works(view), FOOD_TURNS)
+        early = not self._core_economy(view) and not score.wants_work(view)    # its objective: save at once
+        saving = None if works or early else score.saving_rate(view, MONUMENT, FOOD_TURNS)
+        if saving is not None:  # saving for the Monument: the stock is kept, recruits eat only what income leaves
+            view = spy.food_view(view, view.resource(FOOD_RESOURCE))
+        orders: list[Order] = list(works)
         alloy = view.resource(BUILD_RESOURCE)
         upkeep = total_upkeep(view)
         late = bool(view.turn_limit) and view.turn > view.turn_limit - self.build_stop
 
         build = None if late else self._choose_build(view, upkeep)
+        if saving is not None and not late and (view.net_income or {}).get(FOOD_RESOURCE, 0) < saving:
+            # a saver short of income lays a farm first (its alloy is idle anyway)
+            build = next(((p, "farm") for p in [farm_site(view)] if p is not None), build)
         if build is not None and alloy >= BUILDING_COST_ALLOY[build[1]]:
             province, building = build
             orders.append({"kind": "build", "province": province.id, "building": view.qualify(building)})
@@ -119,17 +135,36 @@ class BuilderBot(Bot):
             food_margin = view.resource(FOOD_RESOURCE) - upkeep * FOOD_TURNS
             feedable = food_margin // (UNIT_UPKEEP_FOOD[RECRUIT_UNIT] * FOOD_TURNS)
         count = min(affordable, feedable - unique_upkeep)
+        if saving is not None:
+            count = min(count, (view.net_income or {}).get(FOOD_RESOURCE, 0) - saving - unique_upkeep)
         if site is not None and count > 0:
             orders.append(
                 {"kind": "recruit", "province": site.id, "unit": view.qualify(RECRUIT_UNIT), "count": count}
             )
 
         threshold = LATE_WIN if late else SURE_WIN
-        keep = garrison(capital_of(view), self.garrison)
+        keep = merge_reserved(garrison(capital_of(view), self.garrison), score.objective_garrison(view))
         if view.conquest:
             keep = merge_reserved(keep, cq.occupation_garrison(view))
-        moves = plan_moves(view, estimate, threshold, self.rng, keep, lambda target: not view.is_partner(target.owner))
+        moves = plan_moves(view, estimate, threshold, self.rng, keep, lambda target: not view.is_partner(target.owner),
+                           score.attack_bonus(view))
         return orders + moves + fortify_orders(full, moves) + extra
+
+    @staticmethod
+    def _core_economy(view: StateView) -> bool:
+        """A mine and, in games with techs, a temple: the builder saves for a work only after these."""
+        own = view.full_provinces()
+        return any("mine" in p.buildings for p in own) and (
+            not view.research_enabled or any(RESEARCH_BUILDING in p.buildings for p in own))
+
+    @staticmethod
+    def _works(view: StateView) -> list[tuple[str, bool]]:
+        """Stage 4: the Monument as soon as the provisions allow; the Spire (not in the capital) once the seat has a
+        mine and, in games with techs, a temple."""
+        works = [(MONUMENT, True)]
+        if BuilderBot._core_economy(view):
+            works.append((SPIRE, False))
+        return works
 
     def _stage3(self, view: StateView) -> tuple[list[Order], int, int]:
         """Fates, policy, the Shade and its ledger mission: (orders, provisions held, alloy held)."""

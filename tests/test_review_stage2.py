@@ -219,7 +219,7 @@ def test_litany_move_penalty_stacks_with_supply_routes():
 # ---------------------------------------------------------------- 6. the public tech count hides artifacts
 
 def test_public_tech_count_leaves_out_artifact_grants():
-    rs = build_ruleset(None, "slice3")
+    rs = build_ruleset(None, "slice3", scoring={"territory": 1})       # the tech count is in the default score line
     seats = [{"seat": "A", "nick": "А", "faction": "core:covenant"},
              {"seat": "B", "nick": "Б", "faction": "core:litany", "artifacts": ["core:smith_relic"]}]
     st = new_game_state(rs, seats, 7)
@@ -289,10 +289,14 @@ def test_techs_text_shows_unlocks():
 # ---------------------------------------------------------------- 11. factions in the state text
 
 def test_score_line_names_factions_after_setup_only():
-    rs = build_ruleset(None, "slice3")
-    st = new_game_state(rs, [{"seat": "A", "nick": "Аль", "faction": "core:captains"},
-                             {"seat": "B", "nick": "Бет", "faction": "core:litany"}], 7)
+    rs = build_ruleset(None, "slice3")                  # core 0.5.0: the score line with breakdowns (SCORING.md 8)
+    seats = [{"seat": "A", "nick": "Аль", "faction": "core:captains"},
+             {"seat": "B", "nick": "Бет", "faction": "core:litany"}]
+    st = new_game_state(rs, seats, 7)
     score = render_state_text(st, rs, "A").split("Счёт:")[1].splitlines()[0]
+    assert "ты (Вольные Капитаны Разлома) " in score and "Бет (Литания Ржавого Престола) ≥" in score
+    land = build_ruleset(None, "slice3", scoring={"territory": 1})              # the default score line
+    score = render_state_text(new_game_state(land, seats, 7), land, "A").split("Счёт:")[1].splitlines()[0]
     assert "Аль (ты, Вольные Капитаны Разлома)" in score and "Бет (Литания Ржавого Престола)" in score
     st.phase = "setup"
     assert "Литания" not in render_state_text(st, rs, "A").split("Счёт:")[1]

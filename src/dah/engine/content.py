@@ -39,6 +39,8 @@ ENTITY_DIRS: dict[str, str] = {
     "artifacts": "artifact",
     # stage 3 (SPY_AND_CONQUEST.md 3.3): optional
     "dispositions": "disposition",
+    # stage 4 (SCORING.md 2.5): secret objectives, optional
+    "objectives": "objective",
 }
 
 DEFAULT_MESSAGE_LIMITS: dict[str, Any] = {
@@ -138,6 +140,11 @@ class BuildingDef:
     province_mods: tuple[dict[str, Any], ...] = ()   # modify, scope province: province.* stats of its province
     owner_mods: tuple[dict[str, Any], ...] = ()      # modify, scope owner: the owner's stats (once per building)
     lore: str = ""
+    # stage 4 (SCORING.md 2.3), hashed only when set: points while ready in a full own province (a great work), the
+    # build-order limit over all the seat's provinces, the province types it may be built in (empty: any)
+    score: int = 0
+    max_per_owner: int | None = None
+    allowed_types: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -243,6 +250,32 @@ class EspionageDef:
 
 
 @dataclass(frozen=True)
+class ObjectiveDef:
+    """A secret objective (SCORING.md 2.5): an engine kind (registry.OBJECTIVE_KINDS) with the pack's numbers."""
+    id: str
+    name: str
+    name_en: str
+    kind: str
+    params: dict[str, Any]                 # ids qualified (province type, branch), counts as ints
+    points: int
+    maps: tuple[str, ...] = ()             # empty: any map
+    players_min: int | None = None
+    players_max: int | None = None
+    requires_system: str | None = None
+    description: str = ""
+    lore: str = ""
+
+    @property
+    def targeted(self) -> bool:
+        return registry.OBJECTIVE_KINDS[self.kind]["target"] == "seat"
+
+    def fits(self, map_id: str, players: int) -> bool:
+        """The scenario filter of the pool (maps, players); requires_system is applied when the ruleset is built."""
+        return ((not self.maps or map_id in self.maps) and (self.players_min is None or players >= self.players_min)
+                and (self.players_max is None or players <= self.players_max))
+
+
+@dataclass(frozen=True)
 class Profile:
     """A seat's stat key beyond its faction: researched techs, artifacts and the owner-scoped buildings it holds
     (engine/techs.py `stat_key`). Ruleset.stat accepts it wherever it accepts a faction id."""
@@ -309,6 +342,11 @@ class ScenarioDef:
     # stage 3: the switchable systems that are on (registry.SYSTEMS), from the scenario's `systems` or the host's
     # override; hashed only while some system is on, so a ruleset without them hashes as before
     systems: tuple[str, ...] = ()
+    # stage 4 (SCORING.md 1.2): the weight of every score source (registry.SCORE_SOURCES; a source not given is 0),
+    # hashed only when it differs from the default {territory: 1}; the objectives deal {dealt, offer, pool}, hashed
+    # only while objectives have weight > 0
+    scoring: dict[str, int] = field(default_factory=lambda: _weights(registry.DEFAULT_SCORING))
+    objectives: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -332,6 +370,7 @@ class Ruleset:
     dispositions: dict[str, DispositionDef] = field(default_factory=dict)   # stage 3; empty while conquest is off
     missions: dict[str, MissionDef] = field(default_factory=dict)           # stage 3; empty while espionage is off
     espionage: EspionageDef | None = None                                    # stage 3; None while espionage is off
+    objectives: dict[str, ObjectiveDef] = field(default_factory=dict)       # stage 4; the scenario's pool (filtered)
     # Inputs of per-seat stat tables (Profile); derived from the hashed content, so not hashed themselves.
     base_stats: dict[str, float] = field(default_factory=dict)
     override_mods: tuple[dict[str, Any], ...] = ()
@@ -344,8 +383,19 @@ class Ruleset:
         object.__setattr__(self, "_cache", {})     # Profile -> stats table (not a field: never hashed or copied)
 
     def system(self, name: str) -> bool:
-        """Is the switchable system `name` (espionage | conquest) on in this ruleset?"""
+        """Is the switchable system `name` (espionage | conquest, or a score source `scoring.<src>`) on?"""
+        if name.startswith("scoring."):
+            return self.weight(name.split(".", 1)[1]) > 0
         return name in self.scenario.systems
+
+    def weight(self, source: str) -> int:
+        """The weight of a score source (registry.SCORE_SOURCES); 0 = the source is off."""
+        return int(self.scenario.scoring.get(source, 0))
+
+    @property
+    def default_scoring(self) -> bool:
+        """Territory only with weight 1 (no `scoring` key): the score of the slice and stages 1-3, bit for bit."""
+        return self.scenario.scoring == _weights(registry.DEFAULT_SCORING)
 
     def _table(self, key: StatKey) -> Mapping[str, float]:
         if not key:
@@ -485,6 +535,17 @@ class Ruleset:
             data.pop("missions")
         if data["espionage"] is None:
             data.pop("espionage")
+        # Stage 4 (SCORING.md 1.2, 3): weights only when not the default, the deal and the pool only with objectives.
+        if self.default_scoring:
+            data["scenario"].pop("scoring", None)
+        if not self.system("scoring.objectives"):
+            data["scenario"].pop("objectives", None)
+        if not data["objectives"]:
+            data.pop("objectives")
+        for entry in data["buildings"].values():
+            for k in ("score", "max_per_owner", "allowed_types"):
+                if entry.get(k) in (0, None, (), []):
+                    entry.pop(k, None)
         if not self.system("conquest"):
             for entry in data["province_types"].values():
                 entry.pop("conquest_value", None)
@@ -497,13 +558,18 @@ class Ruleset:
         # pack without stage-2 content (no techs, branches, artifacts) keeps it and hashes exactly as before.
         stage2 = any(k in data for k in ("branches", "techs", "artifacts"))
         for table in ("units", "buildings", "factions", "techs", "branches", "artifacts", "dispositions",
-                      "missions"):
+                      "missions", "objectives"):
             for entry in (data.get(table) or {}).values():
                 for k in _COSMETIC_FIELDS & entry.keys():
                     if k == "lore" and table == "factions" and not stage2:
                         continue
                     entry.pop(k)
         return data
+
+
+def _weights(given: Mapping[str, int]) -> dict[str, int]:
+    """All score sources in registry order; a source not given has weight 0."""
+    return {src: int(given.get(src, 0)) for src in registry.SCORE_SOURCES}
 
 
 _NEW_FIELDS = frozenset({"move", "requires_tech", "requires_building", "factions", "abilities", "lore",
@@ -884,13 +950,69 @@ class _Builder:
             mods = [{k: v for k, v in e.items() if k != "scope"} | {"scope": e["scope"]}
                     for e in effects if e["type"] == "modify"]
             requires = d.get("requires", {})
+            score = int(d.get("score", 0))
+            if score > 0 and d["build_turns"] < 2:
+                self.warn(raw, ["build_turns"], f"a great work (score {score}) built in {d['build_turns']} turn: "
+                                                "others get no time to answer (SCORING.md 2.3)")
             out[fid] = BuildingDef(fid, self.name(d), d.get("short", self.name(d)),
                                    self.amounts(raw, d["cost"], "cost"), d["build_turns"], dict(sorted(income.items())),
                                    bool(d.get("recruit", False)), d.get("max_per_province", 1),
                                    self.refs(raw, "tech", requires.get("tech", []), ["requires", "tech"]),
                                    self.refs(raw, "faction", d.get("factions", []), ["factions"]),
                                    tuple(m for m in mods if m["scope"] == "province"),
-                                   tuple(m for m in mods if m["scope"] == "owner"), self.lore(raw))
+                                   tuple(m for m in mods if m["scope"] == "owner"), self.lore(raw),
+                                   score, d.get("max_per_owner"),
+                                   tuple(sorted(self.refs(raw, "province_type", d.get("allowed_types", []),
+                                                          ["allowed_types"]))))
+        return out
+
+    def objectives(self) -> dict[str, ObjectiveDef]:
+        """Secret objectives (SCORING.md 2.5): the kind is known to the engine, its params are checked by kind."""
+        out = {}
+        for fid, raw in sorted(self.l.entities["objective"].items()):
+            d = raw.data
+            self.texts(raw)
+            spec = registry.OBJECTIVE_KINDS.get(d["kind"])
+            if spec is None:
+                self.err(raw, ["kind"], f"unknown objective kind {d['kind']!r}; known: "
+                                        f"{', '.join(registry.OBJECTIVE_KINDS)}")
+                continue
+            given = dict(d.get("params") or {})
+            params: dict[str, Any] = {}
+            ok = True
+            for name in given:
+                if name not in spec["params"]:
+                    self.err(raw, ["params", name], f"kind {d['kind']!r} has no parameter {name!r}; known: "
+                                                    f"{', '.join(spec['params']) or 'none'}")
+                    ok = False
+            for name, kind in spec["params"].items():
+                value = given.get(name)
+                if value is None:
+                    self.err(raw, ["params", name], f"kind {d['kind']!r} needs parameter {name!r}")
+                    ok = False
+                elif kind == "count":
+                    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                        self.err(raw, ["params", name], f"{name} must be an integer >= 1, got {value!r}")
+                        ok = False
+                    else:
+                        params[name] = value
+                else:
+                    full = self.ref(raw, kind, str(value), ["params", name]) if isinstance(value, str) else None
+                    if full is None:
+                        if not isinstance(value, str):
+                            self.err(raw, ["params", name], f"{name} must be a {kind} id")
+                        ok = False
+                    else:
+                        params[name] = full
+            players = d.get("players") or {}
+            if players.get("min") is not None and players.get("max") is not None and players["min"] > players["max"]:
+                self.err(raw, ["players"], f"players min {players['min']} is above max {players['max']}")
+                ok = False
+            maps = self.refs(raw, "map", d.get("maps", []), ["maps"])
+            if ok:
+                out[fid] = ObjectiveDef(fid, self.name(d), self.name_en(d), d["kind"], params, d["points"],
+                                        maps, players.get("min"), players.get("max"), d.get("requires_system"),
+                                        d.get("description", ""), self.lore(raw))
         return out
 
     def factions(self) -> tuple[dict[str, FactionDef], dict[str, list[dict[str, Any]]]]:
@@ -1158,10 +1280,17 @@ class _Builder:
             else:
                 setup = None
             systems = tuple(name for name in registry.SYSTEMS if (d.get("systems") or {}).get(name))
+            scoring = _weights(d["scoring"] if "scoring" in d else registry.DEFAULT_SCORING)
+            objectives: dict[str, Any] = {}
+            if "objectives" in d:
+                given = d["objectives"] or {}
+                dealt = int(given.get("dealt", 1))
+                pool = self.refs(raw, "objective", given.get("pool", []), ["objectives", "pool"])
+                objectives = {"dealt": dealt, "offer": int(given.get("offer", dealt)), "pool": tuple(pool)}
             out[fid] = (raw, ScenarioDef(
                 fid, d["name"], map_id or d["map"], tuple(f for f in factions if f), d["turn_limit"],
                 {k: _duration(v) for k, v in d["phase_limits"].items()}, limits,
-                _merge(DEFAULT_DIPLOMACY_LIMITS, d.get("diplomacy_limits", {})), setup, systems))
+                _merge(DEFAULT_DIPLOMACY_LIMITS, d.get("diplomacy_limits", {})), setup, systems, scoring, objectives))
         return out
 
     def roles(self, resources: Mapping[str, ResourceDef]) -> dict[str, str]:
@@ -1336,7 +1465,9 @@ def _assemble(loaded: _Loaded) -> tuple[_Builder, dict[str, Any]]:
     parts["dispositions"] = b.dispositions()
     parts["missions"] = b.missions()
     parts["espionage"] = b.espionage()
-    parts["requires_system"] = {fid: raw.data["requires_system"] for kind in ("branch", "tech", "building", "artifact")
+    parts["objectives"] = b.objectives()
+    parts["requires_system"] = {fid: raw.data["requires_system"]
+                                for kind in ("branch", "tech", "building", "artifact", "objective")
                                 for fid, raw in loaded.entities[kind].items() if raw.data.get("requires_system")}
     parts["maps"] = b.maps()
     parts["scenarios"] = b.scenarios()
@@ -1359,7 +1490,8 @@ def _assemble(loaded: _Loaded) -> tuple[_Builder, dict[str, Any]]:
 
 
 def _ruleset(b: _Builder, parts: dict[str, Any], packs: dict[str, str], scenario_id: str,
-             systems: Mapping[str, Any] | None = None) -> Ruleset:
+             systems: Mapping[str, Any] | None = None, scoring: Mapping[str, Any] | None = None,
+             objectives: int | None = None) -> Ruleset:
     scenarios = parts["scenarios"]
     full = scenario_id if scenario_id in scenarios else next(
         (k for k in scenarios if k.split(":", 1)[1] == scenario_id), None)
@@ -1382,8 +1514,28 @@ def _ruleset(b: _Builder, parts: dict[str, Any], packs: dict[str, str], scenario
     if "espionage" in on and not parts.get("missions"):
         raise ContentError([Issue(raw.file, _json_path(raw.path, ["systems", "espionage"]),
                                   "espionage is on but the packs define no missions (espionage/*.yaml)")])
+    scenario = _scoring_scenario(raw, scenario, scoring, objectives)
     off = set(registry.SYSTEMS) - on
+    off |= {f"scoring.{src}" for src in registry.SCORE_SOURCES if not scenario.scoring[src]}
     parts = _system_parts(parts, off)
+    if scenario.scoring["works"]:
+        # a great work's points (building.<id>.score) join the base table only while works count (hashes stay)
+        parts = {**parts, "base_stats": {**parts["base_stats"], **{f"building.{bid}.score": bd.score
+                                                                    for bid, bd in parts["buildings"].items()
+                                                                    if bd.score}}}
+    pool: dict[str, ObjectiveDef] = {}
+    if scenario.scoring["objectives"]:
+        names = scenario.objectives.get("pool") or tuple(sorted(parts["objectives"]))
+        for i, oid in enumerate(names):
+            obj = parts["objectives"].get(oid)
+            if obj is None:          # hidden by requires_system (a source with weight 0)
+                continue
+            if obj.maps and scenario.map not in obj.maps:
+                if scenario.objectives.get("pool"):
+                    b.warnings.append(Issue(raw.file, _json_path(raw.path, ["objectives", "pool", i]),
+                                            f"objective {oid!r} is not for map {scenario.map!r}: left out"))
+                continue
+            pool[oid] = obj
     if "espionage" in on:
         # pack-given espionage stats join the base table only while espionage is on (hashes of other games stay)
         parts = {**parts, "base_stats": {**parts["base_stats"], **b.spy_stats(parts["missions"], parts["espionage"])}}
@@ -1405,8 +1557,53 @@ def _ruleset(b: _Builder, parts: dict[str, Any], packs: dict[str, str], scenario
         branches=parts["branches"], techs=parts["techs"], artifacts=parts["artifacts"],
         dispositions=parts["dispositions"], missions=parts["missions"],
         espionage=(parts["espionage"] or EspionageDef()) if "espionage" in on else None, base_stats=parts["base_stats"], override_mods=tuple(overrides),
-        faction_mods={f: tuple(parts["faction_mods"][f]) for f in scenario.factions}, move_default=move_default)
+        faction_mods={f: tuple(parts["faction_mods"][f]) for f in scenario.factions}, move_default=move_default,
+        objectives=dict(sorted(pool.items())))
+    if ruleset.system("scoring.objectives"):
+        from .scoring import validate_objectives    # scoring reads the Ruleset (and conquest's statuses)
+        problems = validate_objectives(ruleset)
+        if problems:
+            raise ContentError([Issue(raw.file, _json_path(raw.path, ["objectives", *where]), msg)
+                                for where, msg in problems])
     return replace(ruleset, hash=sha256_json(ruleset.to_dict()))
+
+
+def _scoring_scenario(raw: _Raw, scenario: ScenarioDef, scoring: Mapping[str, Any] | None,
+                      objectives: int | None) -> ScenarioDef:
+    """The scenario's weights and objectives deal with the host's overrides (dah game create --scoring, --objectives),
+    checked (SCORING.md 1.2): weights 0..5, some source but objectives on, objectives on -> dealt >= 1, offer = dealt."""
+    weights = dict(scenario.scoring)
+    if scoring is not None:
+        unknown = [k for k in scoring if k not in registry.SCORE_SOURCES]
+        if unknown:
+            raise ContentError([Issue("<ruleset>", "scoring", f"unknown score source {unknown[0]!r}; known: "
+                                                              f"{', '.join(registry.SCORE_SOURCES)}")])
+        weights = _weights({k: v for k, v in scoring.items() if v is not None})
+    where = _json_path(raw.path, ["scoring"])
+    for src, w in weights.items():
+        if isinstance(w, bool) or not isinstance(w, int) or not 0 <= w <= registry.SCORE_WEIGHT_MAX:
+            raise ContentError([Issue(raw.file, where, f"weight of {src!r} must be an integer "
+                                                       f"0..{registry.SCORE_WEIGHT_MAX}, got {w!r}")])
+    if not any(w for src, w in weights.items() if src != "objectives"):
+        raise ContentError([Issue(raw.file, where, "scoring: some source other than objectives needs weight > 0")])
+    deal = dict(scenario.objectives)
+    if objectives is not None:
+        if isinstance(objectives, bool) or not isinstance(objectives, int) or objectives < 1:
+            raise ContentError([Issue("<ruleset>", "objectives", f"objectives must be >= 1, got {objectives!r} (to "
+                                                                 "switch objectives off: --scoring objectives=0)")])
+        deal = {"pool": (), **deal, "dealt": objectives, "offer": objectives}
+    if weights["objectives"]:
+        if deal.get("dealt", 0) < 1:
+            raise ContentError([Issue(raw.file, _json_path(raw.path, ["objectives", "dealt"]),
+                                      "objectives have weight > 0: objectives.dealt must be >= 1")])
+        if deal.get("offer", deal["dealt"]) != deal["dealt"]:
+            raise ContentError([Issue(raw.file, _json_path(raw.path, ["objectives", "offer"]),
+                                      f"objectives.offer {deal.get('offer')} must equal dealt {deal['dealt']} "
+                                      "(a choice of objectives is reserved for later)")])
+        deal = {"dealt": deal["dealt"], "offer": deal["dealt"], "pool": tuple(deal.get("pool") or ())}
+    else:
+        deal = {}
+    return replace(scenario, scoring=weights, objectives=deal)
 
 
 def _drop_off_effects(effects: Iterable[Mapping[str, Any]], off: set[str]) -> list[dict[str, Any]]:
@@ -1449,6 +1646,7 @@ def _system_parts(parts: dict[str, Any], off: set[str]) -> dict[str, Any]:
                                   penalties=tuple(_drop_off_effects(v.penalties, off)))
                        for k, v in parts["factions"].items()}
     out["faction_mods"] = {k: _drop_off_effects(v, off) for k, v in parts["faction_mods"].items()}
+    out["objectives"] = {k: v for k, v in parts.get("objectives", {}).items() if k not in hidden}
     # the base stats of hidden techs and buildings (their costs) go too: a hidden entity leaves no trace in the hash
     gone = {k for k in parts["techs"] if k not in out["techs"]} | {k for k in parts["buildings"]
                                                                     if k not in out["buildings"]}
@@ -1463,16 +1661,19 @@ def _system_parts(parts: dict[str, Any], off: set[str]) -> dict[str, Any]:
 
 
 def build_ruleset(pack_dirs: Iterable[str | Path] | None, scenario_id: str,
-                  systems: Mapping[str, Any] | None = None) -> Ruleset:
+                  systems: Mapping[str, Any] | None = None, scoring: Mapping[str, Any] | None = None,
+                  objectives: int | None = None) -> Ruleset:
     """Load and validate packs, then assemble the ruleset for one scenario. Raises ContentError.
 
     `systems` ({espionage|conquest: bool}, a game's host override) switches stage-3 systems on or off over the
-    scenario's `systems` (a key left out or None: the scenario's; a scenario without the key: off)."""
+    scenario's `systems` (a key left out or None: the scenario's; a scenario without the key: off).
+    `scoring` ({source: weight}, SCORING.md 1.2) replaces the scenario's weights (a source not named: 0);
+    `objectives` (N >= 1) sets both `dealt` and `offer` of the objectives deal."""
     loaded = _load_all(pack_dirs if pack_dirs is not None else default_pack_dirs())
     b, parts = _assemble(loaded)
     if b.errors:
         raise ContentError(list(b.errors))
-    return _ruleset(b, parts, loaded.packs, scenario_id, systems)
+    return _ruleset(b, parts, loaded.packs, scenario_id, systems, scoring, objectives)
 
 
 def validate_packs(pack_dirs: Iterable[str | Path]) -> tuple[list[Issue], list[Issue]]:

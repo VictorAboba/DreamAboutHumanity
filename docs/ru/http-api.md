@@ -91,7 +91,10 @@ artifacts}, confirm_hash, text}`. `factions` — все фракции сцен�
 сила (драфт) или стоимость в очках и «только …», если его может взять не всякая фракция; драфт раздаётся из
 артефактов, доступных всем фракциям сценария, пока их хватает. После закрытия фазы `factions` и `offer` пусты, зато
 есть `result{faction, prefs, artifacts, auto_faction, auto_artifacts, faction_conflict, dropped}` (своё) и
-`players[{seat, nick, faction}]`. Без фазы старта — `{enabled: false, phase, text}`.
+`players[{seat, nick, faction}]`. Без фазы старта — `{enabled: false, phase, text}`. Если в партии есть тайные
+цели — ещё `objectives[{id, name, kind, params, text, points, met_now, have, need, target?, target_nick?}]` (`kind`
+и `params` — как в паке) своего места и
+строка «Твоя тайная цель …» в тексте (с фазой старта и без неё).
 
 `choose_faction` принимает список (или одну фракцию, или строку через запятую, или JSON-строку) ID, коротких ID или
 названий; `choose_artifacts` — так же артефакты. Ошибки: `UNKNOWN_ID`, `INVALID`, `NOT_OFFERED`,
@@ -112,11 +115,14 @@ artifacts}, confirm_hash, text}`. `factions` — все фракции сцен�
 `GET /v1/techs` по умолчанию короткий (около 3,5 тыс. символов вместо 9): `{enabled, resource, points, income,
 active: {tech, progress, cost} | null, researched[], techs[{id, name, branch, tier, cost, progress, status:
 researched|active|available, effects[], unlocks[]}], locked (сколько закрыто), full: false, text}` — в тексте
-изученные, активная с прогрессом/ценой и все доступные сейчас с ценой и эффектом в одну строку.
+изученные, активная с прогрессом/ценой и все доступные сейчас с ценой и эффектом в одну строку. Пока приказ `research`
+лежит в книге (Д и П2 до расчёта), в обоих видах есть `ordered {tech, order}` и строка «Исследование: … — приказ oN,
+начнётся в расчёте» вместо «не выбрано».
 `GET /v1/techs?full=true` — всё дерево: `{..., full: true, branches[{id, name, name_en, order, description, color}],
 techs[{id, name, name_en, branch, tier, cost, base_cost, progress, status: researched|active|available|locked,
 missing[], requires[], requires_any[], requires_tier, factions[], effects[], unlocks[], description}], text}` (в мосте
-— `list_techs(full=true)`). Чужие технологии не показываются (видно только `techs_count` у игроков в
+— `list_techs(full=true)`). Если наука приносит очки, в обоих — `science {points, tier_points, branch_bonus,
+branches[{id, name, have, total, complete}], weight}` и строка «Очки науки» в тексте. Чужие технологии не показываются (видно только `techs_count` у игроков в
 `/v1/state?format=json`).
 
 Исследование — обычный приказ `{"kind": "research", "tech": "<ID или название>"}` (поле `technology` тоже
@@ -124,14 +130,17 @@ missing[], requires[], requires_any[], requires_tier, factions[], effects[], unl
 `PATCH /v1/orders/{id}` с `{"tech": "..."}`. Отказы: `NOT_AVAILABLE`, `ALREADY_RESEARCHED`, `UNKNOWN_ID`, `INVALID`.
 
 `GET /v1/rules` без `topic` — краткое ядро (≤ 6000 символов) с оглавлением; `?topic=techs|factions|artifacts|setup|
-pacts|spying|conquest|combat|units|buildings|abilities|...` — раздел целиком из контента партии; ID или название контента — его
+pacts|spying|conquest|combat|units|buildings|abilities|victory|...` (`victory` — синонимы `score`, `objectives`,
+`очки`, `цели`: формулы с числами партии, стройки, пул целей) — раздел целиком из контента партии; ID или название контента — его
 описание; неизвестная тема — только список тем.
 
 ### Фаза и ожидание
 
 `/v1/phase` возвращает `game_id`, `turn`, `turn_limit`, `phase`, `deadline` (UTC, `2026-11-23T14:30:00Z`),
 `seconds_left`, `ready` ("N/M" среди живых мест), `you_ready`, `phase_seq`, `allowed` (инструменты, разрешённые в
-этой фазе), `alive`, `game_over`, `text`, а после конца партии ещё `result`; в фазе старта (`phase: "setup"`) — ещё
+этой фазе), `alive`, `game_over`, `text`, а после конца партии ещё `result` (`winners`, `reason`, `scores` — итог; при счёте не
+по умолчанию ещё `score_parts {seat: {src: n}}`, раскрытые `objectives {seat: [{id, target, met, points}]}` и
+`winners_open` — кто вёл бы без целей; в `text` — «итог: Ник N, …»); в фазе старта (`phase: "setup"`) — ещё
 `hint` (что делать). В П1, Д и П2 `hint` говорит, как нажать ready в этой фазе (он есть и в `text`); в Д и П2 в ответе
 ещё `orders_hash` — текущий хэш приказов места, так что ready — один вызов: `ready(confirm_hash=<orders_hash>)`.
 Это хэш на момент вызова: в Д подсказка велит после подачи приказов брать `orders_hash` из ответа `submit_orders`
@@ -166,9 +175,16 @@ pacts|spying|conquest|combat|units|buildings|abilities|...` — раздел ц�
 `/v1/state` отдаёт то, что место видит сквозь туман войны ([Правила игры](rules.md#туман-войны)). С `since_turn`
 от 1 до текущего хода в тексте только то, что изменилось с начала этого хода; `since_turn=0` (или без него) — всё
 состояние; ход позже текущего — `400 INVALID`. `format=json` возвращает
-`state` с полями `turn`, `turn_limit`, `phase`, `you` (ресурсы, чистый доход, ОК), `players` (ник, жив ли, счёт)
-и `provinces` (`visible`, а у видимых — `units`, `buildings`, `fortified`). Если в наборе есть технологии или
-артефакты: у `you` — `techs`, `researching`, `research`, `artifacts`; у каждого игрока — `faction` и `techs_count`
+`state` с полями `turn`, `turn_limit`, `phase`, `you` (ресурсы, чистый доход, ОК, `score`), `players` (ник, жив ли,
+`score`, `score_exact`) и `provinces` (`visible`, а у видимых — `units`, `buildings`, `fortified`). Счёт под
+туманом (SCORING.md 5): у своего места `score` точный, у других — известная нижняя граница (`score_exact: false`;
+при счёте не по умолчанию ещё `score_known {src: n | null}`, `null` — неизвестно), после конца партии у всех —
+итог и `score_exact: true`. При счёте не по умолчанию у `you` — `score_parts`, `war {points, cap_left}` (если
+война в счёте) и `objectives`, а у видимых чужих провинций — `building_now` строящейся великой стройки. В тексте —
+строка «Счёт: ты 12 [зем 8 нау 3 стр 0 вой 1] | Ник ≥7 [зем ≥5 нау ? стр 2 вой ?] | твоя цель «…» +5 — сейчас:
+нет» (≤ 300 символов), после партии — «Итог: …» с разбивкой и раскрытыми целями. Если в наборе есть технологии или
+артефакты: у `you` — `techs`, `researching`, `research`, `artifacts` (и `research_ordered {tech, order}`, пока приказ
+`research` в книге ещё не начат: строка «Наука» тогда называет его); у каждого игрока — `faction` и `techs_count`
 (чужие технологии и артефакты — только после конца партии).
 
 ### Приказы

@@ -92,7 +92,9 @@ artifacts}, confirm_hash, text}`. `factions` are all of the scenario's factions 
 only some factions may hold; draft offers are dealt from the artifacts every faction of the scenario may hold while
 there are enough of them. After the phase `factions` and `offer` are empty and the answer has the seat's own
 `result{faction, prefs, artifacts, auto_faction, auto_artifacts, faction_conflict, dropped}` and
-`players[{seat, nick, faction}]`. Without a setup phase: `{enabled: false, phase, text}`.
+`players[{seat, nick, faction}]`. Without a setup phase: `{enabled: false, phase, text}`. When the match deals
+secret objectives it also has the seat's `objectives[{id, name, kind, params, text, points, met_now, have, need,
+target?, target_nick?}]` (`kind` and `params` as in the pack) and a line «Твоя тайная цель …» in the text (with or without a setup phase).
 
 `choose_faction` takes a list (or one faction, a comma-separated string, or a JSON string) of ids, short ids or
 names; `choose_artifacts` the same for artifacts. Errors: `UNKNOWN_ID`, `INVALID`, `NOT_OFFERED`,
@@ -114,10 +116,13 @@ hidden until the game ends, and the public `techs_count` leaves out techs grante
 active: {tech, progress, cost} | null, researched[], techs[{id, name, branch, tier, cost, progress, status:
 researched|active|available, effects[], unlocks[]}], locked (how many are locked), full: false, text}` — the text
 lists the researched techs, the active one with progress/cost and every tech available now with its cost and effects
-on one line. `GET /v1/techs?full=true` is the whole tree: `{..., full: true, branches[{id, name, name_en, order,
+on one line. While a `research` order sits in the book (Д and П2, before resolution), both forms have
+`ordered {tech, order}` and the line «Исследование: … — приказ oN, начнётся в расчёте» instead of «не выбрано». `GET /v1/techs?full=true` is the whole tree: `{..., full: true, branches[{id, name, name_en, order,
 description, color}], techs[{id, name, name_en, branch, tier, cost, base_cost, progress, status:
 researched|active|available|locked, missing[], requires[], requires_any[], requires_tier, factions[], effects[],
-unlocks[], description}], text}` (the bridge: `list_techs(full=true)`). Others' techs are never shown (only
+unlocks[], description}], text}` (the bridge: `list_techs(full=true)`). When science scores, both also have
+`science {points, tier_points, branch_bonus, branches[{id, name, have, total, complete}], weight}` and a line
+«Очки науки» in the text. Others' techs are never shown (only
 `techs_count` of each player in `/v1/state?format=json`).
 
 Research is an ordinary order, `{"kind": "research", "tech": "<id or name>"}` (a `technology` field is accepted
@@ -126,14 +131,18 @@ too): submitted in A, only checked in N1, `PHASE_LOCKED` in N2; one per turn; ch
 `INVALID`.
 
 `GET /v1/rules` without `topic` is the short core (at most 6000 characters) with a table of contents;
-`?topic=techs|factions|artifacts|setup|pacts|spying|conquest|combat|units|buildings|abilities|...` is that section in full, built
+`?topic=techs|factions|artifacts|setup|pacts|spying|conquest|combat|units|buildings|abilities|victory|...` (`victory`, or
+`score`, `objectives`, `очки`, `цели`: the formulas with the match's numbers, the works, the objective pool) is that
+section in full, built
 from the match's content; a content id or name gives its description; an unknown topic lists the topics only.
 
 ### Phase and waiting
 
 `/v1/phase` returns `game_id`, `turn`, `turn_limit`, `phase`, `deadline` (UTC, `2026-11-23T14:30:00Z`),
 `seconds_left`, `ready` ("N/M" of living seats), `you_ready`, `phase_seq`, `allowed` (tools allowed in this phase),
-`alive`, `game_over`, `text`, and `result` once the match is over; in the setup phase (`phase: "setup"`) also a
+`alive`, `game_over`, `text`, and `result` once the match is over (`winners`, `reason`, `scores` the totals; with a
+non-default scoring also `score_parts {seat: {src: n}}`, the revealed `objectives {seat: [{id, target, met,
+points}]}` and `winners_open`, who would lead without objectives; the `text` adds «итог: Ник N, …»); in the setup phase (`phase: "setup"`) also a
 `hint` on what to do. In N1, A and N2 `hint` says how to press ready in this phase (it is part of `text` too); in A
 and N2 the answer also has `orders_hash`, the seat's current one, so ready is one call:
 `ready(confirm_hash=<orders_hash>)`. It is the hash at the moment of the call: in A the hint says to take
@@ -168,9 +177,18 @@ only its own seat's player.
 `/v1/state` gives the seat's view under the fog of war ([Game rules](rules.md#fog-of-war)). With `since_turn`
 between 1 and the current turn the text holds only what changed since the start of that turn; `since_turn=0` (or
 none) gives the whole state; a later turn is `400 INVALID`.
-`format=json` returns `state` with `turn`, `turn_limit`, `phase`, `you` (resources, net income, CP), `players`
-(nick, alive, score) and `provinces` (`visible`, and for visible ones `units`, `buildings`, `fortified`). When the
-ruleset has techs or artifacts, `you` also has `techs`, `researching`, `research`, `artifacts`, and every player
+`format=json` returns `state` with `turn`, `turn_limit`, `phase`, `you` (resources, net income, CP, `score`),
+`players` (nick, alive, `score`, `score_exact`) and `provinces` (`visible`, and for visible ones `units`,
+`buildings`, `fortified`). The score is under fog (SCORING.md 5): the own `score` is exact, the others' a known
+lower bound (`score_exact: false`; with a non-default scoring also `score_known {src: n | null}`, `null` unknown);
+after the match everyone's is the total with `score_exact: true`. With a non-default scoring `you` also has
+`score_parts`, `war {points, cap_left}` (when war scores) and `objectives`, and visible foreign provinces show
+`building_now` for a great work in progress. The text has the line «Счёт: ты 12 [зем 8 нау 3 стр 0 вой 1] | Ник ≥7
+[зем ≥5 нау ? стр 2 вой ?] | твоя цель «…» +5 — сейчас: нет» (at most 300 characters), after the match «Итог: …»
+with the breakdowns and the revealed objectives. When the
+ruleset has techs or artifacts, `you` also has `techs`, `researching`, `research`, `artifacts` (plus
+`research_ordered {tech, order}` while a `research` order in the book has not started yet; the «Наука» line names it),
+and every player
 entry has `faction` and `techs_count` (others' techs and artifacts only after the game ends).
 
 ### Orders

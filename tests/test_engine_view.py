@@ -10,7 +10,7 @@ AS = "core:assault"
 
 @pytest.fixture(scope="module")
 def rs():
-    return build_ruleset(None, "slice3")
+    return build_ruleset(None, "slice3", scoring={"territory": 1})     # the slice score; core 0.5.0 view: elsewhere
 
 
 @pytest.fixture

@@ -40,6 +40,10 @@ report_id?)`, `estimate_mission(mission, target, rounds?, shade?, assume_mirrors
   из контента партии. Темы: `turn`, `setup`, `resources`, `provinces`, `units`, `abilities`, `buildings`, `orders`,
   `p2`, `combat`, `victory`, `pacts`, `spying`, `conquest`, `fog`, `messages`, `techs`, `factions`, `artifacts` (есть
   только те, что нужны партии); ID или название контента в `topic` даёт его описание.
+- Счёт (docs/SCORING.md): строка «Счёт:» в `get_state` — твой счёт хода с разбивкой (`зем`, `нау`, `стр`, `вой`), у
+  соперников только нижняя граница «≥», твоя тайная цель и выполнена ли она сейчас (с фазой старта цель видна уже
+  в `get_setup`); числа партии, великие стройки и пул целей — `rules(topic="victory")`; очки науки — `list_techs`;
+  после `game_over` — итог всех в `phase()` (`result`) и строка «Итог:» в `get_state`.
 - Шпионаж и завоевание — только если их включили сценарий или хост (`dah game create --espionage on --conquest on`).
   Приказы идут через те же `validate_orders`/`submit_orders`/`amend_order`/`cancel_order`: `{"kind": "hire_shade"}`
   (только Д), `{"kind": "spy", "shade": "s1", "mission": "observe", "target": "P07", "rounds": 2}`,
@@ -231,6 +235,12 @@ uv run --project C:/path/to/DreamAboutHumanity dah-waker \
   остановленную сессию ради итога не запускает (`continue_skipped`, причина `not_running`); с `--stop-on-game-over` вместо этого останавливает сессию
   (`POST /api/v1/sessions/{id}/stop`, телеметрия `session_stopped_by_waker`); запущенный уже после game_over
   (в т. ч. перезапуск) не шлёт ни `continue`, ни stop (`continue_skipped`, `started_after_game_over`);
+- место выбыло раньше game_over (`alive: false`, `eliminated: true` в `dah.phase()`): шлёт сессии ОДНО сообщение
+  «[DAH] Ты выбыл (B): к ходу N провинций не осталось, партия для тебя окончена. Заверши цель одним итоговым
+  сообщением, больше ничего не делай.», больше это место не будит и дальше ведёт себя как после game_over (то же
+  наблюдение за расходом с `phase: after_game_over`, `--stop-on-game-over` останавливает сессию, телеметрия
+  `wake_sent`/`continue_skipped` с `phase: eliminated`, `post_game_finished` с `eliminated: true`; запущенный уже
+  после выбывания — `continue_skipped`, `started_after_eliminated`);
 - после game_over каждые 30 с читает сводку сессии и шлёт новый расход с `phase: after_game_over`, пока сессия не
   остановится, или пока её цель не окажется выполненной (`goal.status` done) при сессии не в работе (не
   `running`/`starting`) и расходе, не менявшемся 60 с (причина `goal_done`), или пока она не затихнет (`done`/`budget` без нового расхода два чтения подряд; `waiting`/`paused` опрашивает
@@ -259,7 +269,8 @@ claude mcp add dah \
 ```
 
 Затем дайте агенту текст из `uv run dah goal-text <GAME_ID> <SEAT>`. Waker одиночному клиенту не нужен: агент сам
-ждёт фаз через `dah.wait_phase` (цель не достигнута, пока `dah.phase()` не вернул `game_over`).
+ждёт фаз через `dah.wait_phase` (цель не достигнута, пока `dah.phase()` не вернул `game_over` или место не выбыло:
+`alive: false`, `eliminated: true`).
 
 ### Клиенты с JSON-конфигом
 

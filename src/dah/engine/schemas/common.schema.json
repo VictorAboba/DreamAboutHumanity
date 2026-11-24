@@ -106,10 +106,15 @@
       "maxLength": 1000
     },
     "system": {
-      "description": "a switchable stage-3 system: the entity is hidden while it is off",
+      "description": "a switchable stage-3 system, or a stage-4 score source scoring.<src>: the entity is hidden while it is off (weight 0)",
       "enum": [
         "espionage",
-        "conquest"
+        "conquest",
+        "scoring.territory",
+        "scoring.science",
+        "scoring.works",
+        "scoring.war",
+        "scoring.objectives"
       ]
     }
   }

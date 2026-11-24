@@ -29,6 +29,17 @@ caught, empty), Shade survival, sabotage strikes, P2 attacks after a strike and 
 exposed, made real), captures (attributed or not) and the alloy spent on Shades (and on replacing lost ones). The
 conquest table: fates by disposition and source, provisions spent on subjugation and idle at the end, occupation
 length, revolts, returns, and loot per province (how often one province was looted and what it gave).
+
+Stage 4 (docs/SCORING.md section 10): `--scoring SPEC` (`land` = territory only, `scenario` = the scenario's weights,
+`all` = every source at 1, `both` = land and the scenario's, or weights such as `territory=1,war=2`; repeatable) and
+`--objectives N` give each weight set its own tables and `--json` key ("...,scoring=land"). The score table: the true
+final score by source per bot type and faction (decision 18), the winner's score by source, objectives met per id x
+bot type (a passive probe plays alongside when objectives are on: `passive` is the floor of easy objectives),
+`reveal_flip`, provisions / alloy / creed idle at turn 8, great works (started, completed, lost), war pairs with a
+feeding flag, the defence share of war credit, battles per turn and the share of seats attacked by a seat, and the
+win share of seats holding no central province at turn 6 (provinces outside every start: a simulator notion only).
+The pass corridors of SCORING.md 10 (gates, at most six) and the tracked ones are printed per weight set with
+PASS / FAIL / track, and under "corridors" in the JSON.
 """
 
 from __future__ import annotations
@@ -73,6 +84,8 @@ from dah.engine import (
 )
 from dah.engine import diplomacy as dip
 from dah.engine import espionage as esp
+from dah.engine import scoring as sc_
+from dah.engine.registry import SCORE_SOURCES, TURN_SOURCES
 from dah.engine.content import Ruleset
 from dah.engine.model import GameState
 from dah.engine.setup import artifact_choices, faction_choices
@@ -264,6 +277,10 @@ def play_game(rs: Ruleset, kinds: dict[str, str], seed: str, setup: dict[str, An
     feints_real: list[tuple[int, str, str]] = []   # (turn, seat, order id) of false entries made real in P2
     occupied_turns = 0
     scores_by_turn: dict[int, dict[str, int]] = {}
+    parts_by_turn: dict[int, dict[str, dict[str, int]]] = {}
+    res_by_turn: dict[int, dict[str, dict[str, int]]] = {}
+    central_by_turn: dict[int, dict[str, int]] = {}
+    central = central_provinces(rs)
     espionage = rs.system("espionage")
     while m.state.phase != "game_over":
         m.books, m.ops = {}, []
@@ -295,8 +312,15 @@ def play_game(rs: Ruleset, kinds: dict[str, str], seed: str, setup: dict[str, An
             if e["kind"] == "battle":
                 e = {**e, "keys": [keys.get(side["owner"]) for side in e["sides"]]}
             events.append({**e, "turn": turn})
-        scores_by_turn[turn] = dict(report.public["scores"])
+        scores_by_turn[turn] = report.scores_of()      # the turn score is private since stage 4
+        parts_by_turn[turn] = report.score_parts or {s: {"territory": v} for s, v in scores_by_turn[turn].items()}
+        res_by_turn[turn] = {s: {short(r): n for r, n in p.resources.items()} for s, p in m.state.players.items()}
+        central_by_turn[turn] = {s: sum(1 for pid in central if m.state.provinces[pid].owner == s)
+                                 for s in m.state.players}
     result = m.state.result or {}
+    held = {s: {(pid, b) for pid, b, _ in sc_.works_held(m.state, rs, s)} for s in m.state.players} \
+        if sc_.on(rs, "works") else {}
+    completed = [(e["seat"], e["province"], e["building"]) for e in events if e["kind"] == "work_completed"]
     return {"kinds": kinds, "winners": result.get("winners", []), "scores": result.get("scores", {}),
             "events": events, "scores_by_turn": scores_by_turn, "turns": max(scores_by_turn),
             "resources": {s: dict(p.resources) for s, p in m.state.players.items()},
@@ -305,7 +329,22 @@ def play_game(rs: Ruleset, kinds: dict[str, str], seed: str, setup: dict[str, An
             "artifacts": {s: list(p.artifacts) for s, p in m.state.players.items()},
             "techs": {s: list(p.techs) for s, p in m.state.players.items()},
             "recons": recons, "feints_real": feints_real, "occupied_turns": occupied_turns,
-            "shades_end": {s: len(p.shades) for s, p in m.state.players.items()}}
+            "shades_end": {s: len(p.shades) for s, p in m.state.players.items()},
+            # stage 4 (SCORING.md 10): the true score by source, objectives, flip, stocks and central provinces
+            "reason": result.get("reason"), "parts_by_turn": parts_by_turn, "res_by_turn": res_by_turn,
+            "central_by_turn": central_by_turn,
+            "score_parts": result.get("score_parts") or {s: {"territory": v} for s, v in
+                                                          result.get("scores", {}).items()},
+            "objectives": result.get("objectives") or {}, "winners_open": result.get("winners_open"),
+            "objective_kinds": {oid: (o.kind, dict(o.params)) for oid, o in rs.objectives.items()},
+            "works_lost": sum(1 for seat, pid, b in completed if (pid, b) not in held.get(seat, set())),
+            "scored": not rs.default_scoring}
+
+
+def central_provinces(rs: Ruleset) -> set[str]:
+    """Provinces outside every start of the map ("central": a notion of the simulator only, SCORING.md 10)."""
+    starts = {pid for st in rs.map.starts for pid in (st.capital, *st.provinces)}
+    return set(rs.map.provinces) - starts
 
 
 # ---------------------------------------------------------------- statistics
@@ -354,6 +393,7 @@ class Tally:
         self.tier2_seats = 0
         self.seat_rows: list[tuple[str, str, list[str], float]] = []  # (faction, bot type, artifacts, win share)
         self.s3 = Stage3Tally()
+        self.s4 = ScoreTally()
 
     def add(self, rs: Ruleset, g: dict[str, Any]) -> None:
         self.games += 1
@@ -419,6 +459,7 @@ class Tally:
                           "pact_joint"):
                 self.diplo[kind] += 1
         self.s3.add(g)
+        self.s4.add(g)
         if first_cap is None:
             self.no_capture += 1
         else:
@@ -609,6 +650,275 @@ class Stage3Tally:
         return out
 
 
+IDLE_TURN = 8          # SCORING.md 10: idle stocks "к ходу 8" (the last turn of a shorter game)
+NO_CENTRE_TURN = 6     # ... the seat without central provinces "на ходу 6"
+FEED_FIGHTS = 3        # a war pair is flagged as feeding: >= this many credits one way and none back, or a pact
+# the bot type whose style pursues an objective kind (excluded from the upper bound of the objective corridor)
+PROFILE_KINDS = {"great_work": "builder", "hold_foreign": "rush", "capital_other": "rush",
+                 "rival_capital_taken": "rush"}
+PROFILE_BRANCHES = {"war": "rush", "industry": "builder", "logistics": "diplomat"}
+
+
+def objective_profile(kind: str, params: dict[str, Any]) -> str | None:
+    if kind == "techs_branch":
+        return PROFILE_BRANCHES.get(short(str(params.get("branch", ""))))
+    return PROFILE_KINDS.get(kind)
+
+
+def _at(by_turn: dict[int, Any], turn: int) -> Any:
+    """The entry of `turn`, or of the last turn played when the game ended before it."""
+    if not by_turn:
+        return {}
+    return by_turn.get(turn, by_turn[max(t for t in by_turn if t <= turn)] if min(by_turn) <= turn else {})
+
+
+class ScoreTally:
+    """Stage-4 figures (docs/SCORING.md section 10): the true score by source, objectives and the corridor inputs."""
+
+    def __init__(self) -> None:
+        self.games = 0
+        self.scored = False
+        self.by_kind: dict[str, dict[str, list[int]]] = defaultdict(lambda: defaultdict(list))
+        self.by_faction: dict[str, dict[str, list[int]]] = defaultdict(lambda: defaultdict(list))
+        self.winner_share: dict[str, list[float]] = defaultdict(list)   # source -> share in the winner's total
+        self.idle: dict[str, list[int]] = defaultdict(list)             # resource -> stock at turn 8, per seat
+        self.objectives: dict[str, dict[str, list[int]]] = defaultdict(lambda: defaultdict(lambda: [0, 0]))
+        self.objective_meta: dict[str, tuple[str, dict[str, Any]]] = {}
+        self.flip = [0, 0]                                              # [flipped, games to the turn limit]
+        self.no_centre = [0.0, 0]                                       # [win share, seats]
+        self.battles = 0
+        self.turns = 0
+        self.attacked = [0, 0]                                          # [seats attacked by a seat, seats]
+        self.games_attacked = 0                                         # games with an attack on a seat
+        self.works = [0, 0, 0]                                          # started, completed, lost
+        self.war_value = 0
+        self.war_defense = 0
+        self.pairs = 0
+        self.feeding = 0
+
+    def add(self, g: dict[str, Any]) -> None:
+        self.games += 1
+        self.scored = self.scored or bool(g.get("scored"))
+        kinds = g["kinds"]
+        parts = g.get("score_parts") or {}
+        for seat, kind in kinds.items():
+            p = parts.get(seat) or {}
+            for src in SCORE_SOURCES:
+                if src in p:
+                    self.by_kind[kind][src].append(p[src])
+                    self.by_faction[short(g["factions"][seat])][src].append(p[src])
+        winners = g.get("winners") or []
+        for seat in winners:
+            p = parts.get(seat) or {}
+            total = sum(p.values())
+            for src, n in p.items():
+                self.winner_share[src].append(n / total if total > 0 else 0.0)
+        stock = _at(g.get("res_by_turn") or {}, IDLE_TURN)
+        for seat in kinds:
+            for res, n in (stock.get(seat) or {}).items():
+                self.idle[res].append(n)
+        self.objective_meta.update(g.get("objective_kinds") or {})
+        for seat, objs in (g.get("objectives") or {}).items():
+            for o in objs:
+                row = self.objectives[o["id"]][kinds[seat]]
+                row[0] += bool(o.get("met"))
+                row[1] += 1
+        if g.get("reason") == "turn_limit" and g.get("winners_open") is not None:
+            self.flip[1] += 1
+            self.flip[0] += sorted(g["winners_open"]) != sorted(winners)
+        central = _at(g.get("central_by_turn") or {}, NO_CENTRE_TURN)
+        for seat in kinds:
+            if central and central.get(seat, 0) == 0:
+                self.no_centre[1] += 1
+                self.no_centre[0] += (1 / len(winners)) if seat in winners else 0.0
+        self.turns += g["turns"]
+        attacked: set[str] = set()
+        credits: Counter[tuple[str, str]] = Counter()
+        for e in g["events"]:
+            kind = e["kind"]
+            if kind in ("battle", "edge_battle"):
+                self.battles += 1
+                if kind == "battle" and e.get("stage") == "defense":
+                    att, dfn = e["sides"]
+                    if att.get("owner") in kinds and dfn.get("owner") in kinds:
+                        attacked.add(dfn["owner"])
+            elif kind == "work_started":
+                self.works[0] += 1
+            elif kind == "work_completed":
+                self.works[1] += 1
+            elif kind == "war_credit":
+                self.war_value += e.get("value", 0)
+                if e.get("defender"):
+                    self.war_defense += e.get("value", 0)
+                credits[(e["killer"], e["victim"])] += 1
+        self.works[2] += g.get("works_lost", 0)
+        self.attacked[0] += len(attacked)
+        self.attacked[1] += len(kinds)
+        self.games_attacked += bool(attacked)
+        pairs = {tuple(sorted(k)) for k in credits}
+        self.pairs += len(pairs)
+        partners = {tuple(sorted(e["seats"])) for e in g["events"] if e["kind"] in ("pact_signed", "pact_renewed")
+                    and len(e.get("seats") or []) == 2}
+        for a, b in pairs:
+            one_way = (credits[(a, b)] >= FEED_FIGHTS and not credits[(b, a)]) or \
+                      (credits[(b, a)] >= FEED_FIGHTS and not credits[(a, b)])
+            self.feeding += one_way or (a, b) in partners
+
+    def objective_rates(self) -> dict[str, dict[str, float]]:
+        return {oid: {k: v[0] / v[1] for k, v in sorted(rows.items()) if v[1]}
+                for oid, rows in sorted(self.objectives.items())}
+
+    def summary(self) -> dict[str, Any]:
+        def means(d: dict[str, dict[str, list[int]]]) -> dict[str, dict[str, float]]:
+            return {k: {src: statistics.mean(v) for src, v in rows.items() if v} for k, rows in sorted(d.items())}
+
+        def median(res: str) -> float | None:
+            v = self.idle.get(res) or []
+            return statistics.median(v) if v else None
+
+        return {
+            "score_by_source_per_type": means(self.by_kind),
+            "score_by_source_per_faction": means(self.by_faction),
+            "winner_share_by_source": {src: statistics.mean(v) for src, v in sorted(self.winner_share.items()) if v},
+            "winner_share_samples": max((len(v) for v in self.winner_share.values()), default=0),
+            "idle_median_turn8": {r: median(r) for r in sorted(self.idle)},
+            "objectives_met": self.objective_rates(),
+            "objectives_dealt": {oid: {k: v[1] for k, v in rows.items()} for oid, rows in sorted(self.objectives.items())},
+            "reveal_flip": self.flip[0] / self.flip[1] if self.flip[1] else None,
+            "no_centre_win_share": self.no_centre[0] / self.no_centre[1] if self.no_centre[1] else None,
+            "no_centre_seats": self.no_centre[1],
+            "battles_per_turn": self.battles / self.turns if self.turns else 0.0,
+            "seats_attacked_share": self.attacked[0] / self.attacked[1] if self.attacked[1] else 0.0,
+            "games_with_attack_share": self.games_attacked / self.games if self.games else 0.0,
+            "works": {"started": self.works[0], "completed": self.works[1], "lost": self.works[2]},
+            "works_lost_share": self.works[2] / self.works[1] if self.works[1] else None,
+            "war_defense_share": self.war_defense / self.war_value if self.war_value else None,
+            "war_pairs": self.pairs, "war_pairs_feeding": self.feeding,
+        }
+
+    def report(self) -> list[str]:
+        sm = self.summary()
+        g = max(1, self.games)
+        out: list[str] = []
+        if self.scored:
+            srcs = [src for src in SCORE_SOURCES if any(src in r for r in sm["score_by_source_per_type"].values())]
+            out.append("  score by source (true final, mean)   " + "  ".join(f"{s[:5]:>5}" for s in srcs))
+            for label, table in (("type", sm["score_by_source_per_type"]),
+                                 ("faction", sm["score_by_source_per_faction"])):
+                for k, row in table.items():
+                    out.append(f"    {label} {k:<12}" + " " * 18 + "  ".join(f"{row.get(s, 0):5.2f}" for s in srcs))
+            share = ", ".join(f"{src} {100 * v:.0f}%" for src, v in sm["winner_share_by_source"].items())
+            out.append(f"  winner's score by source: {share or '-'}")
+            for oid, rates in sm["objectives_met"].items():
+                dealt = sm["objectives_dealt"][oid]
+                cells = ", ".join(f"{k} {100 * r:.0f}% of {dealt[k]}" for k, r in rates.items())
+                out.append(f"  objective {short(oid)}: met {cells}")
+            flip, dshare = sm["reveal_flip"], sm["war_defense_share"]
+            out.append(f"  reveal_flip {'-' if flip is None else f'{100 * flip:.0f}%'}; great works started "
+                       f"{self.works[0] / g:.2f}/game, completed {self.works[1] / g:.2f}, lost {self.works[2] / g:.2f}"
+                       f"; war pairs {self.pairs / g:.2f}/game (feeding {self.feeding}); defence share of war "
+                       f"{'-' if dshare is None else f'{100 * dshare:.0f}%'}")
+        idle = ", ".join(f"{r} {v:.0f}" for r, v in sm["idle_median_turn8"].items() if v is not None)
+        nc = sm["no_centre_win_share"]
+        out.append(f"  idle at turn {IDLE_TURN} (median/seat): {idle or '-'}; battles/turn {sm['battles_per_turn']:.2f}; "
+                   f"seats attacked by a seat {100 * sm['seats_attacked_share']:.0f}% (games with one "
+                   f"{100 * sm['games_with_attack_share']:.0f}%); no centre at turn {NO_CENTRE_TURN}: win share "
+                   f"{'-' if nc is None else f'{100 * nc:.1f}%'} of {sm['no_centre_seats']} seats")
+        return out
+
+
+def corridors(rs: Ruleset, overall: Tally, per_config: dict[str, Tally], probe: Tally | None,
+              base: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """The corridors of SCORING.md 10 for one weight set: [{name, value, corridor, status}] (status PASS / FAIL for
+    the gates, track / miss for the tracked ones; "-" when there is nothing to measure). `base`: the summary of the
+    land-only weight set of the same switches, when it was played too."""
+    rows: list[dict[str, Any]] = []
+
+    def row(name: str, value: Any, corridor: str, ok: bool | None, gate: bool) -> None:
+        status = "-" if ok is None else ("PASS" if ok else "FAIL") if gate else ("track" if ok else "miss")
+        rows.append({"name": name, "value": value, "corridor": corridor, "status": status, "gate": gate})
+
+    # the mix of three: the rush,builder,diplomat configuration; else (quad4) the configurations holding all three
+    three = {"builder", "diplomat", "rush"}
+    mixes = [cfg for cfg in per_config if three <= set(cfg.split(","))]
+    mix = next((per_config[cfg] for cfg in mixes if sorted(cfg.split(",")) == sorted(three)),
+               overall if mixes and len(mixes) == len(per_config) else per_config[mixes[0]] if mixes else None)
+    best = max((mix.win_share[k] / mix.seats[k] for k in mix.seats), default=None) if mix is not None else None
+    row("mix: win share of any bot type", None if best is None else round(best, 3), "<= 0.50",
+        None if best is None else best <= 0.50, True)
+    lead = overall.leader_t3_wins / overall.leader_t3_games if overall.leader_t3_games else None
+    row("leader after turn 3 wins", None if lead is None else round(lead, 3), "<= 0.60 (target 0.55)",
+        None if lead is None else lead <= 0.60, True)
+    sm = overall.s4.summary()
+    terr = sm["winner_share_by_source"].get("territory")
+    measured = terr is not None and not rs.default_scoring     # land only: the whole score, nothing to measure
+    row("territory share of the winner's score", None if terr is None else round(terr, 3), "0.40-0.55",
+        0.40 <= terr <= 0.55 if measured else None, True)
+    food = next((v for r, v in sm["idle_median_turn8"].items() if r.endswith("provisions")), None)
+    row(f"idle provisions at turn {IDLE_TURN} (median)", food, "< 120", None if food is None else food < 120, True)
+    if sc_.on(rs, "objectives"):
+        rates = sm["objectives_met"]
+        passive = (probe.s4.objective_rates() if probe is not None else {})
+        bad = []
+        detail = {}
+        for oid, by_type in rates.items():
+            kind, params = overall.s4.objective_meta.get(oid, ("?", {}))
+            prof = objective_profile(kind, params)
+            others = [r for k, r in by_type.items() if k not in ("passive", prof)]
+            mean = statistics.mean(others) if others else None
+            pas = (passive.get(oid) or {}).get("passive", by_type.get("passive"))
+            detail[short(oid)] = {"mean_non_profile": None if mean is None else round(mean, 3),
+                                  "passive": None if pas is None else round(pas, 3), "profile": prof,
+                                  "profile_rate": None if prof is None else by_type.get(prof)}
+            if (pas is not None and pas > 0.15) or (mean is not None and not 0.30 <= mean <= 0.60):
+                bad.append(short(oid))
+        row("objectives met: passive <= 15%, non-profile mean 30-60%", {"off": bad, "per_objective": detail},
+            "every objective", not bad if rates else None, True)
+        flip = sm["reveal_flip"]
+        row("reveal_flip", None if flip is None else round(flip, 3), "0.10-0.30",
+            None if flip is None else 0.10 <= flip <= 0.30, True)
+    # tracked
+    nc = sm["no_centre_win_share"]
+    nc_base = (base or {}).get("no_centre_win_share")
+    row("no centre at turn 6: win share vs land-only", {"value": nc, "land": nc_base}, ">= land + 0.05",
+        None if nc is None or nc_base is None else nc >= nc_base + 0.05, False)
+    if not rs.default_scoring:
+        shares = {}
+        for cfg, t in per_config.items():
+            for src, v in t.s4.summary()["winner_share_by_source"].items():
+                shares[src] = max(shares.get(src, 0.0), v)
+        weak = [src for src in SCORE_SOURCES if sc_.on(rs, src) and shares.get(src, 0.0) < 0.10]
+        row("every source >= 10% of the winner's score in some configuration",
+            {src: round(v, 3) for src, v in sorted(shares.items())}, "all sources", not weak, False)
+        sci = sm["winner_share_by_source"].get("science")
+        row("science share of the winner's score", None if sci is None else round(sci, 3), "<= 0.30",
+            None if sci is None else sci <= 0.30, False)
+    creed = next((v for r, v in sm["idle_median_turn8"].items() if r.endswith("creed")), None)
+    row(f"idle creed at turn {IDLE_TURN} (median)", creed, "< 15", None if creed is None else creed < 15, False)
+    bt, bt_base = sm["battles_per_turn"], (base or {}).get("battles_per_turn")
+    att, att_base = sm["seats_attacked_share"], (base or {}).get("seats_attacked_share")
+    row("battles per turn / seats attacked vs land-only",
+        {"battles_per_turn": round(bt, 3), "land": bt_base, "seats_attacked": round(att, 3), "land_attacked": att_base},
+        ">= land", None if bt_base is None else (bt >= bt_base and att >= att_base), False)
+    if sc_.on(rs, "works"):
+        lost = sm["works_lost_share"]
+        row("great works lost / completed", None if lost is None else round(lost, 3), ">= 0.15",
+            None if lost is None else lost >= 0.15, False)
+    if sc_.on(rs, "war"):
+        row("defence share of war credit", sm["war_defense_share"], "report only", None, False)
+    return rows
+
+
+def corridor_lines(rows: list[dict[str, Any]]) -> list[str]:
+    out = ["  corridors (SCORING.md 10; gates first):"]
+    for r in rows:
+        value = r["value"]
+        if isinstance(value, dict) and "off" in value:
+            value = "off: " + (", ".join(value["off"]) or "none")
+        out.append(f"    [{r['status']:>5}] {r['name']}: {value} (corridor {r['corridor']})")
+    return out
+
+
 def artifact_lift(t: Tally) -> dict[str, tuple[float, float]]:
     """Per artifact: (raw lift, adjusted lift) in win share. Raw: the artifact's win/seat minus the mean win/seat of
     all seats; adjusted: minus what the holders' factions and bot types predict (faction rate + bot type rate - mean),
@@ -666,6 +976,7 @@ def report(name: str, t: Tally) -> list[str]:
     if len(t.f_seats) > 1 or t.a_seats or t.has_techs:
         out += stage2_report(t)
     out += t.s3.report()
+    out += t.s4.report()
     return out
 
 
@@ -733,6 +1044,21 @@ def sync_bot_numbers(rs: Ruleset) -> list[str]:
             if table.get(sid) != value:
                 changed.append(f"{sid} {table.get(sid)} -> {value}")
             table[sid] = value
+    # stage 4: great works (provisions beyond alloy, turns, points, allowed types) while works score
+    if sc_.on(rs, "works"):
+        for full, bd in rs.buildings.items():
+            if not bd.score:
+                continue
+            sid = short(full)
+            value = (bd.build_turns, int(rs.stat(f"building.{full}.score")),
+                     tuple(short(t) for t in bd.allowed_types) or None)
+            if bv.GREAT_WORKS.get(sid) != value:
+                changed.append(f"work {sid} {bv.GREAT_WORKS.get(sid)} -> {value}")
+            bv.GREAT_WORKS[sid] = value
+            cost = rs.building_cost(full).get(food, 0)
+            if bv.BUILDING_COST_FOOD.get(sid, 0) != cost:
+                changed.append(f"{sid} provisions {bv.BUILDING_COST_FOOD.get(sid, 0)} -> {cost}")
+            bv.BUILDING_COST_FOOD[sid] = cost
     # stage 3: Shade, missions, fates and conquest values (only while the system is on)
     if rs.espionage is not None:
         cost = rs.espionage.shade_cost.get(build, 0)
@@ -769,7 +1095,7 @@ def summary(t: Tally) -> dict[str, Any]:
             "techs_per_faction": {f: statistics.mean(v) for f, v in t.f_techs.items() if v},
             "techs_per_seat": {k: statistics.mean(v) for k, v in t.techs.items() if v},
             "synclite_win_per_seat": (t.f_wins["synclite"] / t.f_seats["synclite"]) if t.f_seats["synclite"] else None,
-            "stage3": t.s3.summary()}
+            "stage3": t.s3.summary(), "scoring": t.s4.summary()}
 
 
 def rotations(kinds: list[str]) -> list[dict[str, str]]:
@@ -808,6 +1134,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--artifact-points", type=int)
     ap.add_argument("--espionage", choices=("on", "off", "both"), help="espionage (default: the scenario's)")
     ap.add_argument("--conquest", choices=("on", "off", "both"), help="conquest (default: the scenario's)")
+    ap.add_argument("--scoring", action="append",
+                    help="weight set: land (territory only), scenario (default), all (every source 1), both (land "
+                         "and the scenario's) or SRC=W,... (repeatable)")
+    ap.add_argument("--objectives", type=int, help="objectives dealt per seat (a host's --objectives)")
     ap.add_argument("--json", action="store_true", help="print the tallies as JSON")
     ap.add_argument("--json-out", help="also write the JSON tallies to this file")
     args = ap.parse_args(argv)
@@ -823,20 +1153,34 @@ def main(argv: list[str] | None = None) -> int:
     lines: list[str] = []
     data: dict[str, Any] = {}
     combos = switch_combos(base, args.espionage, args.conquest)
+    try:
+        weight_sets = scoring_sets(base, args.scoring)
+    except ValueError as exc:
+        ap.error(str(exc))
     started = time.monotonic()
     games = 0
     for combo in combos:
-        rs = build_ruleset(packs, args.scenario, systems=combo) if len(combos) > 1 or any(
-            v is not None for v in (args.espionage, args.conquest)) else base
-        label = ",".join(f"{k}={'on' if rs.system(k) else 'off'}" for k in ("espionage", "conquest"))
-        if len(combos) > 1:
-            lines.append(f"######## {label}")
-        part, out, n = run_combo(ap, args, rs)
-        lines += part
-        games += n
-        data[label] = out
+        land: dict[str, Any] | None = None
+        for name, weights in weight_sets:
+            try:
+                rs = build_ruleset(packs, args.scenario, systems=combo, scoring=weights, objectives=args.objectives) \
+                    if len(combos) > 1 or weights is not None or args.objectives is not None or any(
+                        v is not None for v in (args.espionage, args.conquest)) else base
+            except Exception as exc:    # ContentError: a bad weight set
+                ap.error(str(exc))
+            label = ",".join(f"{k}={'on' if rs.system(k) else 'off'}" for k in ("espionage", "conquest"))
+            if len(weight_sets) > 1 or weights is not None:
+                label += f",scoring={name}"
+            if len(combos) > 1 or len(weight_sets) > 1:
+                lines.append(f"######## {label}")
+            part, out, n = run_combo(ap, args, rs, land)
+            if rs.default_scoring:
+                land = out["ALL"]["scoring"]
+            lines += part
+            games += n
+            data[label] = out
     lines.append(f"({games} games in {time.monotonic() - started:.0f} s)")
-    if len(combos) == 1:
+    if len(data) == 1:
         data = next(iter(data.values()))
     if args.json_out:
         Path(args.json_out).write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -845,6 +1189,27 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print("\n".join(lines))
     return 0
+
+
+def scoring_sets(rs: Ruleset, specs: list[str] | None) -> list[tuple[str, dict[str, int] | None]]:
+    """(label, weights) per `--scoring` value; None weights: the scenario's own. `land` comes first, so the other sets
+    can be compared with it."""
+    if not specs:
+        return [("scenario", None)]
+    out: list[tuple[str, dict[str, int] | None]] = []
+    for spec in specs:
+        for item in ([("land", {"territory": 1}), ("scenario", None)] if spec == "both" else [(spec, None)]):
+            name, weights = item
+            if name == "land":
+                weights = {"territory": 1}
+            elif name == "all":
+                weights = {src: 1 for src in SCORE_SOURCES}
+            elif name != "scenario" and weights is None:
+                from dah.cli import parse_scoring
+                weights = parse_scoring(name)
+            if all(name != n for n, _ in out):
+                out.append((name, weights))
+    return sorted(out, key=lambda nw: nw[0] != "land")
 
 
 def switch_combos(rs: Ruleset, espionage: str | None, conquest: str | None) -> list[dict[str, bool]]:
@@ -860,8 +1225,10 @@ def switch_combos(rs: Ruleset, espionage: str | None, conquest: str | None) -> l
             for c in values("conquest", conquest)]
 
 
-def run_combo(ap: argparse.ArgumentParser, args: argparse.Namespace, rs: Ruleset) -> tuple[list[str], dict, int]:
-    """Every configuration of one switch combination: (text lines, JSON tallies, games played)."""
+def run_combo(ap: argparse.ArgumentParser, args: argparse.Namespace, rs: Ruleset,
+              land: dict[str, Any] | None = None) -> tuple[list[str], dict, int]:
+    """Every configuration of one switch combination and weight set: (text lines, JSON tallies, games played).
+    `land`: the score summary of the land-only weight set played before (the base of the tracked corridors)."""
     changed = sync_bot_numbers(rs)
     lines = combat_table(rs)
     if changed:
@@ -885,6 +1252,7 @@ def run_combo(ap: argparse.ArgumentParser, args: argparse.Namespace, rs: Ruleset
                      f"{'chosen by the bots' if deal is None else 'dealt by rotation'})")
     configs = args.config or list(DEFAULT_CONFIGS_4 if len(rs.map.starts) >= 4 else DEFAULT_CONFIGS)
     overall = Tally()
+    per_config: dict[str, Tally] = {}
     data: dict[str, Any] = {}
     for cfg in configs:
         kinds = [k.strip() for k in cfg.split(",")]
@@ -901,12 +1269,32 @@ def run_combo(ap: argparse.ArgumentParser, args: argparse.Namespace, rs: Ruleset
             overall.add(rs, g)
         lines += report(cfg, tally)
         data[cfg] = summary(tally)
+        per_config[cfg] = tally
+    played = overall.games
+    probe: Tally | None = None
+    if sc_.on(rs, "objectives") and not any("passive" in cfg.split(",") for cfg in configs):
+        # the floor of easy objectives (SCORING.md 10): a passive seat in the first configuration, apart from ALL
+        kinds = ["passive", *[k.strip() for k in configs[0].split(",")][1:]]
+        probe = Tally()
+        rots = rotations(kinds)
+        for i in range(max(4, args.games // 4)):
+            kinds_i = rots[i % len(rots)]
+            assigned = dealt_factions(deal, list(kinds_i), i // len(rots)) if deal else None
+            probe.add(rs, play_game(rs, kinds_i, f"sim|probe|{i}", setup, assigned))
+        played += probe.games
+        rates = {short(o): f"{100 * r.get('passive', 0):.0f}%" for o, r in probe.s4.objective_rates().items()}
+        lines.append(f"== passive probe ({','.join(kinds)}, {probe.games} games): objectives met by passive "
+                     + (", ".join(f"{o} {v}" for o, v in rates.items()) or "-"))
+        data["passive_probe"] = summary(probe)
     lines += report("ALL configurations", overall)
     if overall.f_seats["synclite"]:
         lines.append(f"  synclite: win/seat {_pct(overall.f_wins['synclite'], overall.f_seats['synclite']).strip()} "
                      f"over {overall.f_seats['synclite']} seats")
     data["ALL"] = summary(overall)
-    return lines, data, overall.games
+    rows = corridors(rs, overall, per_config, probe, land if not rs.default_scoring else None)
+    lines += corridor_lines(rows)
+    data["corridors"] = rows
+    return lines, data, played
 
 
 if __name__ == "__main__":

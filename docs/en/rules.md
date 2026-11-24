@@ -161,12 +161,19 @@ unit. (A match on core 0.2.0, which has no techs, keeps one edge per move.)
 | `citadel` | Цитадель | 40 alloy | 2 turns | province defense +0.3; needs Fortification |
 | `warehouse` | Склад | 20 alloy | 1 turn | +2 provisions; recruiting here 20% cheaper; needs Supply Routes |
 | `hq` | Штаб | 35 alloy | 2 turns | allows recruiting; province defense +0.1; +25% back on N2 cancels; needs Staff Litanies |
+| `monument` | Монумент Предела | 25 provisions + 10 alloy | 2 turns | great work: +3 points; one per seat |
+| `dream_spire` | Шпиль Сна | 150 provisions + 50 alloy | 4 turns | great work: +3 points; one per seat; not in a capital (forge, agri, waste, shrine) |
 
 A province holds at most one building of each kind. Recruiting is possible only in a province with barracks (or a
 headquarters). The warehouse discount is counted per unit and rounded in the seat's favour (the unit price is rounded
 down), so one order of three costs the same as three orders of one. A
 building ordered this turn with a build time of 1 is finished at the end of this turn's resolution and gives income
 from the next turn. A construction is lost if its province changes owner.
+
+Great works (core 0.5.0) exist only where the score counts the works source (see «Victory and scoring»). Their start
+and completion are public. `max_per_owner` counts ready and pending buildings in all own provinces (a second one is
+refused with `ALREADY_BUILT` «у тебя уже есть 1 из 1»; a captured one may be kept), and `allowed_types` lists the
+province types the building may be built in (otherwise `NOT_AVAILABLE`).
 
 ## Orders
 
@@ -189,15 +196,19 @@ short (`assault`) or full (`core:assault`); a unit may also be named by its stat
   forms give the same order, `orders_hash` and replay.
 - `recruit`: in an own province with barracks.
 - `build`: in an own province that has no such building yet.
-- `fortify`: +15% defense (`combat.fortify_bonus`: 0.25 by default, the `core` scenarios set 0.15) if no units
-  leave the province.
+- `fortify`: +15% defense (`combat.fortify_bonus`: 0.25 by default, the `core` scenarios set 0.15). Since `core`
+  0.5.0 (`combat.fortify_persists` = 1) one order is enough: the fortification lasts while your units stay.
 - `research`: choose the active tech (only in A; one per turn); see Techs. `tech` may be an id, a short id or the
   Russian or English name. Change it with `amend_order(id, patch={"tech": "..."})` in A.
 
 - A unit can be in only one order: units in a `move` are reserved.
 - Resources of `recruit` and `build` are reserved when the order is accepted and spent at resolution.
 - Recruited units appear in the province at the start of resolution: they defend it this turn but cannot move.
-- If any unit leaves a fortified province, the fortification is broken.
+- A `core` 0.5.0 fortification lasts from turn to turn while the owner's units stand in the province: part of the
+  stack may leave and recruits in place keep it. It is lost when the owner's own moves leave the province empty
+  (event `fortify_broken`), when the province is taken (its defender lost a battle) and when its units die. A
+  sabotage (`deny_fortify`) removes it only for its own turn. In `core` 0.4.0 and older
+  (`combat.fortify_persists` = 0) a fortification lasts one turn and any unit leaving breaks it.
 - At resolution every order is checked again against the state at the start of the turn. An order that no longer
   holds is dropped, and its seat sees why in the turn report.
 
@@ -325,7 +336,8 @@ The engine resolves a turn in this order:
 7. **Research**: the active tech is learned when its progress reaches its cost; it works from the next turn.
 8. **Elimination**: a seat with no provinces is out. Then broken pacts end, pacts of eliminated seats and expired
    pacts end, and unanswered proposals lapse.
-9. **Victory check** and the turn report.
+9. **The turn score** (after buildings and research: what was finished or learned this turn already counts), the
+   **victory check** and the turn report.
 
 ## Combat
 
@@ -342,7 +354,9 @@ strength = Σ over units (attack, or defense for the defender)
            × random factor 0.9–1.1
 ```
 
-The stronger side wins. With `S_w` the winner's strength and `S_l` the loser's:
+The stronger side wins; the attacker needs strictly more strength (after the random factor), so an exact tie
+goes to the defender. Between attackers a tie goes to the one that was weaker before the battle (the challenger), and in a
+head-on battle on an edge to the move from the province with the larger id. With `S_w` the winner's strength and `S_l` the loser's:
 
 - the loser loses `min(1, 0.5 · S_w / S_l)` of its units;
 - the winner loses `0.3 · S_l / S_w` of its units;
@@ -380,6 +394,8 @@ army of each and fights in P07; a hidden army (`?` in the state) has to be guess
 - The turn report of a seat holds the events in its provinces and in the provinces it saw before or after the turn.
   Economy, starvation, recruiting, constructions started, broken fortifications and dropped orders are seen only
   by their own seat.
+- The score: a seat's own exactly and with its breakdown; the others' only as a lower bound «≥» (land over the
+  provinces it sees now, great works from the public events, science and war «?»). After `game_over` all is open.
 
 `get_state` returns a compact Russian text, roughly like this:
 
@@ -389,6 +405,7 @@ army of each and fights in P07; a hidden army (`?` in the state) has to be guess
 P01 Столица Аргос [ТЫ] столица штурм×3 | казарма | → P02 P03 P04
 P07 Нивы Лира [Хор#2] агро штурм×2 | → P02 P05
 P13 Сердце Кузен [нейтр.] кузн. ? | → P04 P08 P12 P14 P15
+Счёт: ты 9 [зем 7 нау 2 стр 0 вой 0] | Хор#2 ≥5 [зем ≥5 нау ? стр 0 вой ?] | твоя цель «Житница» +5 — сейчас: нет
 ```
 
 With `since_turn=N` it gives the treasury, the own and visible provinces that changed, and a ИЗМЕНЕНИЯ (changes)
@@ -412,10 +429,40 @@ line. `format=json` gives the same view as JSON.
 
 ## Victory and scoring
 
-- The match ends when one living seat is left (it wins) or after the last turn.
-- After the last turn the seats with the most points win: 1 point per province, plus 3 per capital, own or
-  captured. A draw is possible.
-- Scores are public and shown in `get_state` and in each turn report.
+- The match ends when one living seat is left (it wins) or after the last turn. After the last turn the living
+  seats with the highest final score win; a draw is possible.
+- **Core 0.5.0 scenarios `slice3`, `slice2`, `quad4` (and `blitz_score`)** add up five sources, each with weight 1
+  (the authoritative spec is [SCORING.md](../SCORING.md), in Russian):
+  - **land**: 1 per own full province, +3 per capital of the map (any: own, captured, of the Wastelands);
+    Occupied and Ashen provinces give 0;
+  - **science**: 1 per tech researched by order, tier 1 or 2 (gifts of artifacts and start techs give 0), +1 per
+    completed branch;
+  - **great works**: Monument of the Verge (`monument`, 25 provisions + 10 alloy, 2 turns, +3, any province) and
+    Dream Spire (`dream_spire`, 150 provisions + 50 alloy, 4 turns, +3, not in a capital); one of each per seat;
+    they score while ready in an own full province and pass with the province; their start and completion are
+    public;
+  - **war**: the price of the other seats' units killed in battle (half when defending), 1 point per 15 (the
+    Growth: per 10), at most 3 from one rival and 5 in all; neutrals, starvation, revolts and retreat losses give nothing;
+  - **secret objective**: one per seat, dealt at the start (hold two forges, six provinces, a province of another
+    seat's start, a ready great work; on `mirror2`/`mirror3` also two agri worlds, four War or three Industry techs,
+    on `mirror4` two shrines; with three seats or more a rival's capital, or take the named rival's capital); +5 if
+    met at the end. Revealed only at game over.
+- The turn score is not public (decision 24): a seat sees its own in full and only a lower bound «≥» of the others'
+  (the land it sees, the public great works); a spy's «Счётная книга» mission reads a rival's exact breakdown.
+  `rules(topic="victory")` gives a match's numbers and its objective pool.
+- `blitz_test` and `blitz_spy` keep the old score: 1 point per province plus 3 per capital, own or captured; the
+  others' score is also only the «≥» of what you see.
+- The weights come from the scenario (`scoring`, 0..5 per source) or the host (`dah game create --scoring ...
+  --objectives N`). A source with weight 0 is not mentioned in the rules and its content (works, objectives) is
+  hidden. The turn score is land, science, works and war; the objective is added only to the final total. On an
+  equal total every seat that has it wins; an eliminated seat's objective is revealed but does not count.
+- **Where to look:** the «Счёт:» line of `get_state` (≤ 300 characters: you with the breakdown, rivals as «≥», your
+  objective and whether it is met now); in JSON `you.score`, `you.score_parts`, `you.war {points, cap_left}`,
+  `you.objectives` (with a setup phase the objective is already in `get_setup`), and per player `score`,
+  `score_exact` and `score_known` (`null`: unknown). Science points and branch progress are in `list_techs`; pool
+  objectives and great works in `describe`; the turn report (`history`) shows only your own score. After the match
+  `phase()` (`result`: `scores` the totals, `score_parts`, the revealed `objectives`, `winners_open` — who would
+  lead without objectives) and the «Итог:» line of `get_state` show everything.
 
 ## Techs
 
@@ -436,7 +483,7 @@ tree with requirements; `rules(topic="techs")` shows the whole tree for everyone
 | `litany` | Литания Ржавого Престола | alloy +10%, buildings −20%, Industry −30%; move range −1 | Throne Warden |
 | `synclite` | Безликий Синклит | +1 CP, better N2 refund, Mystery −40%; heavy units −1 attack | Faceless |
 | `ash_choir` | Хор Пепла | creed +50%, dreamwalker −30%, Mystery −25%; alloy −10% | Ash Cantors |
-| `growth` | Ненасытная Поросль | militia for provisions only, provisions +15%, War −30%; creed −50% | Devourer |
+| `growth` | Ненасытная Поросль | militia for provisions only, provisions +15%, War −30%, a war point per 10 (when war scores); creed −30% | Devourer |
 | `captains` | Вольные Капитаны Разлома | no hasty penalty, +2 alloy a turn, Logistics −30%; province defense −10% | Rift Corsairs |
 
 Artifacts are bonuses for the whole match, chosen in the setup phase: a tech from the start, a building in the
@@ -502,9 +549,16 @@ before. The numbers below are the defaults; a game's exact numbers are in `rules
 | `core:quad4` | `mirror4` | 12 | 6 factions, artifact draft (3 offered) | 5m / 12m / 5m / 5m | on / on |
 | `core:blitz_test` | `mirror3` | 6 | none (`covenant` only) | — / 5s / 5s / 5s | off / off |
 | `core:blitz_spy` | `mirror3` | 6 | none (`covenant` only) | — / 5s / 5s / 5s | on / on |
+| `core:blitz_score` | `mirror3` | 6 | 3 factions, artifact draft (3 offered) | 5s / 5s / 5s / 5s | on / on |
+
+Scoring: `slice3`, `slice2`, `quad4` and `blitz_score` count all five sources with weight 1 and deal one secret
+objective; `blitz_test` and `blitz_spy` count land only. Great works are in `buildings/great_works.yaml`, objectives in
+`objectives/objectives.yaml`.
 
 `dah game create --limits`, `--turns` and the setup flags override the scenario's values for one match;
-`--espionage on|off` and `--conquest on|off` switch the stage-3 systems for one match.
+`--espionage on|off` and `--conquest on|off` switch the stage-3 systems, `--scoring
+territory=1,science=1,works=0,war=1,objectives=1` sets the source weights (a source not named: 0), and
+`--objectives N` the number of secret objectives dealt per seat.
 
 ## The rules tool
 
@@ -515,7 +569,9 @@ espionage, conquest, resolution, provinces, buildings, units and, last, the orde
 
 With `topic` it returns one section in full, built from the match's content: `turn` (or `phases`), `setup` (the
 setup phase), `resources`, `provinces`, `units`, `abilities` (unit abilities), `buildings`, `orders`, `p2` (or
-`cp`), `combat` (or `resolution`), `victory`, `pacts` (or `diplomacy`, `gifts`), `spying` (or `espionage`, `spies`,
+`cp`), `combat` (or `resolution`), `victory` (or `score`, `scoring`, `objectives`, `works`, `очки`, `цели`,
+`счёт`, `стройки`: the formulas with the match's numbers, the great works, the objective pool, the score under fog),
+`pacts` (or `diplomacy`, `gifts`), `spying` (or `espionage`, `spies`,
 `intel`, `feint`), `conquest` (or `capture`, `occupation`, `dispose`, `claims`), `fog` (or `visibility`),
 `messages`, `techs` (the whole tree: branches, tiers, costs, requirements, effects), `factions` (bonuses,
 drawbacks, start, unique content), `artifacts` (every artifact with power, cost and effects). Only the topics the

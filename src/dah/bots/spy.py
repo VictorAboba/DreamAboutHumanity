@@ -123,6 +123,29 @@ def hire_order(view: StateView, memory: SpyMemory, *, from_turn: int, max_shades
     return {"kind": "hire_shade"}
 
 
+def first_shade(view: StateView, memory: SpyMemory) -> bool:
+    """The seat has never held a Shade it lost and holds none now: its first hire (m6: hired at its price, saved
+    for); a replacement after a loss keeps the bot's old, higher alloy threshold."""
+    return not view.shades and memory.lost_turn is None
+
+
+def shade_savings(view: StateView, memory: SpyMemory, *, from_turn: int, alloy: int) -> int:
+    """Alloy to keep back this turn so that the first Shade can be hired next turn (m6: armies that spend all their
+    alloy every turn never reach the price). Only for the first Shade (`first_shade`), with espionage on, from
+    `from_turn`, while the start capital stands and 3+ turns are left: the price less next turn's net alloy income
+    (all of `alloy` when the income is unknown), at most `alloy`; else 0."""
+    esp = view.espionage
+    if esp is None or not first_shade(view, memory) or int(esp.get("shades_max", 0)) < 1 or view.turn < from_turn:
+        return 0
+    if alloy >= shade_cost() or home_capital(view) is None:
+        return 0
+    if view.turn_limit and view.turns_left() < 3:
+        return 0
+    income = (view.net_income or {}).get(BUILD_RESOURCE) if view.net_income is not None else None
+    need = shade_cost() if income is None else shade_cost() - max(0, int(income))
+    return max(0, min(alloy, need))
+
+
 def can_start(view: StateView) -> bool:
     esp = view.espionage or {}
     return len(active_shades(view)) < int(esp.get("active_limit", 0))

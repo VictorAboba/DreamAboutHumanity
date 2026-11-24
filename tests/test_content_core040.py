@@ -23,6 +23,7 @@ from test_review_stage2 import FakeClock, _play_out
 
 CORE = DEFAULT_PACKS_DIR / "core"
 CORE030 = LEGACY_PACKS_DIR / "core-0.3.0"
+CORE040 = LEGACY_PACKS_DIR / "core-0.4.0"   # frozen when core moved to 0.5.0 (m6 fixes: lasting fortification)
 OFF = {"espionage": False, "conquest": False}
 ALLOY, FOOD = "core:alloy", "core:provisions"
 SEATS = [{"seat": "A", "nick": "Нико", "kind": "agent"}, {"seat": "B", "nick": "Соло", "kind": "agent"}]
@@ -55,11 +56,13 @@ def key(rs, **kw):
 # ---------------------------------------------------------------- version, freeze, switches
 
 def test_version_and_clean_validation():
-    assert "version: 0.4.0" in (CORE / "pack.yaml").read_text(encoding="utf-8")
+    assert "version: 0.5.0" in (CORE / "pack.yaml").read_text(encoding="utf-8")
+    assert "version: 0.4.0" in (CORE040 / "pack.yaml").read_text(encoding="utf-8")
     assert "version: 0.3.0" in (CORE030 / "pack.yaml").read_text(encoding="utf-8")
     assert validate_packs(default_pack_dirs()) == ([], [])
     assert validate_packs([CORE030]) == ([], [])
-    for scenario in ("slice3", "slice2", "quad4", "blitz_test", "blitz_spy"):
+    assert validate_packs([CORE040]) == ([], [])
+    for scenario in ("slice3", "slice2", "quad4", "blitz_test", "blitz_spy", "blitz_score"):
         assert build_ruleset(None, scenario).warnings == ()
 
 
@@ -74,10 +77,63 @@ def test_frozen_core_030_is_the_old_pack():
 @pytest.mark.parametrize("scenario", ["slice3", "slice2", "quad4", "blitz_test"])
 def test_core_040_with_the_systems_off_is_core_030_but_for_the_version(scenario):
     old = build_ruleset([str(CORE030)], scenario).to_dict()
-    new = build_ruleset(None, scenario, OFF).to_dict()
+    new = build_ruleset([str(CORE040)], scenario, OFF).to_dict()
     assert new["packs"] == {"core": "0.4.0"} and old["packs"] == {"core": "0.3.0"}
     new["packs"] = old["packs"]
     assert new == old
+
+
+@pytest.mark.parametrize("scenario", ["slice3", "slice2", "quad4", "blitz_test", "blitz_spy"])
+def test_core_050_is_core_040_with_a_lasting_fortification(scenario):
+    """Under the default score core 0.5.0 differs from the frozen 0.4.0 only by its version,
+    combat.fortify_persists = 1 in every scenario (an unseeded stat: 0.4.0 and older games keep their hashes and
+    their one-turn fortify) and the two non-scoring numbers of the 0.5.0 balance (SCORING.md «Баланс core 0.5.0»:
+    the Growth's creed −30% instead of −50%, the Tithe Chalice +2 creed instead of +3); the scoring content and the
+    score.* modifiers are hidden (test_content_core050.py)."""
+    old = build_ruleset([str(CORE040)], scenario)
+    new = build_ruleset(None, scenario, scoring={"territory": 1})
+    assert old.stat("combat.fortify_persists") == 0 and new.stat("combat.fortify_persists") == 1
+    a, b = old.to_dict(), new.to_dict()
+    assert b["packs"] == {"core": "0.5.0"} and a["packs"] == {"core": "0.4.0"}
+    assert old.hash != new.hash
+    b["packs"] = a["packs"]
+    for x, y in [(a["stats"], b["stats"]), *((a["faction_stats"][f], b["faction_stats"][f])
+                                              for f in b["faction_stats"])]:
+        assert y.pop("combat.fortify_persists") == 1 and "combat.fortify_persists" not in x
+    a["scenario"]["overrides"] = [o for o in a["scenario"].get("overrides", ())]
+    b["scenario"]["overrides"] = [o for o in b["scenario"].get("overrides", ())
+                                  if o.get("target") != "combat.fortify_persists"]
+    creed = "resource.core:creed.income_mul"
+    if "core:growth" in b["factions"]:
+        assert (a["faction_stats"]["core:growth"][creed], b["faction_stats"]["core:growth"][creed]) == \
+            (pytest.approx(0.5), pytest.approx(0.7))
+        b["faction_stats"]["core:growth"][creed] = a["faction_stats"]["core:growth"][creed]
+        b["factions"]["core:growth"] = a["factions"]["core:growth"]
+    tithe = [d["artifacts"]["core:tithe_chalice"]["effects"][0]["amount"] for d in (a, b)]
+    assert tithe == [3, 2]
+    b["artifacts"]["core:tithe_chalice"] = a["artifacts"]["core:tithe_chalice"]
+    assert a == b
+
+
+def test_a_core_040_game_replays_with_the_frozen_pack(tmp_path):
+    """A game created on core 0.4.0 (stage 3a) replays and loads with content/legacy/core-0.4.0."""
+    clock = FakeClock()
+    config = make_config(game_id="g040", scenario="core:slice2", seats=SEATS, seed=7, turn_limit=2,
+                         pack_dirs=[str(CORE040)])
+    config.pop("setup", None)
+    config["phase_limits"].pop("setup", None)
+    gdir, _ = init_game_dir(tmp_path, config)
+    game = Game.create(gdir, clock)
+    _play_out(game, clock)
+    old_hash = game.ruleset.hash
+    raw = json.loads(gdir.config_path.read_text(encoding="utf-8"))
+    raw["pack_dirs"] = None
+    gdir.config_path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+    rep = replay(GameDir(gdir.path))
+    assert rep.ok and [t.turn for t in rep.turns] == [1, 2]
+    assert rep.pack_dirs and Path(rep.pack_dirs[0]).name == "core-0.4.0"
+    loaded = Game.load(GameDir(gdir.path), clock)
+    assert loaded.ruleset.hash == old_hash and loaded.ruleset.stat("combat.fortify_persists") == 0
 
 
 def test_scenario_switches():

@@ -412,7 +412,11 @@ h4 { margin: 12px 0 6px; font-size: 14px; }
       row("Здания", (sp.buildings || []).map(function (b) { return nameOf("building_names", b); }).join(", ") || "нет");
       if (sp.building_now && sp.building_now.length) row("Строится", sp.building_now.map(function (b) {
         return nameOf("building_names", b.building) + " (" + b.turns_left + ")"; }).join(", "));
-    } else row("Войска", "скрыты до конца партии");
+    } else {
+      row("Войска", "скрыты до конца партии");
+      if (sp.great_works && sp.great_works.length) row("Великие стройки", sp.great_works.map(function (g) {
+        return nameOf("building_names", g.building) + (g.done ? " (готова)" : " (строится, ещё " + g.turns_left + ")"); }).join(", "));
+    }
     box.appendChild(dl);
     var evs = (S.snap ? S.snap.events : []).filter(function (e) {
       return e.province === p.id || (e.edge && e.edge.indexOf(p.id) >= 0) || e.from === p.id; });
@@ -463,7 +467,10 @@ h4 { margin: 12px 0 6px; font-size: 14px; }
       }
     } else if (s.turn === 0) box.appendChild(el("p", {cls: "note", text: "Стартовая карта. События появятся после расчёта первого хода."}));
     else if (s.in_progress) box.appendChild(el("p", {cls: "note", text: "Ход идёт: события появятся после расчёта."}));
-    if (!s.full && s.turn > 0) box.appendChild(el("p", {cls: "note", text: "Зрителю видны только публичные события: смены владельцев, судьбы провинций, бунты, притязания и выбывания. Бои, войска и приказы откроются после конца партии."}));
+    if (!s.full && s.turn > 0) box.appendChild(el("p", {cls: "note", text: "Зрителю видны только публичные события: смены владельцев, судьбы провинций, бунты, притязания и выбывания" +
+      (S.meta && S.meta.works ? ", великие стройки (начало и готовность)" : "") +
+      (S.meta && S.meta.objectives ? "; тайные цели откроются в конце партии" : "") +
+      ". Бои, войска и приказы откроются после конца партии."}));
     if (s.events.length) {
       var ul = el("ul", {cls: "feed"});
       s.events.forEach(function (e) { ul.appendChild(eventItem(e)); });
@@ -546,11 +553,54 @@ h4 { margin: 12px 0 6px; font-size: 14px; }
     tb.appendChild(el("tr", {}, [el("th", {text: "Ход"})].concat(seats.map(function (s) { return el("th", {text: s.nick}); }))));
     hist.forEach(function (h) {
       var tr = el("tr", {cls: h.turn === S.turn ? "cur" : ""}, [el("td", {text: h.turn === 0 ? "старт" : String(h.turn)})]
-        .concat(seats.map(function (s) { return el("td", {text: String(h.scores[s.seat] != null ? h.scores[s.seat] : "—")}); })));
+        .concat(seats.map(function (s) {
+          var v = h.scores[s.seat] != null ? String(h.scores[s.seat]) : "—";
+          var src = h.by_source && h.by_source[s.seat];
+          if (src) v += " [" + Object.keys(SCORE_LABELS).filter(function (k) { return src[k] != null; })
+            .map(function (k) { return SCORE_LABELS[k] + " " + src[k]; }).join(" ") + "]";
+          return el("td", {text: v});
+        })));
       tb.appendChild(tr);
     });
     box.appendChild(el("div", {cls: "tablebox"}, [tb]));
-    box.appendChild(el("p", {cls: "note", text: "Очки: 1 за провинцию, +3 за каждую столицу."}));
+    var bySource = hist.some(function (h) { return h.by_source && Object.keys(h.by_source).length; });
+    box.appendChild(el("p", {cls: "note", text: bySource
+      ? "Счёт хода по источникам: зем — земля, нау — наука, стр — великие стройки, вой — война. Тайные цели добавляются к итогу в конце партии."
+      : "Очки: 1 за провинцию, +3 за каждую столицу."}));
+    renderFinal(box, l, seats);
+  }
+  var SCORE_LABELS = {territory: "зем", science: "нау", works: "стр", war: "вой"};
+  var FINAL_LABELS = {territory: "зем", science: "нау", works: "стр", war: "вой", objectives: "цель"};
+  // the end of a scored game: the final score by source and every seat's objective (revealed to all); while the game
+  // runs only the full level (admin) gets the objectives with their progress, the delayed spectator sees «?»
+  function renderFinal(box, l, seats) {
+    var res = l.result, objs = {};
+    (S.snap ? S.snap.players : []).forEach(function (p) { if (Array.isArray(p.objectives)) objs[p.seat] = p.objectives; });
+    var final = res && res.score_parts;
+    if (!final && !Object.keys(objs).length) return;
+    var tb = el("table");
+    var head = final ? ["Игрок", "Итог", "По источникам", "Тайная цель"] : ["Игрок", "Тайная цель (сейчас)"];
+    tb.appendChild(el("tr", {}, head.map(function (h) { return el("th", {text: h}); })));
+    seats.forEach(function (s) {
+      var list = objs[s.seat] || (final && res.objectives ? res.objectives[s.seat] || [] : []);
+      var otext = list.map(function (o) {
+        var met = o.met_now != null ? o.met_now : o.met;
+        var prog = o.have != null ? " " + o.have + "/" + o.need : "";
+        return (o.name || o.id) + " " + (met ? "✓" : "✗") + prog + " (+" + o.points + ")";
+      }).join(", ") || "—";
+      var cells = [s.nick];
+      if (final) {
+        var src = final[s.seat] || {};
+        var parts = Object.keys(FINAL_LABELS).filter(function (k) { return src[k] != null; })
+          .map(function (k) { return FINAL_LABELS[k] + " " + src[k]; }).join(" + ");
+        var total = res.scores && res.scores[s.seat] != null ? String(res.scores[s.seat]) : "—";
+        cells = cells.concat([total, parts || "—"]);
+      }
+      cells.push(otext);
+      tb.appendChild(el("tr", {}, cells.map(function (x) { return el("td", {text: x}); })));
+    });
+    box.appendChild(el("h4", {text: final ? "Итог партии" : "Тайные цели"}));
+    box.appendChild(el("div", {cls: "tablebox"}, [tb]));
   }
   function renderTechs() {
     var box = $("tab-techs"), s = S.snap;

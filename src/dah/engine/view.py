@@ -8,10 +8,11 @@ from typing import Any, Mapping, Sequence
 from . import conquest as cq
 from . import diplomacy as dip
 from . import registry
+from . import scoring as sc_
 from .content import Ruleset
 from .model import GameState, SeatOrders
 from .orders import cp_left as _cp_left
-from .resolve import TurnReport, income_of, scores, upkeep_of, visible_provinces
+from .resolve import TurnReport, income_of, upkeep_of, visible_provinces
 from .techs import public_techs, stat_key
 
 PHASE_LABELS = {
@@ -32,6 +33,13 @@ class DeadlineInfo:
 
 # ---------------------------------------------------------------- JSON view
 
+def pending_research(book: SeatOrders | None) -> dict[str, str] | None:
+    """The seat's research order still in its book ({tech, order}): it becomes active only at resolution, so until
+    then the state and list_techs name it instead of «не выбрано» (LIVE-5)."""
+    order = next((o for o in (book.orders if book else ()) if o.kind == "research" and o.tech), None)
+    return {"tech": order.tech, "order": order.id} if order is not None else None
+
+
 def view_state(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders | None = None) -> dict[str, Any]:
     """What `seat` may know: own resources, all owners (public map), units/buildings only near own land."""
     me = state.players[seat]
@@ -39,6 +47,7 @@ def view_state(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders |
     key = stat_key(state, ruleset, seat)
     income, upkeep = income_of(state, ruleset, seat, key), upkeep_of(state, ruleset, seat, key)
     provinces = []
+    works_on = sc_.on(ruleset, "works")
     statuses = cq.statuses_for(state) if ruleset.system("conquest") else {}
     for pid, p in sorted(state.provinces.items()):
         entry: dict[str, Any] = {"id": pid, "name": p.name, "type": p.type, "owner": p.owner,
@@ -52,8 +61,16 @@ def view_state(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders |
         if p.owner == seat:
             entry["building_now"] = [{"building": b.building, "turns_left": b.turns_left}
                                      for b in state.pending_builds if b.province == pid]
+        elif pid in seen and works_on:
+            # a great work in progress is public (SCORING.md 2.3): its mark on the provinces the seat sees now
+            now = [{"building": b.building, "turns_left": b.turns_left} for b in state.pending_builds
+                   if b.province == pid and ruleset.buildings[b.building].score]
+            if now:
+                entry["building_now"] = now
         provinces.append(entry)
-    sc = scores(state, ruleset)
+    over = state.phase == "game_over"
+    known = {s: sc_.score_known(state, ruleset, seat, s) for s in state.players}
+    final = state.result.get("scores") if over and state.result else None
     you: dict[str, Any] = {"seat": seat, "nick": me.nick, "faction": me.faction, "alive": me.alive,
                            "resources": dict(me.resources),
                            "net_income": {r: income[r] - upkeep[r] for r in ruleset.resources},
@@ -66,14 +83,32 @@ def view_state(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders |
                               if me.researching in ruleset.techs else None)
         you["research"] = dict(me.research)
         you["artifacts"] = list(me.artifacts)
+        ordered = pending_research(book)
+        if ordered is not None and ordered["tech"] in ruleset.techs and ordered["tech"] != me.researching:
+            you["research_ordered"] = ordered       # only with the seat's own book (get_state), never in snapshots
     if ruleset.system("conquest"):
         you["conquest_policy"] = me.conquest_policy
     if ruleset.system("espionage"):
         from .espionage import own_view
         you["espionage"] = own_view(state, ruleset, seat)     # own S, C, limits and Shades only
+    # the score under fog (SCORING.md 5, 8): own in full, the others' a known lower bound; everything after the game
+    you["score"] = (final or {}).get(seat, known[seat]["score"]) if over else known[seat]["score"]
+    if not ruleset.default_scoring:
+        you["score_parts"] = dict(known[seat]["parts"])
+        if sc_.on(ruleset, "war"):
+            key_ = stat_key(state, ruleset, seat)
+            you["war"] = {"points": sc_.war(state, ruleset, seat, key_),
+                          "cap_left": sc_.war_cap_left(state, ruleset, seat, key_)}
+        if sc_.on(ruleset, "objectives"):
+            you["objectives"] = sc_.objectives_view(state, ruleset, seat)
     players = []
     for s, p in state.players.items():
-        entry: dict[str, Any] = {"seat": s, "nick": p.nick, "alive": p.alive, "score": sc[s], "faction": p.faction}
+        exact = known[s]["exact"] or over
+        value = (final or {}).get(s, known[s]["score"]) if over else known[s]["score"]
+        entry: dict[str, Any] = {"seat": s, "nick": p.nick, "alive": p.alive, "score": value,
+                                 "score_exact": exact, "faction": p.faction}
+        if not ruleset.default_scoring and s != seat and not over:
+            entry["score_known"] = dict(known[s]["parts"])      # None = unknown (science, war)
         if ruleset.techs:
             entry["techs_count"] = len(public_techs(ruleset, p))     # artifact grants stay hidden
         if state.phase == "game_over" and (ruleset.techs or ruleset.artifacts):
@@ -158,6 +193,10 @@ def _treasury(ruleset: Ruleset, view: Mapping[str, Any]) -> str:
         active = you.get("researching")
         now = (f"исследуется «{ruleset.techs[active['tech']].name}» {active['progress']}/{active['cost']}"
                if active else "исследование не выбрано")
+        ordered = you.get("research_ordered")
+        if ordered:
+            what = f"«{ruleset.techs[ordered['tech']].name}» (приказ {ordered['order']}, начнётся в расчёте)"
+            now = f"исследование: {what}" if not active else f"{now}; по приказу {ordered['order']} с расчёта — "                 f"«{ruleset.techs[ordered['tech']].name}»"
         line += f"\nНаука: изучено {len(you.get('techs', []))}; {now} (list_techs)"
     if you.get("artifacts"):
         line += "\nАртефакты: " + ", ".join(ruleset.artifacts[a].name for a in you["artifacts"]
@@ -165,7 +204,7 @@ def _treasury(ruleset: Ruleset, view: Mapping[str, Any]) -> str:
     return line
 
 
-def _score_line(view: Mapping[str, Any], seat: str, ruleset: Ruleset) -> str:
+def _score_line(view: Mapping[str, Any], seat: str, ruleset: Ruleset, state: GameState) -> str:
     # Factions are public once the setup phase is over (TECH_AND_SETUP.md 2); in a one-faction game they say nothing.
     show = len(ruleset.scenario.factions) > 1 and view["phase"] != "setup"
 
@@ -174,7 +213,11 @@ def _score_line(view: Mapping[str, Any], seat: str, ruleset: Ruleset) -> str:
             [ruleset.factions[p["faction"]].name] if show and p.get("faction") in ruleset.factions else [])
         return f" ({', '.join(parts)})" if parts else ""
 
-    items = [f"{p['nick']}{tag(p)} {p['score']}"
+    if not ruleset.default_scoring:
+        names = {p["seat"]: ruleset.factions[p["faction"]].name for p in view["players"]
+                 if show and p.get("faction") in ruleset.factions}
+        return sc_.score_line(state, ruleset, seat, names)
+    items = [f"{p['nick']}{tag(p)} {'' if p.get('score_exact', True) else '≥'}{p['score']}"
              + (f" тех.{p['techs_count']}" if "techs_count" in p else "") + ("" if p["alive"] else " выбыл")
              for p in view["players"]]
     return "Счёт: " + ", ".join(items)
@@ -206,7 +249,7 @@ def render_state_text(state: GameState, ruleset: Ruleset, seat: str, deadline_in
         lines.append(_changes_line(state, ruleset, seat, since_turn, since_state, reports))
     else:
         lines += [_province_line(ruleset, state, seat, e) for e in entries]
-        lines.append(_score_line(view, seat, ruleset))
+        lines.append(_score_line(view, seat, ruleset, state))
         lines += [pacts] if pacts else []
         lines += conquest
         if since_turn is not None:
@@ -280,6 +323,12 @@ def _conquest_lines(state: GameState, ruleset: Ruleset, seat: str, view: Mapping
         lines.append(f"ОККУПАЦИЯ ({fates}): {'; '.join(items)}{more}")
     claims = view.get("claims") or []
     if claims:
+        # the viewer's own claims first (its +attack), then claims on its provinces, then the rest; a stable sort
+        # keeps creation order inside each group (only the text; the JSON `claims` stays in state order)
+        def rank(c: Mapping[str, Any]) -> int:
+            prov = state.provinces.get(c["province"])
+            return 0 if c["seat"] == seat else 1 if prov is not None and prov.owner == seat else 2
+        claims = sorted(claims, key=rank)
         items = [f"{c['province']} — {_owner_tag(state, seat, c['seat'])} до х{c['until_turn']}"
                  for c in claims[:SECTION_ITEMS]]
         more = f"; +{len(claims) - SECTION_ITEMS}" if len(claims) > SECTION_ITEMS else ""
@@ -327,7 +376,8 @@ def _changes_line(state: GameState, ruleset: Ruleset, seat: str, since_turn: int
             elif e["kind"] in ("battle", "edge_battle", "starvation", "build_done", "eliminated",
                                "retreat_lost", "order_rejected", "fortify_broken", "pact_bounce", "pact_joint",
                                "pact_broken", "pact_expired", "pact_ended", "pact_lapsed", "gift", "pact_signed",
-                               "pact_renewed", "pact_leave", "tech_completed", *CONQUEST_EVENT_TEXT):
+                               "pact_renewed", "pact_leave", "tech_completed", "work_started", "work_completed",
+                               *CONQUEST_EVENT_TEXT):
                 starving |= e["kind"] == "starvation"
                 items.append(event_text(e, ruleset, state, seat))
     if not starving:
@@ -373,8 +423,20 @@ def event_text(e: Mapping[str, Any], ruleset: Ruleset, state: GameState, seat: s
            if e.get("research") else ""),
         "research_started": lambda: f"начато исследование «{_tech_name(ruleset, e['tech'])}»",
         "tech_completed": lambda: f"изучена технология «{_tech_name(ruleset, e['tech'])}»",
+        # stage 4 (SCORING.md 2.3, 2.4)
+        "work_started": lambda: f"{who(e['seat'])} начал великую стройку «{_building_name(ruleset, e['building'])}» "
+                                f"в {e['province']} (готова к ходу {e['ready_turn']})",
+        "work_completed": lambda: f"{who(e['seat'])} достроил великую стройку «{_building_name(ruleset, e['building'])}» "
+                                  f"в {e['province']}",
+        "war_credit": lambda: (f"война: {who(e['killer'])} +{e['value']} за потери {who(e['victim'])} "
+                               f"({_units_text(ruleset, e['units'])}{', в обороне' if e.get('defender') else ''})"),
     }
     return simple[kind]()
+
+
+def _building_name(ruleset: Ruleset, building: str) -> str:
+    b = ruleset.buildings.get(building)
+    return b.name if b is not None else building.split(":")[-1]
 
 
 def _tech_name(ruleset: Ruleset, tech: str) -> str:
@@ -529,8 +591,12 @@ def render_report_text(report: TurnReport, ruleset: Ruleset, state: GameState, s
     """Report of one resolved turn as seen by `seat` (state is used only for nicks)."""
     lines = [f"ОТЧЁТ ХОДА {report.turn}"]
     lines += [f"- {event_text(e, ruleset, state, seat)}" for e in report.by_seat.get(seat, [])]
-    sc = report.public.get("scores", {})
-    lines.append("Счёт: " + ", ".join(f"{_owner_tag(state, seat, s)} {n}" for s, n in sorted(sc.items())))
+    # the turn score is private (SCORING.md 5): the seat's own, also from a report saved before it went private
+    sc = report.scores_of()
+    if seat in sc:
+        parts = (report.score_parts or {}).get(seat) or {}
+        body = " ".join(f"{sc_.LABELS[k]} {parts[k]}" for k in sc_.SOURCES if k in parts)
+        lines.append(f"Твой счёт после хода: {sc[seat]}" + (f" [{body}]" if body else ""))
     if report.public.get("result"):
         lines.append(_result_line(state, seat))
     return "\n".join(lines)

@@ -16,6 +16,7 @@ mymod/
   pack.yaml
   resources/  province_types/  units/  buildings/  factions/  maps/  scenarios/
   branches/  techs/  artifacts/  lore/      # этап 2 (необязательно)
+  objectives/                             # этап 4 (необязательно)
 ```
 
 - Читаются все файлы `*.yaml` в каталоге типа. В файле лежит одна сущность или список сущностей.
@@ -115,6 +116,7 @@ engine_api: "^1"        # версия API движка — 1
 | `command_points` | int 0..10 | 3 | ОК за ход |
 | `combat.fortify_bonus` | float 0..1 | 0.25 | бонус обороны приказа `fortify` (сценарии `core` ставят 0.15) |
 | `combat.counter_mul` | float 1..3 | 1.5 | множитель контрюнита |
+| `combat.fortify_persists` | int 0..1 | 0 | 1 — укрепление держится, пока в провинции войска владельца (сценарии `core` 0.5.0 ставят 1) |
 | `starvation.loss_frac` | float 0..1 | 0.10 | доля армии, теряемая при голоде |
 
 ### Порядок модификаторов
@@ -214,6 +216,35 @@ engine_api: "^1"        # версия API движка — 1
   `disposition.<id>.cost_mul|loot_mul`, `conquest.claim_turns`, `conquest.claim_bonus`, `conquest.loot_cooldown`.
   Полная таблица с диапазонами — раздел 1.2 спецификации; числа партии — `rules(topic="spying")` и
   `rules(topic="conquest")`.
+
+## Контент этапа 4: источники очков, великие стройки, тайные цели
+
+Точное описание — разделы 1–3 и 11 [спецификации счёта](../SCORING.md); `content/packs/core` 0.5.0 использует все
+поля ниже. Всё необязательно: сценарий без `scoring` считает только землю (1 за провинцию, +3 за столицу) и
+хэшируется как раньше.
+
+- **Веса.** `scoring: {territory, science, works, war, objectives}` в сценарии (каждый 0..5; не названный — 0; нужен
+  хотя бы один источник кроме `objectives` с весом > 0). Хост переопределяет для партии: `dah game create --scoring
+  territory=1,science=1,works=0,war=1,objectives=1 --objectives N`. Источник с весом 0 — выключенная система
+  `scoring.<src>`: сущности с `requires_system: scoring.<src>` скрыты, строки `modify` по его характеристикам
+  `score.*` отбрасываются.
+- **Здания** получают `score` (0..10: очки, пока готово в своей полноценной провинции; характеристика
+  `building.<id>.score`), `max_per_owner` (1..10: приказ `build` отвергается с `ALREADY_BUILT`, когда у места уже
+  столько таких, готовых и строящихся, во всех его провинциях) и `allowed_types` (типы провинций, где можно строить).
+  Здание со `score > 0` — великая стройка: её начало и готовность — публичные события; валидатор предупреждает, если
+  у неё `build_turns` < 2.
+- **`objectives/*.yaml`**: `id`, `name`, `kind` (виды движка: `hold_type {type, count}`, `hold_count {count}`,
+  `hold_foreign {count}`, `capital_other {count}`, `techs_branch {branch, count}`, `great_work {count}`,
+  `rival_capital_taken` — против соперника), `params`, `points` (1..8), `maps` (пусто — любая), `players {min, max}`,
+  `requires_system`, `description`, `lore`. Сценарий с целями задаёт `objectives: {dealt: 1}` (по желанию
+  `pool: [...]`; `offer` должен равняться `dealt`).
+- **Проверка целей** (каждый сценарий с целями, каждое число мест 2..`max_players` его карты, каждая допустимая
+  фракция): пул после фильтров `maps`/`players`/`requires_system` — не меньше max(3, `dealt`); ни одна цель не
+  выполнена ни на одном старте (после стартовых эффектов); каждая выполнима (хватает провинций типа, технологий ветки,
+  изучаемых каждой фракцией, есть великая стройка, которую каждая фракция может строить на карте, и т. д.).
+- **Характеристики** (только пока источник включён): `score.territory.province|capital`, `score.science.tier1..4`,
+  `score.science.branch`, `score.war.per_point|cap_per_victim|cap|defense_pct`. Числа партии — в
+  `rules(topic="victory")`.
 
 ## Проверка
 

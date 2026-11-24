@@ -1,0 +1,26 @@
+- {id: barracks, name: Казарма, cost: {alloy: 30}, build_turns: 2, recruit: true}
+- id: hq
+  name: Штаб
+  cost: {alloy: 10}
+  build_turns: 1
+  effects:
+    - {effect: modify, target: command_points, op: add, value: 1, scope: owner}
+- id: hall
+  name: Бастион
+  cost: {alloy: 10}
+  build_turns: 1
+  effects:
+    - {effect: modify, target: province.defense_mul, op: add, value: 0.5, scope: province}
+    - {effect: income, resource: alloy, amount: 2}
+- id: spoils_hall
+  name: Трофейная
+  cost: {alloy: 10}
+  build_turns: 1
+  requires_system: conquest
+- id: mirror_hall
+  name: Зеркальный зал
+  cost: {alloy: 15}
+  build_turns: 1
+  requires_system: espionage
+  effects:
+    - {effect: modify, target: province.mirrors, op: add, value: 1, scope: province}

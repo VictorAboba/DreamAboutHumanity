@@ -111,3 +111,14 @@ def wrap_up_text(phase_info: dict[str, Any], seat: str | None = None) -> str:
         head += "; счёт: " + ", ".join(f"{s} {n}" for s, n in ranked)
     return (f"[DAH] Партия окончена: {head}. Заверши цель одним коротким итоговым сообщением, "
             "больше ничего не делай.")
+
+
+def eliminated_text(phase_info: dict[str, Any], seat: str | None = None) -> str:
+    """The one notice to an eliminated seat (the game goes on without it), e.g. `[DAH] Ты выбыл (B): к ходу 4
+    провинций не осталось, партия для тебя окончена. Заверши цель одним итоговым сообщением, больше ничего не
+    делай.`"""
+    turn = phase_info.get("turn")
+    who = f" ({seat})" if seat else ""
+    when = f"к ходу {turn} " if turn else ""
+    return (f"[DAH] Ты выбыл{who}: {when}провинций не осталось, партия для тебя окончена. Заверши цель одним "
+            "итоговым сообщением, больше ничего не делай.")

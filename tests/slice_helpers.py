@@ -14,8 +14,10 @@ from dah.game import make_config
 
 def slice_config(**kwargs: Any) -> dict[str, Any]:
     """`make_config` without the setup phase (and without its phase limit) and, since core 0.4.0, with espionage and
-    conquest off unless the test asks for them (SPY_AND_CONQUEST.md 9: flow tests play the slice rules)."""
+    conquest off unless the test asks for them (SPY_AND_CONQUEST.md 9: flow tests play the slice rules); since core
+    0.5.0 also with the default score (territory only, no objectives) unless the test asks for `scoring`."""
     kwargs.setdefault("systems", {"espionage": False, "conquest": False})
+    kwargs.setdefault("scoring", {"territory": 1})      # core 0.5.0 scores all sources; flow tests keep the land
     config = make_config(**kwargs)
     config.pop("setup", None)
     config["phase_limits"].pop("setup", None)

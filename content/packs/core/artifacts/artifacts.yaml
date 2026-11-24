@@ -74,9 +74,9 @@
   name: {ru: Чаша десятины, en: Tithe Chalice}
   power: 2
   cost: 2
-  description: +3 Кредо каждый ход.
+  description: +2 Кредо каждый ход.
   effects:
-    - {effect: income, resource: creed, amount: 3}
+    - {effect: income, resource: creed, amount: 2}   # core 0.5.0: 3 -> 2 (creed scores as science)
 - id: ore_vein
   name: {ru: Сплавная жила, en: Alloy Vein}
   power: 2

@@ -38,11 +38,11 @@ def unique_units(rs, faction):
 
 
 def test_pack_version_and_clean_validation():
-    assert "version: 0.4.0" in (CORE / "pack.yaml").read_text(encoding="utf-8")
+    assert "version: 0.5.0" in (CORE / "pack.yaml").read_text(encoding="utf-8")
     assert validate_packs(default_pack_dirs()) == ([], [])
     for scenario in SCENARIOS:
         built = build_ruleset(None, scenario)
-        assert built.warnings == () and built.packs == {"core": "0.4.0"}
+        assert built.warnings == () and built.packs == {"core": "0.5.0"}
     assert len({build_ruleset(None, s).hash for s in SCENARIOS}) == len(SCENARIOS)
 
 
@@ -98,7 +98,7 @@ def test_faction_numbers(rs):
     assert st("resource.core:creed.income_mul", "core:ash_choir") == pytest.approx(1.5)
     assert rs.unit_cost("core:dreamwalker", "core:ash_choir") == {"core:alloy": 10}    # 14 x 0.7; no creed
     assert rs.unit_cost("core:militia", "core:growth") == {"core:provisions": 4}
-    assert st("resource.core:creed.income_mul", "core:growth") == pytest.approx(0.5)
+    assert st("resource.core:creed.income_mul", "core:growth") == pytest.approx(0.7)   # core 0.5.0 balance
     assert st("p2.hasty_penalty", "core:captains") == 0 and st("province.defense_mul", "core:captains") == 0.9
     assert rs.factions["core:captains"].income == {"core:alloy": 2}
 

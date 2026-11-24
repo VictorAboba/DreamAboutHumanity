@@ -7,12 +7,13 @@ from typing import Any, Mapping
 from . import registry
 from .content import Ruleset
 
-KINDS = ("unit", "building", "tech", "artifact", "faction", "branch", "resource", "province_type")
+KINDS = ("unit", "building", "tech", "artifact", "faction", "branch", "resource", "province_type", "objective")
 KIND_LABELS = {"unit": "юнит", "building": "здание", "tech": "технология", "artifact": "артефакт",
                "faction": "фракция", "branch": "ветка технологий", "resource": "ресурс",
-               "province_type": "тип провинции"}
+               "province_type": "тип провинции", "objective": "тайная цель"}
 _TABLES = {"unit": "units", "building": "buildings", "tech": "techs", "artifact": "artifacts",
-           "faction": "factions", "branch": "branches", "resource": "resources", "province_type": "province_types"}
+           "faction": "factions", "branch": "branches", "resource": "resources", "province_type": "province_types",
+           "objective": "objectives"}
 
 ABILITY_TEXT = {
     "ignore_fortify": "укрепление защитника против него не действует",
@@ -23,7 +24,8 @@ ABILITY_TEXT = {
 _STAT_TEXT = {
     "command_points": "очки командования", "p2.hasty_penalty": "штраф «наспех»",
     "p2.cost.new_attack": "цена новой атаки в П2 (ОК)", "p2.cancel_refund": "возврат резерва при отмене в П2",
-    "combat.fortify_bonus": "бонус укрепления", "combat.counter_mul": "множитель контрюнита",
+    "combat.fortify_bonus": "бонус укрепления",
+    "combat.fortify_persists": "укрепление держится, пока армия в провинции", "combat.counter_mul": "множитель контрюнита",
     "starvation.loss_frac": "потери от голода", "province.defense_mul": "оборона провинции",
     "province.recruit_discount": "скидка на найм в провинции",
     "conquest.claim_turns": "срок притязания (ходов)", "conquest.claim_bonus": "бонус атаки по притязанию",
@@ -36,6 +38,14 @@ _STAT_TEXT = {
     "spy.xp_max": "опыт Тени (предел)", "spy.cover_max": "прикрытие Тени (предел)",
     "spy.ward.bonus": "Застава к C_лок", "p2.cost.spy": "цена задания в П2 (ОК)",
     "p2.cost.recall": "цена отзыва в П2 (ОК)", "feint.cp_cost": "цена ложной записи (ОК)",
+    # scoring (SCORING.md 2): player-facing labels, never the raw path
+    "score.territory.province": "очки за провинцию", "score.territory.capital": "очки за столицу",
+    "score.science.tier1": "очки за технологию ур. 1", "score.science.tier2": "очки за технологию ур. 2",
+    "score.science.tier3": "очки за технологию ур. 3", "score.science.tier4": "очки за технологию ур. 4+",
+    "score.science.branch": "очки за полную ветку",
+    "score.war.per_point": "цена убитых за 1 очко войны (меньше — лучше)",
+    "score.war.cap_per_victim": "предел очков войны с одного соперника",
+    "score.war.cap": "предел очков войны", "score.war.defense_pct": "доля очков войны в обороне, %",
 }
 
 
@@ -59,6 +69,8 @@ def stat_text(ruleset: Ruleset, path: str) -> str:
         if segs[2] == "ability" and len(segs) == 5:
             tail = f" {segs[3]}" + ("" if segs[4] == "on" else f".{segs[4]}")
         return f"{what}{tail}: {_name(ruleset, segs[1])}"
+    if segs[0] == "building" and len(segs) == 3 and segs[2] == "score":
+        return f"очки стройки «{_name(ruleset, segs[1])}»"
     if segs[0] == "building" and len(segs) == 4:
         return f"цена {_name(ruleset, segs[3])}: {_name(ruleset, segs[1])}"
     if segs[0] == "resource" and len(segs) == 3:
@@ -190,6 +202,15 @@ def describe(ruleset: Ruleset, kind: str, fid: str) -> dict[str, Any]:
         lines.append(f"цена {_amounts(ruleset, out['cost'])}, строится {entity.build_turns} ход(а)"
                      + (f", доход +{_amounts(ruleset, entity.income)}" if entity.income else "")
                      + (", позволяет найм" if entity.recruit else ""))
+        if entity.score and ruleset.weight("works"):
+            pts = int(ruleset.stat(f"building.{fid}.score"))
+            out.update(score=pts, max_per_owner=entity.max_per_owner, allowed_types=list(entity.allowed_types))
+            lines.append(f"великая стройка: +{pts} очк., пока готова в твоей полноценной провинции; начало и "
+                         "готовность видят все")
+        if entity.max_per_owner:
+            lines.append(f"не больше {entity.max_per_owner} у одного игрока (готовые и строящиеся)")
+        if entity.allowed_types:
+            lines.append("только в провинциях типа: " + ", ".join(_name(ruleset, t) for t in entity.allowed_types))
         lines += [f"- {x}" for x in out["effects"]]
         if entity.requires_tech:
             lines.append("требует: " + ", ".join(_name(ruleset, x) for x in entity.requires_tech))
@@ -247,6 +268,12 @@ def describe(ruleset: Ruleset, kind: str, fid: str) -> dict[str, Any]:
         if entity.description:
             lines.append(entity.description)
         lines.append("технологии: " + ", ".join(_name(ruleset, t) for t in out["techs"]))
+    elif kind == "objective":
+        from .scoring import objective_text     # scoring imports this module's neighbours
+        out.update(kind_id=entity.kind, params=dict(entity.params), points=entity.points,
+                   weighted=entity.points * ruleset.weight("objectives"))
+        lines.append(f"{objective_text(ruleset, None, {'id': fid})}; +{out['weighted']} очк. к итогу, если "
+                     "выполнена в конце (проверка при game_over). Кому какая цель — тайна до конца партии")
     elif kind == "resource":
         out.update(role=entity.role)
         lines.append(f"роль: {entity.role}")

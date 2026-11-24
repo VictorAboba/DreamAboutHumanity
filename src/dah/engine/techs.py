@@ -320,6 +320,22 @@ def techs_view(state: GameState, ruleset: Ruleset, seat: str, research_income: i
             "active": active, "researched": list(player.techs), "branches": branch_list(ruleset), "techs": techs}
 
 
+def _no_active(view: Mapping[str, Any], ruleset: Ruleset) -> str:
+    ordered = view.get("ordered")
+    if ordered and ordered["tech"] in ruleset.techs:
+        return (f"Исследование: {ordered['tech'].split(':')[-1]} «{ruleset.techs[ordered['tech']].name}» — приказ "
+                f"{ordered['order']}, начнётся в расчёте")
+    return 'Исследование не выбрано: приказ {"kind":"research","tech":"<id>"} в фазе Д'
+
+
+def _ordered_note(view: Mapping[str, Any], ruleset: Ruleset) -> str:
+    ordered = view.get("ordered")
+    if ordered and view["active"] and ordered["tech"] in ruleset.techs and ordered["tech"] != view["active"]["tech"]:
+        return (f"; по приказу {ordered['order']} с расчёта — {ordered['tech'].split(':')[-1]} "
+                f"«{ruleset.techs[ordered['tech']].name}»")
+    return ""
+
+
 def techs_text(view: Mapping[str, Any], ruleset: Ruleset) -> str:
     if not view["enabled"]:
         return "Технологий в этой партии нет."
@@ -328,9 +344,10 @@ def techs_text(view: Mapping[str, Any], ruleset: Ruleset) -> str:
     lines = [f"НАУКА: {res} в запасе {view['points']}{income}; изучено {len(view['researched'])}"]
     if view["active"]:
         a = view["active"]
-        lines.append(f"Исследуется: {ruleset.techs[a['tech']].name} {a['progress']}/{a['cost']}")
+        lines.append(f"Исследуется: {ruleset.techs[a['tech']].name} {a['progress']}/{a['cost']}"
+                     f"{_ordered_note(view, ruleset)}")
     else:
-        lines.append('Исследование не выбрано: приказ {"kind":"research","tech":"<id>"} в фазе Д')
+        lines.append(_no_active(view, ruleset))
     marks = {RESEARCHED: "✓", ACTIVE: "→", AVAILABLE: "·", LOCKED: "×"}
     branch = None
     for t in view["techs"]:
@@ -354,6 +371,8 @@ def short_techs_view(view: Mapping[str, Any]) -> dict[str, Any]:
     locked ones; the full tree (requirements, descriptions, branches) is `techs_view` (list_techs(full=true))."""
     shown = [{k: t[k] for k in SHORT_TECH_KEYS} for t in view["techs"] if t["status"] != LOCKED]
     out = {k: view[k] for k in ("enabled", "resource", "points", "income", "active", "researched")}
+    if view.get("ordered"):
+        out["ordered"] = view["ordered"]
     out.update(techs=shown, locked=sum(1 for t in view["techs"] if t["status"] == LOCKED), full=False)
     return out
 
@@ -370,9 +389,9 @@ def techs_text_short(view: Mapping[str, Any], ruleset: Ruleset) -> str:
     if view["active"]:
         a = view["active"]
         lines.append(f"Исследуется: {a['tech'].split(':')[-1]} «{ruleset.techs[a['tech']].name}» "
-                     f"{a['progress']}/{a['cost']}")
+                     f"{a['progress']}/{a['cost']}{_ordered_note(view, ruleset)}")
     else:
-        lines.append('Исследование не выбрано: приказ {"kind":"research","tech":"<id>"} в фазе Д')
+        lines.append(_no_active(view, ruleset))
     available = [t for t in view["techs"] if t["status"] == AVAILABLE]
     if available:
         lines.append("Доступно сейчас (приказ research в Д):")

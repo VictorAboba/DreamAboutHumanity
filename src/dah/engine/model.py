@@ -74,10 +74,15 @@ class Player:
     shades: list[dict[str, Any]] = field(default_factory=list)   # own Shades (espionage)
     spy_seq: dict[str, int] = field(default_factory=dict)        # per-seat counters: shade, report
     conquest_policy: str | None = None                      # default disposition of captures (kept between turns)
+    # stage 4 (SCORING.md 3): left out of state_hash while empty. tally {war_value: {victim: int}, homes_taken: [pid]}
+    # only grows; objectives [{id, target?}] are the seat's secret objectives (dealt at the start)
+    tally: dict[str, Any] = field(default_factory=dict)
+    objectives: list[dict[str, Any]] = field(default_factory=list)
 
 
 PLAYER_STAGE2_FIELDS = ("techs", "research", "researching", "artifacts")
 PLAYER_STAGE3_FIELDS = ("home", "shades", "spy_seq", "conquest_policy")
+PLAYER_SCORE_FIELDS = ("tally", "objectives")
 PROVINCE_STAGE3_FIELDS = ("status",)
 STATE_STAGE3_FIELDS = ("claims", "origins")
 
@@ -138,7 +143,7 @@ def state_hash(state: GameState) -> str:
         if not data.get(key):
             data.pop(key, None)
     for player in data["players"].values():
-        for key in PLAYER_STAGE2_FIELDS + PLAYER_STAGE3_FIELDS:
+        for key in PLAYER_STAGE2_FIELDS + PLAYER_STAGE3_FIELDS + PLAYER_SCORE_FIELDS:
             if not player.get(key):
                 player.pop(key, None)
     for prov in data["provinces"].values():

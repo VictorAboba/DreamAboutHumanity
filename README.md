@@ -26,7 +26,11 @@
 - этап 3 (поставка 3a, [docs/SPY_AND_CONQUEST.md](docs/SPY_AND_CONQUEST.md)), включается сценарием или флагами
   `dah game create --espionage on|off --conquest on|off`: шпионаж (Тени, задания, разведсрез с донесениями,
   саботаж, ложные записи в книге приказов; инструменты `list_spies`, `get_intel`, `estimate_mission`) и
-  завоевание (оккупация, судьбы провинций `dispose`/`policy`, притязания).
+  завоевание (оккупация, судьбы провинций `dispose`/`policy`, притязания);
+- этап 4, очки победы ([docs/SCORING.md](docs/SCORING.md), `core` 0.5.0): итог складывается из земли, науки,
+  великих строек, войны и тайной цели; веса задаёт сценарий или `dah game create --scoring SRC=W,... --objectives
+  N`. Счёт под туманом: свой — с разбивкой (строка «Счёт:» в `get_state`), чужой — нижняя граница «≥»; тайная цель
+  видна только владельцу, после партии раскрыто всё.
 
 ## Быстрый старт
 
@@ -92,8 +96,12 @@ uv run dah goal-text <id> A        # текст цели для роя или а
 С `core` 0.4.0 сценарии `slice3`, `slice2` и `quad4` (4 игрока, карта `mirror4`) начинаются с фазы старта —
 выбор фракции и артефакта (`--artifacts draft|points|none`, docs/TECH_AND_SETUP.md) — и идут со шпионажем и
 завоеванием (этап 3a, docs/SPY_AND_CONQUEST.md); выключить их для партии — `--espionage off --conquest off`.
-`blitz_test` — без фазы старта и без новых систем, `blitz_spy` — короткая партия с обеими системами. Партии,
-начатые на `core` 0.3.0, доигрываются и повторяются по замороженной копии `content/legacy/core-0.3.0`.
+`blitz_test` — без фазы старта и без новых систем, `blitz_spy` — короткая партия с обеими системами. С `core` 0.5.0
+`slice3`, `slice2`, `quad4` и короткий `blitz_score` считают очки по пяти источникам (земля, наука, великие стройки,
+война, тайная цель; `rules(topic="victory")` в игре, docs/SCORING.md), `blitz_test` и `blitz_spy` — только землю;
+веса для партии — `--scoring territory=1,science=1,works=0,war=1,objectives=1`, число тайных целей —
+`--objectives N`. Партии, начатые на `core` 0.3.0 и 0.4.0, доигрываются и повторяются по замороженным копиям
+`content/legacy/core-0.3.0` и `content/legacy/core-0.4.0`.
 
 Как подключить агента, описано в [docs/CONNECT.md](docs/CONNECT.md):
 
@@ -143,7 +151,7 @@ API страницы (только ключ зрителя или админ-к�
 | Команда | Что делает |
 |---|---|
 | `dah pack validate [PATH...]` | проверить паки контента; ошибки печатаются с файлом и путём к полю |
-| `dah game create --scenario ... --seat SEAT:KIND:NICK ... [--espionage on\|off] [--conquest on\|off]` | создать партию в `games/<id>/`; KIND — `swarm`, `agent`, `human` или `bot-<passive\|builder\|rush\|diplomat>`; выключатели подсистем этапа 3 меняют значение сценария |
+| `dah game create --scenario ... --seat SEAT:KIND:NICK ... [--espionage on\|off] [--conquest on\|off] [--scoring SRC=W,...] [--objectives N]` | создать партию в `games/<id>/`; KIND — `swarm`, `agent`, `human` или `bot-<passive\|builder\|rush\|diplomat>`; выключатели подсистем этапа 3 и веса счёта этапа 4 меняют значение сценария |
 | `dah game spectator-key ID [--server URL]` | выдать новый ключ зрителя (старый отзывается) и напечатать адрес `/watch/ID` |
 | `dah game set-session ID SEAT DT_SESSION_ID` | записать ID сессии DreamTeam места в `config.json` и журнал (`seat_info`) |
 | `dah serve [--games-dir games] [--port 8800]` | HTTP API (раздел 7 SLICE.md); админ-ключ берётся из `DAH_ADMIN_KEY` |

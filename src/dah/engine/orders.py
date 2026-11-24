@@ -619,10 +619,23 @@ def _rules_problem(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrde
         locked = building_problem(state, ruleset, seat, b, key)
         if locked:
             return NOT_AVAILABLE, locked
+        bdef = ruleset.buildings[b]
+        if bdef.allowed_types and prov.type not in bdef.allowed_types:
+            types = ", ".join(ruleset.province_types[t].name if t in ruleset.province_types else t
+                              for t in bdef.allowed_types)
+            return NOT_AVAILABLE, f"«{bdef.name}» строится только в провинциях типа: {types}; {target} — не такая"
         pending = any(p.province == target and p.building == b for p in state.pending_builds)
         ordered = any(o.kind == "build" and o.province == target and o.building == b for o in others)
         if b in prov.buildings or pending or ordered:
             return ALREADY_BUILT, f"{ruleset.short(b)} в {target} уже есть или строится"
+        if bdef.max_per_owner:
+            # every own province counts, occupied ones too (SCORING.md 2.3); the limit is on build orders only
+            have = (sum(p.buildings.count(b) for p in state.owned(seat))
+                    + sum(1 for p in state.pending_builds if p.seat == seat and p.building == b)
+                    + sum(1 for o in others if o.kind == "build" and o.building == b))
+            if have >= bdef.max_per_owner:
+                return ALREADY_BUILT, (f"«{bdef.name}»: у тебя уже есть {have} из {bdef.max_per_owner} "
+                                       "(готовые и строящиеся во всех твоих провинциях)")
     return _resources_problem(state, ruleset, seat, book, order, others, key)
 
 

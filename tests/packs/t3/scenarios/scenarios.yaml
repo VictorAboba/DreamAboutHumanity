@@ -32,3 +32,12 @@
   turn_limit: 12
   phase_limits: {negotiation_1: 60s, actions: 60s, negotiation_2: 60s}
   systems: {espionage: true, conquest: true}
+- id: tri_spy_hold
+  name: Треугольник со шпионажем, укрепление держится
+  map: tri
+  factions: [iron, ash]
+  turn_limit: 6
+  phase_limits: {negotiation_1: 60s, actions: 60s, negotiation_2: 60s}
+  systems: {espionage: true}
+  overrides:
+    - {type: modify, target: combat.fortify_persists, op: set, value: 1}

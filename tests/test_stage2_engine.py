@@ -353,7 +353,8 @@ def test_state_hash_ignores_empty_stage2_fields(rs):
     for key in ("claims", "origins"):          # stage-3 fields (SPY_AND_CONQUEST.md 1.3), empty: not hashed either
         data.pop(key)
     for p in data["players"].values():
-        for key in ("techs", "research", "researching", "artifacts", "home", "shades", "spy_seq", "conquest_policy"):
+        for key in ("techs", "research", "researching", "artifacts", "home", "shades", "spy_seq", "conquest_policy",
+                    "tally", "objectives"):        # stage 4 (SCORING.md 3), empty: not hashed either
             p.pop(key)
     for prov in data["provinces"].values():
         prov.pop("status")
@@ -378,7 +379,7 @@ def test_fog_own_techs_full_others_only_count(rs):
     assert view["you"]["techs"] == [] and view["you"]["artifacts"] == []
     b = next(p for p in view["players"] if p["seat"] == "B")
     assert b == {"seat": "B", "nick": "Бета", "alive": True, "score": b["score"], "faction": "t2:ash",
-                 "techs_count": 1}
+                 "techs_count": 1, "score_exact": False}       # another seat's score: a lower bound (SCORING.md 5)
     assert "t2:drills" not in str(view) and "t2:cache" not in str(view) and "t2:smithing" not in str(view)
     mine = view_state(st, rs, "B")["you"]
     assert mine["techs"] == ["t2:drills"] and mine["artifacts"] == ["t2:cache"]

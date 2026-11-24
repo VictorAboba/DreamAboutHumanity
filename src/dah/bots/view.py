@@ -27,7 +27,12 @@ UNIT_COST_OTHER: dict[str, dict[str, int]] = {}    # costs beyond alloy (none in
 UNIQUE_UNITS: dict[str, str] = {"litany": "throne_warden", "synclite": "faceless", "ash_choir": "ash_cantor",
                                 "growth": "devourer", "captains": "rift_corsair"}
 BUILDING_COST_ALLOY: dict[str, int] = {"mine": 10, "farm": 8, "barracks": 30, "temple": 15, "smithy": 25,
-                                       "citadel": 40, "warehouse": 20, "hq": 35}
+                                       "citadel": 40, "warehouse": 20, "hq": 35, "monument": 10, "dream_spire": 50}
+# Stage 4 (docs/SCORING.md 2.3, 10): great works of core 0.5.0. Provisions beyond alloy, build turns, points and the
+# province types allowed (None: any); tests/test_bots_logic.py checks them, the simulator re-reads them from its pack.
+BUILDING_COST_FOOD: dict[str, int] = {"monument": 25, "dream_spire": 150}
+GREAT_WORKS: dict[str, tuple[int, int, tuple[str, ...] | None]] = {
+    "monument": (2, 3, None), "dream_spire": (4, 3, ("agri", "forge", "shrine", "waste"))}
 RESEARCH_BUILDING = "temple"  # +research income
 RECRUIT_BUILDINGS: frozenset[str] = frozenset({"barracks", "hq"})
 FARM_SITE = "agri"  # province type a farm prefers
@@ -65,6 +70,7 @@ class Province:
     fortified: bool
     status: Mapping[str, Any] = field(default_factory=dict)  # public conquest status (occupied, ruined_until, ...)
     origin: str | None = None  # the seat that started with it (conquest games)
+    building_now: tuple[str, ...] = ()  # short ids building here (own provinces; others: great works only)
 
     @property
     def occupied_by(self) -> str | None:
@@ -105,6 +111,18 @@ class StateView:
     conquest: bool = False
     claims: tuple[Mapping[str, Any], ...] = ()
     scores: Mapping[str, int] = field(default_factory=dict)  # seat -> public score
+    # stage 4 (docs/SCORING.md 8, 10): None / empty with the default scoring (land only)
+    score_parts: Mapping[str, int] | None = None  # own turn score by source (you.score_parts)
+    objectives: tuple[Mapping[str, Any], ...] = ()  # own secret objectives (you.objectives)
+    war: Mapping[str, int] | None = None  # you.war: points, cap_left
+
+    def scoring(self, source: str) -> bool:
+        """The score source is on in this game (it appears in the own breakdown)."""
+        return self.score_parts is not None and source in self.score_parts
+
+    def open_objectives(self) -> list[Mapping[str, Any]]:
+        """Own objectives not met right now."""
+        return [o for o in self.objectives if not o.get("met_now")]
 
     @property
     def whisper(self) -> int:
@@ -223,6 +241,8 @@ def parse_state(payload: dict[str, Any], me: set[str] | frozenset[str]) -> State
             fortified=bool(record.get("fortified", False)),
             status=dict(record.get("status") or {}),
             origin=str(record["origin"]) if record.get("origin") else None,
+            building_now=tuple(short_id(str(b.get("building"))) for b in record.get("building_now") or []
+                               if isinstance(b, dict) and b.get("building")),
         )
 
     resources = _resources(player.get("resources", state.get("resources", {})))
@@ -253,6 +273,10 @@ def parse_state(payload: dict[str, Any], me: set[str] | frozenset[str]) -> State
         claims=tuple(dict(c) for c in state.get("claims") or [] if isinstance(c, dict)),
         scores={str(p.get("seat")): int(p.get("score") or 0) for p in state.get("players") or []
                 if isinstance(p, dict) and p.get("seat") is not None},
+        score_parts=({str(k): int(v or 0) for k, v in player["score_parts"].items()}
+                     if isinstance(player.get("score_parts"), dict) else None),
+        objectives=tuple(dict(o) for o in player.get("objectives") or [] if isinstance(o, dict)),
+        war=dict(player["war"]) if isinstance(player.get("war"), dict) else None,
     )
 
 

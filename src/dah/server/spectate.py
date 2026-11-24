@@ -63,6 +63,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, Response
 
 from dah.engine import GameState, TurnReport, scores, stat_key
+from dah.engine import scoring as sc_
 from dah.engine import conquest as cq
 from dah.engine import diplomacy as dip
 from dah.engine.techs import public_techs
@@ -133,6 +134,7 @@ class GameCache:
         self.snapshots: dict[tuple[int, str], dict[str, Any]] = {}
         self.reports: dict[int, dict[str, Any] | None] = {}
         self.start_scores: dict[str, int] | None = None
+        self.start_parts: dict[str, dict[str, int]] | None = None     # turn-0 score by source (scored games)
         self.spectator_hash: tuple[tuple[int, int, int] | None, str | None] | None = None
         # (journal stamp, built at monotonic time, payload)
         self.timings: tuple[tuple[int, int], float, dict[str, Any]] | None = None
@@ -148,6 +150,18 @@ class GameCache:
                 return start
             self.start_scores = start
         return self.start_scores
+
+    def parts_at_start(self, game: Game) -> dict[str, dict[str, int]]:
+        """Turn-0 score by source (non-default scoring), cached like `scores_at_start`."""
+        if self.start_parts is None:
+            raw = game.gdir.load_turn("states", 1)
+            if raw is None:
+                return {}
+            start = sc_.score_parts(GameState.from_dict(raw), game.ruleset)
+            if game.phase == SETUP:  # provisional: turn 1 is rebuilt when the setup phase closes
+                return start
+            self.start_parts = start
+        return self.start_parts
 
     def load_spectator_hash(self, game: Game) -> str | None:
         """The stored hash, re-read only when spectator.json changes (a reissued key is picked up at once)."""
@@ -251,7 +265,8 @@ def meta(game: Game, access: str, level: str) -> dict[str, Any]:
             "turn_limit": game.config["turn_limit"], "phase_limits": game.config["phase_limits"],
             "map": {"id": m.id, "name": m.name, "layout_computed": m.layout_computed, "provinces": provinces,
                     "edges": [list(e) for e in edges]},
-            "seats": seats, "access": access, "level": level, "level_label": LEVEL_LABELS[level]}
+            "seats": seats, "access": access, "level": level, "level_label": LEVEL_LABELS[level],
+            "works": sc_.on(rs, "works"), "objectives": sc_.on(rs, "objectives")}
 
 
 def live(game: Game, cache: GameCache, access: str, level: str) -> dict[str, Any]:
@@ -262,8 +277,13 @@ def live(game: Game, cache: GameCache, access: str, level: str) -> dict[str, Any
             sc = cache.scores_at_start(game)
         else:
             rep = cache.report(game, turn)
-            sc = (rep or {}).get("public", {}).get("scores", {})
-        history.append({"turn": turn, "scores": sc})
+            # the turn score is private to the players (SCORING.md 5); every spectator level sees it (delayed: late)
+            sc = (rep or {}).get("scores") or (rep or {}).get("public", {}).get("scores", {})
+        entry = {"turn": turn, "scores": sc}
+        if not game.ruleset.default_scoring:
+            entry["by_source"] = ((cache.report(game, turn) or {}).get("score_parts") if turn else
+                                  cache.parts_at_start(game)) or {}
+        history.append(entry)
     out: dict[str, Any] = {
         "game_id": game.config["game_id"], "turn": game.state.turn, "turn_limit": game.config["turn_limit"],
         "phase": game.phase, "phase_label": PHASE_LABELS.get(game.phase, game.phase),
@@ -329,6 +349,7 @@ def _public_events(report: dict[str, Any], game: Game, state: GameState) -> list
     # conquest (SPY_AND_CONQUEST.md 2.7, 8): fates, revolts, claims, ruins in their public form (no prices, loot or
     # sources); captures are the ownership changes above
     events += [e for e in public.get("conquest", []) if e.get("kind") != "captured"]
+    events += [dict(e) for e in public.get("works", [])]     # great works: public start and completion (SCORING.md 9)
     # espionage (SPY_AND_CONQUEST.md 8): only «саботаж в P07», without nicks (the strike shows in the broken fortify);
     # no Shades, missions or captures ever
     events += [{"kind": "sabotage", "province": e.get("province"), "seats": []}
@@ -402,13 +423,28 @@ def snapshot(game: Game, cache: GameCache, turn: int, level: str) -> dict[str, A
     state = _end_state(game, turn)
     rs = game.ruleset
     sc = scores(state, rs)
+    parts = sc_.score_parts(state, rs) if not rs.default_scoring else None
+    if parts is not None and state.phase == GAME_OVER and (state.result or {}).get("score_parts"):
+        # the end: the final score by source, the revealed objectives included (SCORING.md 9)
+        parts, sc = state.result["score_parts"], dict(state.result.get("scores") or sc)
     conquest = rs.system("conquest")
     statuses = cq.statuses_for(state) if conquest else {}
     provinces = []
+    works_on = sc_.on(rs, "works")
     for pid, p in sorted(state.provinces.items()):
         entry: dict[str, Any] = {"id": pid, "owner": p.owner}
         if pid in statuses:
             entry["status"] = statuses[pid]      # public marks: occupied, ruined_until, ravaged_until
+        if works_on and not full:
+            # great works are public (SCORING.md 2.3, 9): the delayed level gets their map marks, ordinary
+            # buildings stay hidden; the full levels see them in `buildings`/`building_now`
+            marks = [{"building": b, "done": True} for b in p.buildings
+                     if b in rs.buildings and rs.buildings[b].score]
+            marks += [{"building": b.building, "turns_left": b.turns_left, "seat": b.seat}
+                      for b in state.pending_builds if b.province == pid
+                      and b.building in rs.buildings and rs.buildings[b.building].score]
+            if marks:
+                entry["great_works"] = marks
         if full:
             entry.update(units=dict(p.units), unit_total=p.unit_total(), buildings=list(p.buildings),
                          fortified=p.fortified,
@@ -420,6 +456,14 @@ def snapshot(game: Game, cache: GameCache, turn: int, level: str) -> dict[str, A
     for seat, p in state.players.items():
         entry = {"seat": seat, "nick": p.nick, "alive": p.alive, "score": sc.get(seat, 0),
                  "provinces": len(state.owned(seat))}
+        if parts is not None:
+            entry["score_parts"] = parts.get(seat, {})
+            if sc_.on(rs, "objectives"):
+                # secret until the game is over («?» for the delayed spectator); the full levels see them and progress
+                if full or state.phase == GAME_OVER:
+                    entry["objectives"] = sc_.objectives_view(state, rs, seat)
+                else:
+                    entry["objectives"] = "?"
         if factions_public:
             entry.update(faction=p.faction, faction_name=rs.factions[p.faction].name if p.faction in rs.factions
                          else p.faction)

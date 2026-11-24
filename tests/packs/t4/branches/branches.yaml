@@ -1,0 +1,2 @@
+- {id: war, name: Война, order: 1}
+- {id: spoils, name: Трофеи, order: 2, requires_system: conquest}

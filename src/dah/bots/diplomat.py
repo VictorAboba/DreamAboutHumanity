@@ -13,17 +13,22 @@
   researches logistics first (more command points), then industry; recruits one of its faction's unique unit per
   turn before assault.
 - Stage 3 (docs/SPY_AND_CONQUEST.md section 7): never proposes a pact first to a seat whose Shade it caught with the
-  owner named. From turn 2 it keeps 1-2 Shades (35 alloy each) reading the orders of its strongest neighbouring
+  owner named. From turn 2 it keeps 1-2 Shades (the first as soon as it has the price, keeping back what next turn's
+  income lacks for it; the second and replacements with 35 alloy) reading the orders of its strongest neighbouring
   partner (3 rounds; the ledger while S < 2; the strongest neighbour when it has no partner). In negotiation_2, a
   `move` of that book into its land not marked as false gets a fortify there (1 CP); it recalls a sabotage aimed at a
   partner. One false entry in the last 2 turns, before the betrayal. Fates: occupations of a partner's own land are
   liberated to that partner; else subjugate what the provisions pay for (policy subjugate while 15 are free).
+- Stage 4 (docs/SCORING.md section 10, dah.bots.score): with great works on it saves provisions after its building
+  turns (from turn 1 for a great_work objective; recruits only what the net income leaves) and lays the Monument once the free provisions cover it and still
+  feed the army 3 turns; with science scoring it lays a temple once it has a mine. Its objective
+  makes the provinces that advance it preferred targets (and keeps one unit in those held) or its branch first.
 """
 
 from __future__ import annotations
 
 from dah.bots import conquest as cq
-from dah.bots import spy
+from dah.bots import score, spy
 from dah.bots.base import Bot, DiplomacyApi, Estimator, Order
 from dah.bots.builder import choose_build, total_upkeep
 from dah.bots.tactics import (
@@ -40,6 +45,7 @@ from dah.bots.tactics import (
 from dah.bots.view import (
     BUILD_RESOURCE,
     BUILDING_COST_ALLOY,
+    FOOD_RESOURCE,
     UNIT_COST_ALLOY,
     Province,
     StateView,
@@ -60,11 +66,12 @@ FOOD_TURNS = 3
 RECRUIT_UNIT = "assault"
 UNIQUE_PER_TURN = 1
 SHADE_FROM_TURN = 2
-SHADE_MIN_ALLOY = 35
+SHADE_MIN_ALLOY = 35   # the second Shade and replacements; the first needs only its price, saved for (m6)
 MAX_SHADES = 2
 READ_ROUNDS = 3
 P2_FORTIFY_CP = 1   # registry: a fortify given in negotiation_2
 P2_RECALL_CP = 1    # registry default of p2.cost.recall
+MONUMENT = "monument"   # stage 4 (docs/SCORING.md 10)
 
 
 class DiplomatBot(Bot):
@@ -106,7 +113,13 @@ class DiplomatBot(Bot):
         extra, food_held, alloy_held = self._stage3(view)
         full = view
         view = spy.food_view(view, food_held, alloy_held)
-        orders: list[Order] = []
+        works, view = score.lay_works(view, [(MONUMENT, True)], FOOD_TURNS)
+        # after its building turns it saves for the Monument: the stock is kept, recruits eat what income leaves
+        early = view.turn <= self.build_until and not score.wants_work(view)   # its objective: save at once
+        saving = None if works or early else score.saving_rate(view, MONUMENT, FOOD_TURNS)
+        if saving is not None:
+            view = spy.food_view(view, view.resource(FOOD_RESOURCE))
+        orders: list[Order] = list(works)
         alloy = view.resource(BUILD_RESOURCE)
         feedable = view.feedable(RECRUIT_UNIT, FOOD_TURNS)
         build = None
@@ -114,7 +127,8 @@ class DiplomatBot(Bot):
             site = farm_site(view)  # food, not alloy, limits the army
             build = (site, "farm") if site is not None else None
         elif view.turn <= self.build_until:
-            build = choose_build(view, total_upkeep(view))
+            # stage 4: with science scoring it lays a temple once it has a mine (more research, more points)
+            build = choose_build(view, total_upkeep(view), temple=view.scoring("science"))
         if build is not None and alloy >= BUILDING_COST_ALLOY[build[1]]:
             province, building = build
             orders.append({"kind": "build", "province": province.id, "building": view.qualify(building)})
@@ -128,6 +142,8 @@ class DiplomatBot(Bot):
         count = alloy // UNIT_COST_ALLOY[RECRUIT_UNIT]
         if feedable is not None:
             count = min(count, feedable - unique_upkeep)
+        if saving is not None:
+            count = min(count, (view.net_income or {}).get(FOOD_RESOURCE, 0) - saving - unique_upkeep)
         if site is not None and count > 0:
             orders.append(
                 {"kind": "recruit", "province": site.id, "unit": view.qualify(RECRUIT_UNIT), "count": count}
@@ -135,10 +151,12 @@ class DiplomatBot(Bot):
 
         betrayal = self._betrayal(view, estimate)
         moves = [betrayal] if betrayal is not None else []
-        keep = merge_reserved(garrison(capital_of(view), self.garrison), reserved_by_orders(moves))
+        keep = merge_reserved(garrison(capital_of(view), self.garrison), reserved_by_orders(moves),
+                              score.objective_garrison(view))
         if view.conquest:
             keep = merge_reserved(keep, cq.occupation_garrison(view))
-        moves += plan_moves(view, estimate, ATTACK_WIN, self.rng, keep, lambda t: not view.is_partner(t.owner))
+        moves += plan_moves(view, estimate, ATTACK_WIN, self.rng, keep, lambda t: not view.is_partner(t.owner),
+                            score.attack_bonus(view))
         late = bool(view.turn_limit) and view.turn > view.turn_limit - BETRAY_TURNS
         if view.espionage is not None and not self.feinted and late:
             feint = spy.feint_order(full, merge_reserved(keep, reserved_by_orders(moves)), moves,
@@ -159,10 +177,12 @@ class DiplomatBot(Bot):
             out += fates + ([policy] if policy else [])
         if view.espionage is not None:
             hire = spy.hire_order(view, self.memory, from_turn=SHADE_FROM_TURN, max_shades=MAX_SHADES, alloy=alloy,
-                                  min_alloy=SHADE_MIN_ALLOY)
+                                  min_alloy=0 if spy.first_shade(view, self.memory) else SHADE_MIN_ALLOY)
             if hire is not None:
                 out.append(hire)
                 alloy -= spy.shade_cost()
+            else:
+                alloy -= spy.shade_savings(view, self.memory, from_turn=SHADE_FROM_TURN, alloy=alloy)
             target = spy.strongest_neighbour(view, view.is_partner) or spy.strongest_neighbour(view)
             busy = {str((sh.get("mission") or {}).get("target")) for sh in spy.active_shades(view)}
             idle = spy.idle_shades(view)

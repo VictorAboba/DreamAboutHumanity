@@ -1,0 +1,7 @@
+# Fixture pack for stage-4 scoring tests (docs/SCORING.md): the stage-3 triangle plus great works and objectives.
+id: t4
+version: 0.1.0
+title: Тестовый пак этапа 4
+author: tests
+requires: []
+engine_api: "^1"

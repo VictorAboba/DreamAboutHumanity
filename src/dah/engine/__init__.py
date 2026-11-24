@@ -103,6 +103,17 @@ Stage 3 (docs/SPY_AND_CONQUEST.md; 3a so far: switches and conquest)
         estimate_mission, spies_text (list_spies), intel_text (get_intel), report_text, state_line (ДОНЕСЕНИЯ),
         notice_text (the inbox entry), honest_range, chances; orders: spy {shade, mission, target, rounds},
         recall {shade}, hire_shade; move "feint": true costs feint.cp_cost on cp_spent in Д
+
+Stage 4 (docs/SCORING.md: victory points, score under fog)
+    build_ruleset(pack_dirs, scenario_id, systems=None, scoring={src: weight} | None, objectives=N | None)
+    Ruleset.weight(src), .default_scoring, .system("scoring.<src>"), .objectives {id: ObjectiveDef};
+        ScenarioDef.scoring (all five sources), .objectives {dealt, offer, pool}; BuildingDef.score / max_per_owner /
+        allowed_types; registry.SCORE_SOURCES, OBJECTIVE_KINDS, score.* stats (system scoring.<src>)
+    engine.scoring: scores, score_parts (weighted), final_scores, final_parts, score_known(state, rs, viewer, seat),
+        objective_status/objective_progress, credit_war, deal_objectives, validate_objectives, score_line,
+        objectives_view, science_view; Player.tally {war_value, homes_taken}, Player.objectives [{id, target?}]
+    TurnReport.scores / .score_parts (private; public has no scores), scores_of(); report events war_credit (sides),
+        work_started / work_completed (public); result + score_parts, objectives, winners_open (non-default scoring)
 """
 
 from .catalog import describe, describe_effect, find
