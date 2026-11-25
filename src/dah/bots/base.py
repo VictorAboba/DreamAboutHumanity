@@ -78,6 +78,7 @@ class Bot:
     artifact_likes: tuple[str, ...] = ()  # artifact short ids valued above their power
     branch_priority: tuple[str, ...] = ()  # tech branch short ids, first researched first
     tech_first: tuple[str, ...] = ()  # techs taken before the branch order whenever available
+    decides_finds = True  # stage 5: gives a `discover` order for its pending mixed finds (dah.bots.finds)
 
     def __init__(self, seat: str, seed: int) -> None:
         self.seat = seat
@@ -85,6 +86,8 @@ class Bot:
         self.renewals_asked: set[tuple[str, int]] = set()   # (pact id, turn) renewals proposed
         from dah.bots.spy import SpyMemory
         self.memory = SpyMemory()       # stage 3: what the bot keeps of its reports and of Shades caught at it
+        from dah.bots.finds import FindMemory
+        self.finds = FindMemory()       # stage 5: Abandoned provinces some seat has held (their find has gone off)
 
     # --- decision hooks (overridden by concrete bots) ---
 
@@ -229,6 +232,7 @@ class Bot:
             self.play_setup(api)  # type: ignore[arg-type]
             return
         view = self.read_intel(api, parse_state(api.state(), me), phase)
+        self.finds.absorb(view)
         estimate = _qualified_estimator(api, view)
         confirm_hash: str | None = None
         if phase in NEGOTIATION_PHASES:
@@ -246,6 +250,9 @@ class Bot:
                     log.info("bot %s: message rejected: %s", self.seat, exc)
         if phase == "actions":
             orders = self.action_orders(view, estimate)
+            if self.decides_finds and view.pending_finds:      # stage 5: mixed finds, by the seat's rank
+                from dah.bots.finds import discover_orders
+                orders += discover_orders(view)
             if self.branch_priority and view.research_enabled and view.researching is None:
                 try:
                     research = self.research_order(view, api.list_techs())  # type: ignore[attr-defined]

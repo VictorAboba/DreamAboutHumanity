@@ -27,12 +27,15 @@ UNIT_COST_OTHER: dict[str, dict[str, int]] = {}    # costs beyond alloy (none in
 UNIQUE_UNITS: dict[str, str] = {"litany": "throne_warden", "synclite": "faceless", "ash_choir": "ash_cantor",
                                 "growth": "devourer", "captains": "rift_corsair"}
 BUILDING_COST_ALLOY: dict[str, int] = {"mine": 10, "farm": 8, "barracks": 30, "temple": 15, "smithy": 25,
-                                       "citadel": 40, "warehouse": 20, "hq": 35, "monument": 10, "dream_spire": 50}
+                                       "citadel": 40, "warehouse": 20, "hq": 35, "monument": 10, "dream_spire": 60}
 # Stage 4 (docs/SCORING.md 2.3, 10): great works of core 0.5.0. Provisions beyond alloy, build turns, points and the
 # province types allowed (None: any); tests/test_bots_logic.py checks them, the simulator re-reads them from its pack.
-BUILDING_COST_FOOD: dict[str, int] = {"monument": 25, "dream_spire": 150}
+BUILDING_COST_FOOD: dict[str, int] = {"monument": 25, "dream_spire": 100}
 GREAT_WORKS: dict[str, tuple[int, int, tuple[str, ...] | None]] = {
-    "monument": (2, 3, None), "dream_spire": (4, 3, ("agri", "forge", "shrine", "waste"))}
+    "monument": (2, 3, None), "dream_spire": (4, 7, ("agri", "forge", "shrine", "waste"))}
+# Core 0.6.0 (decision 26): points a broken pact costs its breaker in a scored game (score.betrayal.per_break of the
+# scored scenarios); tests/test_bots_logic.py checks it, the simulator re-reads it from its pack.
+BETRAYAL_PENALTY = 3
 RESEARCH_BUILDING = "temple"  # +research income
 RECRUIT_BUILDINGS: frozenset[str] = frozenset({"barracks", "hq"})
 FARM_SITE = "agri"  # province type a farm prefers
@@ -41,11 +44,12 @@ FOOD_RESOURCE = "provisions"
 
 # Stage 3 (docs/SPY_AND_CONQUEST.md sections 5, 7): the numbers of core 0.4.0 the bots plan espionage and conquest
 # with; tests/test_bots_logic.py checks them against content/packs/core, the simulator re-reads them from its pack.
-SHADE_COST_ALLOY = 25
+SHADE_COST_ALLOY = 20      # core 0.6.0 (was 25); every seat also holds one Shade from the start
 SHADE_UPKEEP_FOOD = 1
 # mission short id -> (whisper needed, rounds_max, alloy once, provisions per round)
 MISSIONS: dict[str, tuple[int, int, int, int]] = {"observe": (1, 5, 0, 1), "ledger": (1, 3, 0, 1),
-                                                  "read_orders": (2, 3, 0, 2), "sabotage": (2, 4, 8, 1)}
+                                                  "secret": (1, 3, 0, 2), "read_orders": (2, 3, 0, 2),
+                                                  "sabotage": (2, 4, 8, 1)}
 # disposition short id -> provisions per point of conquest value (before the faction multiplier)
 DISPOSITION_FOOD: dict[str, int] = {"subjugate": 5, "exterminate": 0, "raid": 0, "liberate": 0}
 CONQUEST_VALUE: dict[str, int] = {"capital": 3}     # province type short id -> value (others 1)
@@ -71,6 +75,11 @@ class Province:
     status: Mapping[str, Any] = field(default_factory=dict)  # public conquest status (occupied, ruined_until, ...)
     origin: str | None = None  # the seat that started with it (conquest games)
     building_now: tuple[str, ...] = ()  # short ids building here (own provinces; others: great works only)
+    # stage 5 (docs/ABANDONED_LANDS.md 13): public marks of the Abandoned lands and the find this seat knows
+    abandoned: bool = False
+    ruins: bool = False
+    guard: Mapping[str, Any] | None = None  # {lair, cap?}: neutral guard (ruins) or lair, where shown
+    discovery: Mapping[str, Any] | None = None  # {id (short), state}: a find this seat knows (Observation, entry)
 
     @property
     def occupied_by(self) -> str | None:
@@ -111,10 +120,16 @@ class StateView:
     conquest: bool = False
     claims: tuple[Mapping[str, Any], ...] = ()
     scores: Mapping[str, int] = field(default_factory=dict)  # seat -> public score
+    # stage 4: seat -> {source: points or None (hidden by fog)} for the others (players[].score_known); empty when the
+    # server sends none (the score is then exact for all)
+    score_known: Mapping[str, Mapping[str, int | None]] = field(default_factory=dict)
     # stage 4 (docs/SCORING.md 8, 10): None / empty with the default scoring (land only)
     score_parts: Mapping[str, int] | None = None  # own turn score by source (you.score_parts)
     objectives: tuple[Mapping[str, Any], ...] = ()  # own secret objectives (you.objectives)
     war: Mapping[str, int] | None = None  # you.war: points, cap_left
+    # stage 5 (docs/ABANDONED_LANDS.md 8, 13): own pending choices of mixed finds
+    # [{province, id (short), name, default, choices: [{id, ev, risk}]}]; empty without them
+    pending_finds: tuple[Mapping[str, Any], ...] = ()
 
     def scoring(self, source: str) -> bool:
         """The score source is on in this game (it appears in the own breakdown)."""
@@ -218,6 +233,7 @@ def parse_state(payload: dict[str, Any], me: set[str] | frozenset[str]) -> State
     player = _player_block(state)
     raw_provinces = _province_records(state.get("provinces", {}))
     edges = _edge_pairs(state.get("edges", []))
+    abandoned = {str(p) for p in state.get("abandoned") or []}
 
     seen_ids: list[str] = []
     provinces: dict[str, Province] = {}
@@ -243,6 +259,11 @@ def parse_state(payload: dict[str, Any], me: set[str] | frozenset[str]) -> State
             origin=str(record["origin"]) if record.get("origin") else None,
             building_now=tuple(short_id(str(b.get("building"))) for b in record.get("building_now") or []
                                if isinstance(b, dict) and b.get("building")),
+            abandoned=bool(record.get("abandoned")) or pid in abandoned,
+            ruins=bool(record.get("ruins")),
+            guard=dict(record["guard"]) if isinstance(record.get("guard"), dict) else None,
+            discovery=({**record["discovery"], "id": short_id(str(record["discovery"].get("id")))}
+                       if isinstance(record.get("discovery"), dict) else None),
         )
 
     resources = _resources(player.get("resources", state.get("resources", {})))
@@ -273,10 +294,14 @@ def parse_state(payload: dict[str, Any], me: set[str] | frozenset[str]) -> State
         claims=tuple(dict(c) for c in state.get("claims") or [] if isinstance(c, dict)),
         scores={str(p.get("seat")): int(p.get("score") or 0) for p in state.get("players") or []
                 if isinstance(p, dict) and p.get("seat") is not None},
+        score_known={str(p.get("seat")): {str(k): (None if v is None else int(v)) for k, v in p["score_known"].items()}
+                     for p in state.get("players") or [] if isinstance(p, dict) and isinstance(p.get("score_known"), dict)},
         score_parts=({str(k): int(v or 0) for k, v in player["score_parts"].items()}
                      if isinstance(player.get("score_parts"), dict) else None),
         objectives=tuple(dict(o) for o in player.get("objectives") or [] if isinstance(o, dict)),
         war=dict(player["war"]) if isinstance(player.get("war"), dict) else None,
+        pending_finds=tuple({**e, "id": short_id(str(e.get("id")))} for e in state.get("discoveries_pending") or []
+                            if isinstance(e, dict) and e.get("province")),
     )
 
 

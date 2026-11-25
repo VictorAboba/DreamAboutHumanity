@@ -14,7 +14,7 @@ from typing import Any, Mapping, Sequence
 from . import espionage as esp
 from . import registry
 from . import scoring as sc_
-from .catalog import ABILITY_TEXT, describe, describe_effect
+from .catalog import ABILITY_TEXT, DIFFICULTY_TEXT, describe, describe_effect
 from .conquest import ordered_dispositions
 from .content import DEFAULT_SETUP_LIMIT, Ruleset
 from .orders import CP_CANCEL, CP_FORTIFY, CP_REDUCE
@@ -39,6 +39,7 @@ TOPICS: dict[str, tuple[str, str]] = {
     "spying": ("ШПИОНАЖ", "Тени, миссии, донесения, ложные записи"),
     "conquest": ("ЗАВОЕВАНИЕ", "оккупация, судьбы провинций, притязания"),
     "fog": ("ВИДИМОСТЬ", "туман войны"),
+    "discoveries": ("ЗАБРОШЕННЫЕ", "Заброшенные земли и находки"),
     "messages": ("СООБЩЕНИЯ", "лимиты сообщений"),
     "techs": ("ТЕХНОЛОГИИ", "дерево технологий"),
     "factions": ("ФРАКЦИИ", "фракции"),
@@ -56,6 +57,9 @@ ALIASES = {
     "тени": "spying", "тень": "spying",
     "score": "victory", "scoring": "victory", "objectives": "victory", "objective": "victory", "очки": "victory",
     "цели": "victory", "цель": "victory", "счёт": "victory", "works": "victory", "стройки": "victory",
+    "discovery": "discoveries", "finds": "discoveries", "find": "discoveries", "abandoned": "discoveries",
+    "находки": "discoveries", "находка": "discoveries", "заброшенные": "discoveries", "discover": "discoveries",
+    "ruins": "discoveries", "руины": "discoveries", "lair": "discoveries", "логово": "discoveries",
 }
 
 
@@ -120,7 +124,7 @@ def _turn(rs: Ruleset, setup: Mapping[str, Any] | None) -> Section:
     text = (f"ХОД: {start}П1 переговоры ({pl['negotiation_1']} с; приказы можно только проверить validate_orders) → "
             f"Д действия ({pl['actions']} с; подача приказов, переписка и дипломатия закрыты) → П2 переговоры "
             f"({pl['negotiation_2']} с; правка приказов за ОК) → расчёт. Фаза кончается по таймеру или когда все "
-            "нажали ready — жми сразу, как больше нечего сказать и сделать: П1 — ready() без хэша; Д и П2 — "
+            "нажали ready — жми, как только нечего добавить: П1 — ready() без хэша; Д и П2 — "
             "ready(confirm_hash=orders_hash из phase(), list_orders или submit_orders). Правка приказов снимает "
             "ready. Не подал приказы — войска стоят.")
     return Section("turn", text)
@@ -167,7 +171,7 @@ def _resources(rs: Ruleset) -> Section:
             f"Если {food} < 0 — голод: теряется {st('starvation.loss_frac'):.0%} армии (минимум 1 юнит, с самых "
             "дешёвых).")
     if rs.research_resource:
-        text += f" «{names[rs.research_resource]}» тратится только на технологии (см. ТЕХНОЛОГИИ)."
+        text += f" «{names[rs.research_resource]}» — только на технологии."
     return Section("resources", text)
 
 
@@ -262,8 +266,14 @@ def _buildings(rs: Ruleset) -> Section:
     head = "ЗДАНИЯ (одно каждого вида на провинцию; найм только там, где есть казарма):"
     core = head + "\n" + "\n".join(_building_line(rs, b, False) for b in rs.buildings)
     detail = head + "\n" + "\n".join(_building_line(rs, b, True) for b in rs.buildings)
+    works = sc_.on(rs, "works")
+
+    def points(b: str, d: Any) -> str:
+        # a great work shows its points even in the short form (core 0.6.0, m7: the Spire went unnoticed)
+        return f" +{int(rs.stat(f'building.{b}.score'))} очк." if works and d.score else ""
+
     short = ("ЗДАНИЯ (одно каждого вида на провинцию; найм — где казарма): "
-             + ", ".join(f"{_short(b)} «{d.name}»" for b, d in rs.buildings.items())
+             + ", ".join(f"{_short(b)} «{d.name}»{points(b, d)}" for b, d in rs.buildings.items())
              + " — цены и эффекты: rules(topic=\"buildings\").")
     return Section("buildings", core, detail if detail != core else "", short)
 
@@ -375,6 +385,10 @@ def _victory(rs: Ruleset) -> Section:
         if w:
             names.append(sc_.NAMES[src] + (f"×{w}" if w != 1 else ""))
     own = " (своя: get_state)" if sc_.on(rs, "objectives") else ""
+    if sc_.betrayal_on(rs):
+        # core 0.6.0 (decision 26): the pact-break penalty instead of the pointer to get_state (the Счёт line there
+        # shows the own objective anyway), so the section stays within 150 characters
+        own = f", разрыв пакта −{int(rs.stat('score.betrayal.per_break'))}"
     core = (f"ПОБЕДА: последний живой, иначе после {t} хода — больший итог: {'+'.join(names)}{own}. Ничья возможна. "
             "rules('victory')")
     return Section("victory", core, _victory_detail(rs, core))
@@ -410,9 +424,15 @@ def _victory_detail(rs: Ruleset, core: str) -> str:
                      f"{int(st('score.war.defense_pct'))}%; 1 очко за {int(st('score.war.per_point'))}, не больше "
                      f"{int(st('score.war.cap_per_victim'))} с одного соперника и {int(st('score.war.cap'))} всего. "
                      "Нейтралы, голод, бунт, гибель при отступлении — 0.")
+    if sc_.betrayal_on(rs):
+        lines.append(f"- Разрыв пакта: −{int(st('score.betrayal.per_break'))} к счёту за каждый пакт, который ты "
+                     "нарушил (move с \"pact\":\"break\"), и на последнем ходу тоже; выход leave_pact — без штрафа. "
+                     "Нарушения публичны, поэтому этот штраф виден всем.")
     if sc_.on(rs, "objectives"):
         dealt = rs.scenario.objectives.get("dealt", 1)
-        pool = "; ".join(f"«{o.name}» +{o.points * rs.weight('objectives')}: {sc_.objective_text(rs, None, {'id': oid})}"
+        pool = "; ".join(f"«{o.name}» +{o.points * rs.weight('objectives')}"
+                         + (f" ({DIFFICULTY_TEXT.get(o.difficulty, o.difficulty)})" if o.difficulty else "")
+                         + f": {sc_.objective_text(rs, None, {'id': oid})}"
                          for oid, o in rs.objectives.items())
         where = "get_setup и get_state" if rs.scenario.setup else "get_state"
         lines.append(f"- Тайная цель: {dealt} на игрока при старте (раздаёт жребий, выбора нет), своя — в {where} "
@@ -420,9 +440,11 @@ def _victory_detail(rs: Ruleset, core: str) -> str:
                      "провинция в конце; цель против соперника называет его. Проверка — при game_over. "
                      f"Пул партии: {pool}.")
     ledger = next((m.name for m in rs.missions.values() if m.behavior == "read_ledger"), None)
+    secret = next((m.name for m in rs.missions.values() if m.behavior == esp.READ_OBJECTIVE), None)
     lines.append("Видимость: свой счёт — полностью; чужой — нижняя граница «≥»: земля по провинциям, которые ты видишь, "
                  "стройки — по публичным событиям, наука и война — «?». "
                  + (f"Точную разбивку (без цели) даёт шпион: миссия «{ledger}». " if ledger else "")
+                 + (f"Чужую тайную цель — миссия «{secret}». " if secret else "")
                  + "После партии раскрыто всё: итог, разбивка, цели.")
     lines.append("Где смотреть: строка «Счёт:» в get_state (ты — разбивка, соперники — «≥»), you.score_parts"
                  + (", you.war (очки и остаток предела)" if sc_.on(rs, "war") else "")
@@ -454,8 +476,8 @@ def _pacts(rs: Ruleset) -> Section:
         "нарушителю возвращаются); затем пакт разорван, и все узнают, кто нарушил.")
     short = ("ДИПЛОМАТИЯ (только П1 и П2): send_gift(to, resources) — подношение свободных ресурсов; "
              "propose_pact(to, turns) → respond_pact(id, accept|reject); leave_pact(id). Пакт: армии сторон не "
-             'сражаются (ход к союзнику вернётся); move с "pact":"break" нарушает пакт публично. Продлить пакт со '
-             "сроком — propose_pact тому же партнёру, пока пакт действует: срок добавится к концу нынешнего. "
+             'сражаются (ход к союзнику вернётся); move с "pact":"break" нарушает пакт публично. Продление — '
+             "propose_pact тому же партнёру, пока пакт действует (срок добавится). "
              "Подробно: rules(topic=\"pacts\").")
     return Section("pacts", core, short=short)
 
@@ -529,6 +551,8 @@ _MISSION_TEXT = {esp.OBSERVE: "юниты по видам (интервалы), 
                              "артефакты, S и C цели, число Теней",
                  esp.READ_ORDERS: "книга приказов цели на конец Д (без ID; ложные записи выглядят как настоящие, "
                                   "некоторые помечены [ЛОЖНАЯ ЗАПИСЬ]), ОК хода, её свободные войска у твоих границ",
+                 esp.READ_OBJECTIVE: "тайная цель игрока точно: условие, очки, выполнена ли сейчас (цель не меняется — "
+                                     "хватит одного донесения)",
                  esp.SABOTAGE: "удар в расчёте этого хода: {effects}"}
 _TARGET_TEXT = {"province": "провинция", "owned_province": "провинция игрока", "seat": "игрок (ник)"}
 
@@ -559,13 +583,19 @@ def _spying(rs: Ruleset) -> Section | None:
     upkeep_txt = ", +" + ", ".join(f"{n} {names.get(r, r)}" for r, n in upkeep.items()) + "/ход" if upkeep else ""
     spy_cp, recall_cp = int(st("p2.cost.spy")), int(st("p2.cost.recall"))
     feint_cp = int(st("feint.cp_cost"))
-    core = (f"ШПИОНАЖ: {shade} (hire_shade, только Д: {cost}{upkeep_txt}) идёт на spy{{shade,mission,target,rounds}}: "
+    free = int(st("spy.shades_free"))
+    hire = f"{free} даром с начала, ещё — " if free else ""
+    secret = next((m for m in rs.missions.values() if m.behavior == esp.READ_OBJECTIVE), None)
+    core = (f"ШПИОНАЖ: {shade} ({hire}hire_shade, только Д: {cost}{upkeep_txt}) идёт на spy{{shade,mission,target,rounds}}: "
             f"из Д — раунд в этом ходу, из П2 ({spy_cp} ОК) — со следующего. Раунд — между Д и П2: сперва поимка "
             "(Тень потеряна), затем находка. Донесения — в начале П2 (get_intel): снимок конца Д, числа — интервалы "
             f"с правдой внутри. В книге бывают ложные записи (move…feint:true: войска дома, {feint_cp} ОК). "
-            'list_spies, estimate_mission, rules(topic="spying").')
-    short = ("ШПИОНАЖ: hire_shade, spy{shade,mission,target,rounds}; донесения в П2 — get_intel; бывают ложные "
-             'записи (move feint:true). Подробно: rules(topic="spying").')
+            + (f"Чужую тайную цель даёт миссия {_short(secret.id)}. " if secret else "")
+            + 'list_spies, estimate_mission, rules(topic="spying").')
+    short = ("ШПИОНАЖ: " + (f"Тени даром с начала: {free}; " if free else "") + "hire_shade, "
+             "spy{shade,mission,target,rounds}"
+             + (f" ({_short(secret.id)} — чужая тайная цель)" if secret else "")
+             + '; донесения в П2 — get_intel; бывают ложные записи (move feint:true). Подробно: rules(topic="spying").')
     lines = [core.replace(', rules(topic="spying").', "."), "Миссии:"]
     for mid, m in sorted(rs.missions.items()):
         price = []
@@ -583,9 +613,10 @@ def _spying(rs: Ruleset) -> Section | None:
     d = lambda k: st(f"spy.detect.{k}")       # noqa: E731
     a = lambda k: st(f"spy.attribution.{k}")  # noqa: E731
     lines += [
-        f"{shade}: не больше {int(st('spy.shades_max'))}, на заданиях одновременно {int(st('spy.active_base'))} + "
-        "S//2. Нанимается только при своей полноценной стартовой столице, одна за ход; появляется на закрытии Д, "
-        "задания — со следующего Д. Голод Теней не трогает. Цена задания — вся за срок, резерв при подаче, не "
+        f"{shade}: не больше {int(st('spy.shades_max'))}"
+        + (f" (из них {free} — у каждого с начала партии, свободна)" if free else "")
+        + f", на заданиях одновременно {int(st('spy.active_base'))} + S//2. Нанимается только при своей "
+        "полноценной стартовой столице, одна за ход; появляется на закрытии Д, задания — со следующего Д. Голод Теней не трогает. Цена задания — вся за срок, резерв при подаче, не "
         "возвращается (кроме снятия записи spy до закрытия Д).",
         f"S — шпионаж (база {int(st('spy.whisper'))}), C — контрразведка (база {int(st('spy.mirrors'))}); их "
         "поднимают технологии. Место проверки — провинция-цель; для цели-игрока — его столица, иначе первая "
@@ -623,24 +654,98 @@ def _fog(rs: Ruleset) -> Section:
     text = ("ВИДИМОСТЬ: свои провинции и соседние — полностью; остальные — владелец и тип, войска «?». Чужие ресурсы и "
             "приказы не видны никогда" + (" (кроме донесений Теней)." if rs.system("espionage") else "."))
     if rs.techs or rs.artifacts:
-        text += " Чужие технологии и артефакты не видны до конца партии" + \
-            (" (видно только число изученных технологий)." if rs.techs else ".")
+        text += " Чужие технологии и артефакты скрыты до конца партии" + \
+            (" (видно лишь число технологий)." if rs.techs else ".")
+    # the core names the tool only (its arguments are in the tool's schema and the topic): room for core 0.6.0
+    core = text + " Прогноз боя — estimate."
     text += " estimate(attacker, defender, province_type, fortified, hasty) — прогноз боя."
     # the score under fog (SCORING.md 5) holds in every game: only in the topic, the core has no room for it
     score = ("Счёт: свой — точно; чужой — нижняя граница «≥» по провинциям, которые ты видишь сейчас"
              + ("; стройки — по публичным событиям, наука и война — «?»" if not rs.default_scoring else "")
              + ". После партии открыто всё" + (' (rules(topic="victory")).' if not rs.default_scoring else "."))
-    return Section("fog", text, text + "\n" + score)
+    return Section("fog", core, text + "\n" + score)
+
+
+DISCOVERIES_TOPIC_LIMIT = 2500
+DISCOVERIES_CORE = 'ЗАБРОШЕННЫЕ: находки при входе армии — rules(topic="discoveries")'
+
+
+def _souls_text(cfg: Mapping[str, Any]) -> str:
+    parts = []
+    if cfg.get("ruined_turns"):
+        parts.append(f"Пепелище на ходах 1–{cfg['ruined_turns']} (ни дохода, ни очков, ни стройки)")
+    elif cfg.get("ravaged_turns"):
+        parts.append(f"Разорение на ходах 1–{cfg['ravaged_turns']} (нет дохода, очки есть)")
+    if cfg.get("income_mul", 1.0) < 1.0:
+        parts.append(f"доход ×{cfg['income_mul']:g} навсегда")
+    return "; ".join(parts) or "без снижения"
+
+
+def _where_text(cfg: Mapping[str, Any]) -> str:
+    """Where finds lie. With density 1 (and no extra or ruins finds) the layout is public: only which find is where
+    stays secret (ABANDONED_LANDS.md 10, «Реализация: уточнения»)."""
+    if float(cfg.get("density", 0)) >= 1.0 and not cfg.get("extra") and not cfg.get("ruins_find"):
+        return "Находка — в каждой Заброшенной провинции дальше кольца 1, кроме руин; какая — тайна."
+    return "Находки скрыты в Заброшенных провинциях (не у стартов), их число тайна."
+
+
+_KIND_GROUPS = {"boon": "Плюшки", "hindrance": "Помехи", "mixed": "Смешанные"}
+
+
+def discoveries_section(rs: Ruleset) -> Section:
+    """ЗАБРОШЕННЫЕ (ABANDONED_LANDS.md 13.3): one short core line; everything else in the topic (<= 2500 chars).
+    The game adds it (an `extra` section) only while the game has Abandoned lands or finds."""
+    from .discoveries import choice_text, effects_text
+    cfg = rs.scenario.discoveries or {}
+    garrison = cfg.get("garrison") or {}
+    guard = " ".join(f"{rs.short(u)}×{n}" for u, n in (garrison.get("units") or {}).items()) or "нет"
+    reward = effects_text(rs, garrison.get("reward") or ()) if garrison.get("reward") else "нет"
+    lines = [
+        "ЗАБРОШЕННЫЕ ЗЕМЛИ: старты без игрока — нейтральные [заброш.], их столица — [руины] под стражей "
+        f"({guard}, стоит на месте); кто уничтожит стражу и возьмёт руины, получит {reward}. Души снижены: "
+        f"{_souls_text(cfg)}. Взятие бесплатно, очки как за обычную землю (руины — как столица). Угол достаётся "
+        "тем, кто ближе; компенсаций нет.",
+        f"{_where_text(cfg)} Срабатывают один раз при входе "
+        "ЛЮБОЙ армии, до боёв (не Тени). Вошли вместе: помехи — каждой армии полностью, плюшки — долями по цене "
+        "армий; юниты — после боёв. Помехи серьёзные: мелкую армию могут стереть, разведка одиночками не "
+        "окупается. Награда нейтралов — тому, кто их уничтожит и возьмёт провинцию.",
+        "Смешанная открывается вошедшим; кто держит провинцию после боёв, видит строку НАХОДКА и в следующем ходу "
+        'решает приказом {"kind":"discover","province":"P16","choice":"<вариант>"} (Д или П2, бесплатно), иначе — '
+        "вариант по умолчанию. Исход — до движения; приказы, которым не хватит юнитов, обрезаются.",
+        "Находку знают вошедшие и наблюдавшие (Наблюдение раскрывает, не запуская; на Заброшенной земле C_лок = "
+        f"{cfg.get('observe_mirrors', 0)}); видящие провинцию узнают лишь тип и последствия. Сила — для армии из 5 "
+        "юнитов, 1 ≈ 15 ресурсов.",
+    ]
+    # the pool, one line per kind (a 17-find pool fits the topic): «name» power[/risk]: effects
+    groups: dict[str, list[str]] = {}
+    for d in sorted(rs.discoveries.values(), key=lambda x: (x.kind, -x.power, x.id)):
+        body = effects_text(rs, d.effects) if d.effects else " | ".join(choice_text(rs, d, c) for c in d.choices)
+        groups.setdefault(d.kind, []).append(f"«{d.name}» {d.power:+.1f}"
+                                             + (f"/риск {d.risk:.1f}" if d.kind == "mixed" else "") + f": {body}")
+    if groups:
+        lines.append("Пул (сила; подробно — describe):")
+    text = "\n".join(lines)
+    left = sum(len(items) for items in groups.values())
+    for kind in ("boon", "hindrance", "mixed"):
+        items = groups.get(kind) or []
+        for i, item in enumerate(items):
+            head = f"\n{_KIND_GROUPS.get(kind, kind)}: " if i == 0 else "; "
+            more = f"\n… ещё {left}: describe(название)"
+            if len(text) + len(head) + len(item) + (len(more) if left > 1 else 0) > DISCOVERIES_TOPIC_LIMIT:
+                return Section("discoveries", DISCOVERIES_CORE, (text + more)[:DISCOVERIES_TOPIC_LIMIT])
+            text += head + item
+            left -= 1
+    return Section("discoveries", DISCOVERIES_CORE, text[:DISCOVERIES_TOPIC_LIMIT])
 
 
 def _techs(rs: Ruleset) -> Section | None:
     if not (rs.techs and rs.research_resource):
         return None
     res = rs.resources[rs.research_resource].name
-    core = (f"ТЕХНОЛОГИИ: {len(rs.techs)} в {len(rs.branches)} ветках, очки — «{res}». Приказ research (только в Д) "
-            f"выбирает активную технологию: каждый расчёт запас «{res}» идёт в неё, пока она не изучена или не "
-            "сменена (прогресс сохраняется); изученная действует со следующего хода. Твоё дерево — list_techs(), "
-            "всё — rules(topic=\"techs\").")
+    # tighter since stage 5: room for ЗАБРОШЕННЫЕ in the core of quad4 with every system on
+    core = (f"ТЕХНОЛОГИИ: {len(rs.techs)} в {len(rs.branches)} ветках, очки — «{res}». research (только в Д) "
+            f"выбирает активную: каждый расчёт запас «{res}» идёт в неё до изучения или смены (прогресс "
+            "сохраняется); действует со следующего хода. Дерево — list_techs(), всё — rules(topic=\"techs\").")
     lines = [f"ТЕХНОЛОГИИ: {len(rs.techs)} в {len(rs.branches)} ветках; очки — ресурс «{res}».",
              'Приказ {"kind":"research","tech":"<id или название>"} — только в Д (в П1 — validate_orders, в П2 '
              "нельзя), один на ход; сменить — amend_order(id, patch={\"tech\": \"...\"}) в Д. Активная технология "

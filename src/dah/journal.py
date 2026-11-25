@@ -27,10 +27,18 @@ EVENT_TYPES = frozenset({
     # stage 4 (SCORING.md 9): objectives (private to the seat until game_over), war credit (to the fight's sides),
     # great works (public), the reveal at the end
     "objectives_dealt", "war_credit", "work_started", "work_completed", "objectives_revealed",
+    # stage 5 (ABANDONED_LANDS.md 10, 16): the layout (admin-only until game_over), finds and choices (to their seats)
+    "discoveries_placed", "discoveries_unfair", "fair_mirror_skipped", "discovery_found", "discovery_chosen",
+    "discovery_units", "discovery_pending", "order_clipped", "guard_cleared", "lair_grew",
 })
 
 # Visibility of scoring events in a non-admin view of the journal (view_events)
-_SEAT_PRIVATE = {"objectives_dealt": ("seat",), "war_credit": ("killer", "victim")}
+_SEAT_PRIVATE = {"objectives_dealt": ("seat",), "war_credit": ("killer", "victim"),
+                 # stage 5: a find to its entrants, a choice and its consequences to the holder
+                 "discovery_found": ("seats",), "discovery_chosen": ("seat",), "discovery_units": ("seat",),
+                 "discovery_pending": ("seat",), "order_clipped": ("seat",)}
+# the layout of finds: nobody but the admin until game_over
+_ADMIN_ONLY = frozenset({"discoveries_placed", "discoveries_unfair", "fair_mirror_skipped"})
 
 
 # config fields that deal the secret objectives: admin-only until game_over
@@ -52,8 +60,11 @@ def view_events(events: list[dict[str, Any]], *, seat: str | None = None, admin:
             e = {k: v for k, v in e.items() if k not in _SECRET_CONFIG}
             if isinstance(e.get("config"), dict):
                 e["config"] = {k: v for k, v in e["config"].items() if k not in _SECRET_CONFIG}
+        elif kind in _ADMIN_ONLY:
+            continue
         elif kind in _SEAT_PRIVATE:
-            if spectator or seat is None or seat not in [e.get(f) for f in _SEAT_PRIVATE[kind]]:
+            sides = [x for f in _SEAT_PRIVATE[kind] for x in (e.get(f) if isinstance(e.get(f), list) else [e.get(f)])]
+            if spectator or seat is None or seat not in sides:
                 continue
         elif kind == "turn_resolved" and not spectator:
             e = dict(e)

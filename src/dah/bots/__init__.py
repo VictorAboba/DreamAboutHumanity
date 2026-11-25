@@ -12,10 +12,12 @@ from dah.bots.client import ApiClient
 from dah.bots.diplomat import DiplomatBot
 from dah.bots.passive import PassiveBot
 from dah.bots.rush import RushBot
+from dah.bots.scout import ScoutBot
 
-BOT_TYPES: dict[str, type[Bot]] = {cls.name: cls for cls in (PassiveBot, BuilderBot, RushBot, DiplomatBot)}
+BOT_TYPES: dict[str, type[Bot]] = {cls.name: cls for cls in (PassiveBot, BuilderBot, RushBot, DiplomatBot,
+                                                                       ScoutBot)}
 
-__all__ = ["BOT_TYPES", "Bot", "BuilderBot", "DiplomatBot", "PassiveBot", "RushBot", "run_bots"]
+__all__ = ["BOT_TYPES", "Bot", "BuilderBot", "DiplomatBot", "PassiveBot", "RushBot", "ScoutBot", "run_bots"]
 
 
 def run_bots(game_dir: str | Path, server_url: str, stop_event: threading.Event | None = None) -> None:

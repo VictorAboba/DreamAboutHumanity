@@ -17,13 +17,15 @@ OPTIONAL_ROLES: tuple[str, ...] = ("research",)              # at most one resou
 # Order kinds the engine knows (orders.py); `unlock {kind: order}` may name one of them. Stage 3
 # (docs/SPY_AND_CONQUEST.md 1.2): espionage (hire_shade, spy, recall, ward) and conquest (dispose, policy).
 ORDER_KINDS: tuple[str, ...] = ("move", "recruit", "build", "fortify", "research",
-                                "hire_shade", "spy", "recall", "ward", "dispose", "policy")
+                                "hire_shade", "spy", "recall", "ward", "dispose", "policy", "discover")
 
 # Switchable subsystems of stage 3 (scenario `systems`, `dah game create --espionage/--conquest`). A system that is
 # off leaves no trace: its order kinds are NOT_AVAILABLE, its stats are not in any table, its content is hidden.
-SYSTEMS: tuple[str, ...] = ("espionage", "conquest")
+# Stage 5 (docs/ABANDONED_LANDS.md 1): `discoveries` - free starts become Abandoned lands with hidden finds.
+SYSTEMS: tuple[str, ...] = ("espionage", "conquest", "discoveries")
 ORDER_SYSTEMS: dict[str, str] = {"hire_shade": "espionage", "spy": "espionage", "recall": "espionage",
-                                 "ward": "espionage", "dispose": "conquest", "policy": "conquest"}
+                                 "ward": "espionage", "dispose": "conquest", "policy": "conquest",
+                                 "discover": "discoveries"}
 
 # Phase rules of order kinds (data, not branches in orders.py; SPY_AND_CONQUEST.md 1.2, 1.4):
 # - p2_new: price in CP of a new order given in negotiation_2: a stat path, an int, or "locked" (PHASE_LOCKED);
@@ -43,6 +45,8 @@ ORDER_PHASE_RULES: dict[str, dict[str, Any]] = {
     "ward": {"p2_new": "locked", "p2_edit": "locked", "recon_consumed": True},
     "dispose": {"p2_new": 0, "p2_edit": "free", "recon_consumed": False},
     "policy": {"p2_new": 0, "p2_edit": "free", "recon_consumed": False},
+    # stage 5 (ABANDONED_LANDS.md 8): the choice of a mixed find, like dispose
+    "discover": {"p2_new": 0, "p2_edit": "free", "recon_consumed": False},
 }
 
 # Behaviours the engine knows; packs name them in missions and dispositions (several pack entries may share one
@@ -51,6 +55,8 @@ MISSION_BEHAVIORS: dict[str, dict[str, Any]] = {
     "observe_province": {"loud": False, "params": {}},
     "read_ledger": {"loud": False, "params": {}},
     "read_orders": {"loud": False, "params": {}},
+    # core 0.6.0 (decision 26): the target's secret objectives (SCORING.md 5, SPY_AND_CONQUEST.md 2.2)
+    "read_objective": {"loud": False, "params": {}},
     "sabotage": {"loud": True, "params": {"deny_fortify": (bool, 0, 1, True),
                                           "defense_mul": (float, 0.1, 1.0, 0.85),
                                           "income_mul": (float, 0.0, 1.0, 0.0)}},
@@ -144,6 +150,8 @@ STAGE3_STATS: tuple[StatSpec, ...] = (
     _s3("spy.mirrors", int, 0, 5, 1, _E),
     _s3("province.mirrors", int, 0, 5, 0, _E),
     _s3("spy.shades_max", int, 0, 8, 2, _E),
+    # core 0.6.0 (decision 26): Shades every seat gets for free at the start (counted in spy.shades_max)
+    _s3("spy.shades_free", int, 0, 3, 0, _E),
     _s3("spy.active_base", int, 0, 5, 1, _E),
     _s3("spy.rounds_bonus", int, 0, 3, 0, _E),
     _s3("spy.mission.*.difficulty", int, 0, 6, None, _E),
@@ -182,6 +190,9 @@ TURN_SOURCES: tuple[str, ...] = SCORE_SOURCES[:4]          # the turn score; obj
 DEFAULT_SCORING: dict[str, int] = {"territory": 1}          # no `scoring` key: territory only, as before stage 4
 SCORE_WEIGHT_MAX = 5
 SCORING_SYSTEMS: tuple[str, ...] = tuple(f"scoring.{src}" for src in SCORE_SOURCES)
+# Stats of a non-default score as a whole (not of one source): off, and their effects dropped, under the default
+# score {territory: 1} (core 0.6.0: the pact-break penalty)
+SCORING_ANY = "scoring"
 
 # Kinds of secret objectives (SCORING.md 2.5): behaviour in engine/scoring.py, numbers in the pack.
 # kind -> {"params": {name: "province_type" | "branch" | "count"}, "target": "none" | "seat"}
@@ -194,6 +205,9 @@ OBJECTIVE_KINDS: dict[str, dict[str, Any]] = {
     "great_work": {"params": {"count": "count"}, "target": "none"},
     "rival_capital_taken": {"params": {}, "target": "seat"},
 }
+# Difficulty tiers of secret objectives (core 0.6.0, decision 26), easiest first: an objective's `points` must grow
+# with its tier within a ruleset (content.py checks it); the numbers are the pack's.
+OBJECTIVE_DIFFICULTIES: tuple[str, ...] = ("easy", "medium", "hard")
 
 
 def _s4(pattern: str, lo: float, hi: float, default: float | None, src: str) -> StatSpec:
@@ -210,6 +224,9 @@ SCORING_STATS: tuple[StatSpec, ...] = (
     _s4("score.war.cap_per_victim", 0, 20, 3, "war"),
     _s4("score.war.cap", 0, 20, 5, "war"),
     _s4("score.war.defense_pct", 0, 100, 50, "war"),
+    # core 0.6.0 (decision 26): points a seat loses per pact it broke (a penalty line `betrayal` of the turn score
+    # under a non-default scoring); 0 (the default) = no penalty, so older packs score as before
+    StatSpec("score.betrayal.per_break", int, 0, 10, 0, seeded=False, system=SCORING_ANY),
 )
 STATS = STATS + SCORING_STATS
 
@@ -248,9 +265,16 @@ EFFECT_PARAMS: dict[str, dict[str, tuple[type, ...]]] = {
     "income": {"resource": (str,), "amount": (int,)},
     "unlock": {"kind": (str,), "id": (str,)},
     "grant_tech": {"tech": (str,)},
+    # stage 5 (ABANDONED_LANDS.md 3): effects of finds only
+    "grant_artifact": {"artifact": (str,)},
+    "lose_units": {"frac": (int, float)},
+    "spawn_neutral": {"units": (dict,)},
+    "set_status": {"status": (str,), "turns": (int,)},
 }
-# Optional parameters: `scope` of a building's modify (province | owner).
-EFFECT_OPTIONAL: dict[str, dict[str, tuple[type, ...]]] = {"modify": {"scope": (str,)}}
+# Optional parameters: `scope` of a building's modify (province | owner); `min` of lose_units (units lost at least);
+# `grow` {every, add, cap} and `reward` [effects] of spawn_neutral (a lair).
+EFFECT_OPTIONAL: dict[str, dict[str, tuple[type, ...]]] = {"modify": {"scope": (str,)}, "lose_units": {"min": (int,)},
+                                                           "spawn_neutral": {"grow": (dict,), "reward": (list,)}}
 
 # Which hook/context each effect may appear in.
 EFFECT_CONTEXTS: dict[str, frozenset[str]] = {
@@ -262,8 +286,59 @@ EFFECT_CONTEXTS: dict[str, frozenset[str]] = {
     # an artifact: passive (modify, income, unlock) plus one-off effects applied at game start
     "artifact": frozenset({"modify", "income", "unlock", "add_resource", "grant_units", "grant_building",
                            "set_flag", "grant_tech"}),
+    # stage 5 (ABANDONED_LANDS.md 3): a boon or hindrance as armies enter; an outcome of a mixed find's choice
+    # (applied in the holder's own province: no neutrals); the reward of a guard or a lair (to the taker)
+    "discovery": frozenset({"add_resource", "grant_units", "grant_building", "grant_artifact", "lose_units",
+                            "spawn_neutral", "set_status"}),
+    "discovery_choice": frozenset({"add_resource", "grant_units", "grant_building", "grant_artifact", "lose_units",
+                                   "set_status"}),
+    "discovery_reward": frozenset({"add_resource", "grant_units"}),
 }
+DISCOVERY_CONTEXTS = frozenset({"discovery", "discovery_choice", "discovery_reward"})
 PASSIVE_EFFECTS = frozenset({"modify", "income", "unlock"})
+
+# ---------------------------------------------------------------- stage 5: finds (docs/ABANDONED_LANDS.md 3, 4)
+
+DISCOVERY_KINDS: tuple[str, ...] = ("boon", "hindrance", "mixed")
+# "<kind>:<rarity>" -> (power from, power to: a half-open interval [lo, hi)), default weight. Engine data, not the
+# pack's: a pack cannot sell a strong boon as a common one.
+DISCOVERY_RARITY: dict[str, tuple[float, float, int]] = {
+    "boon:common": (1.0, 2.5, 6), "boon:uncommon": (2.5, 4.0, 3), "boon:rare": (4.0, 6.0, 1),
+    "hindrance:minor": (-1.5, -0.5, 5), "hindrance:major": (-3.0, -1.5, 3),
+    "mixed:common": (0.5, 2.5, 3), "mixed:uncommon": (2.5, 4.0, 2), "mixed:rare": (4.0, 6.0, 1),
+}
+DISCOVERY_RARITIES: dict[str, tuple[str, ...]] = {
+    "boon": ("common", "uncommon", "rare"), "hindrance": ("minor", "major"), "mixed": ("common", "uncommon", "rare")}
+DISCOVERY_TRIGGERS: tuple[str, ...] = ("army", "shade")       # shade: a warning «ignored in this stage»
+DISCOVERY_STATUSES: tuple[str, ...] = ("ravaged", "ruined")
+DISCOVERY_MAX_MIN_LOSS = 20
+# Power (P) of finds: 1 P = 15 resources = a unit price of 20. The validator values a find against the reference
+# army (5 units at 12 = 60, ABANDONED_LANDS.md 3) and against small armies of 1 and 2 of the pack's cheapest common
+# unit (decision 25: any army triggers a find, so a scout sweep must not pay: the pool's mean power against them < 0).
+P_RESOURCES = 15
+P_PRICE = 20
+REFERENCE_ARMY = (5, 12)          # (units, base price of each)
+SMALL_ARMIES = (1, 2)             # units of the cheapest common unit
+# «Души снижены» (ABANDONED_LANDS.md 2.2, decision 25 d): presets of the scenario knob `discoveries.souls`; the keys
+# ravaged_turns, ruined_turns, income_mul given next to it override the preset
+SOULS_VARIANTS: dict[str, dict[str, Any]] = {
+    "ravage": {"ravaged_turns": 3, "ruined_turns": 0, "income_mul": 1.0},
+    "halve": {"ravaged_turns": 0, "ruined_turns": 0, "income_mul": 0.5},
+    "ashes": {"ravaged_turns": 0, "ruined_turns": 2, "income_mul": 1.0},
+}
+DEFAULT_SOULS = "ravage"
+# Scenario `discoveries` keys and defaults (ABANDONED_LANDS.md 11 as amended by decision 25: no army threshold, no
+# compensation). Rings: the "<kind>:<rarity>" allowed in a province of that ring; rings past the last given take it.
+# density 0.66, not the spec's 0.67: k = ceil(density x candidates) and 0.67 x 3 = 2.01 gave all 3 provinces of a
+# corner a find; the spec means two of three (5.3, 5.7, 5.8: "одна провинция пуста")
+DISCOVERY_DEFAULTS: dict[str, Any] = {
+    "souls": DEFAULT_SOULS, "density": 0.66, "extra": 0,
+    "rings": {2: ("boon:common", "hindrance:minor", "mixed:common"),
+              3: ("boon:common", "boon:uncommon", "boon:rare", "hindrance:minor", "hindrance:major", "mixed:common",
+                  "mixed:uncommon", "mixed:rare")},
+    "ruins_find": False, "max_ring": 3, "w": {2: 1.0, 3: 0.75}, "fair_tolerance": 1.0, "tries": 64,
+    "observe_mirrors": 2, "fair_mirror": False,
+}
 UNLOCK_KINDS = ("unit", "building", "order")
 MODIFY_SCOPES = ("province", "owner")
 
@@ -309,8 +384,50 @@ def effect_problems(effect: Mapping[str, Any], context: str) -> list[str]:
             problems.append("modify: scope is allowed only in a building's effects")
     if etype == "unlock" and effect.get("kind") not in UNLOCK_KINDS:
         problems.append(f"unlock: kind must be one of {UNLOCK_KINDS}")
-    if etype in ("grant_units", "grant_building") and effect.get("where") not in (None, "capital"):
-        problems.append(f"{etype}: where must be 'capital'")
+    if etype in ("grant_units", "grant_building"):
+        where = effect.get("where")
+        if context in DISCOVERY_CONTEXTS:
+            if where != "here":
+                problems.append(f"{etype}: in a find, where must be 'here'")
+        elif where not in (None, "capital"):
+            problems.append(f"{etype}: where must be 'capital'")
+    return problems + _discovery_problems(effect, etype, context)
+
+
+def _discovery_problems(effect: Mapping[str, Any], etype: str, context: str) -> list[str]:
+    """Shapes of the effects of finds (ABANDONED_LANDS.md 3)."""
+    problems: list[str] = []
+    num = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)     # noqa: E731
+    if etype == "add_resource" and context in DISCOVERY_CONTEXTS and effect.get("amount") == 0:
+        problems.append("add_resource: amount must not be 0")
+    if etype == "add_resource" and context == "discovery_reward" and num(effect.get("amount")) \
+            and effect["amount"] < 0:
+        problems.append("add_resource: a reward cannot take resources")
+    if etype == "lose_units":
+        if num(effect.get("frac")) and not 0.0 <= effect["frac"] <= 1.0:
+            problems.append("lose_units: frac must be in 0..1")
+        low = effect.get("min", 1)
+        if num(low) and not 0 <= low <= DISCOVERY_MAX_MIN_LOSS:
+            problems.append(f"lose_units: min must be in 0..{DISCOVERY_MAX_MIN_LOSS}")
+    if etype == "set_status":
+        if effect.get("status") not in DISCOVERY_STATUSES:
+            problems.append(f"set_status: status must be one of {DISCOVERY_STATUSES}")
+        if num(effect.get("turns")) and not 1 <= effect["turns"] <= 20:
+            problems.append("set_status: turns must be in 1..20")
+    if etype == "spawn_neutral":
+        units = effect.get("units")
+        if isinstance(units, dict) and (not units or not all(isinstance(n, int) and not isinstance(n, bool)
+                                                             and 1 <= n <= 50 for n in units.values())):
+            problems.append("spawn_neutral: units {unit: 1..50}, at least one")
+        grow = effect.get("grow")
+        if isinstance(grow, dict):
+            if set(grow) != {"every", "add", "cap"}:
+                problems.append("spawn_neutral: grow needs exactly every, add {unit: n}, cap")
+            elif not (isinstance(grow["every"], int) and 1 <= grow["every"] <= 10 and isinstance(grow["add"], dict)
+                      and grow["add"] and isinstance(grow["cap"], int) and 1 <= grow["cap"] <= 50
+                      and all(isinstance(n, int) and not isinstance(n, bool) and n >= 1
+                              for n in grow["add"].values())):
+                problems.append("spawn_neutral: grow every 1..10, add {unit: n >= 1}, cap 1..50")
     return problems
 
 

@@ -325,4 +325,4 @@ def test_bot_numbers_match_the_core_pack():
 
 
 def test_bot_registry_names():
-    assert set(BOT_TYPES) == {"passive", "builder", "rush", "diplomat"}
+    assert set(BOT_TYPES) == {"passive", "builder", "rush", "diplomat", "scout"}   # scout: stage 5, the sweep

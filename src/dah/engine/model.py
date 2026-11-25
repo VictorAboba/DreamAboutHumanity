@@ -84,7 +84,7 @@ PLAYER_STAGE2_FIELDS = ("techs", "research", "researching", "artifacts")
 PLAYER_STAGE3_FIELDS = ("home", "shades", "spy_seq", "conquest_policy")
 PLAYER_SCORE_FIELDS = ("tally", "objectives")
 PROVINCE_STAGE3_FIELDS = ("status",)
-STATE_STAGE3_FIELDS = ("claims", "origins")
+STATE_STAGE3_FIELDS = ("claims", "origins", "abandoned", "discoveries")
 
 
 @dataclass
@@ -111,6 +111,10 @@ class GameState:
     # until_turn}], and the start regions {province: seat} (filled at turn 1 only when conquest is on)
     claims: list[dict[str, Any]] = field(default_factory=list)
     origins: dict[str, str] = field(default_factory=dict)
+    # stage 5 (ABANDONED_LANDS.md 11, engine/discoveries.py), left out of state_hash while empty: the public list of
+    # Abandoned provinces, and the finds {pid: {id, state, known, pending?}} (secret: never in a seat's view)
+    abandoned: list[str] = field(default_factory=list)
+    discoveries: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -128,6 +132,8 @@ class GameState:
             pacts=[dict(p) for p in data.get("pacts") or []],
             claims=[dict(c) for c in data.get("claims") or []],
             origins=dict(data.get("origins") or {}),
+            abandoned=list(data.get("abandoned") or []),
+            discoveries={k: dict(v) for k, v in (data.get("discoveries") or {}).items()},
         )
 
     def owned(self, seat: str) -> list[Province]:
@@ -182,6 +188,7 @@ class Order:
     rounds: int | None = None        # spy
     disposition: str | None = None   # dispose; policy (None: no policy)
     to: str | None = None            # dispose (release): the recipient seat
+    choice: str | None = None        # discover (stage 5): the variant of a mixed find
 
     @property
     def hasty(self) -> bool:
@@ -211,6 +218,8 @@ class Order:
                 out["to"] = self.to
         elif self.kind == "policy":
             out["disposition"] = self.disposition
+        elif self.kind == "discover":
+            out.update({"province": self.province, "choice": self.choice})
         else:       # fortify, ward
             out["province"] = self.province
         return out
@@ -227,6 +236,7 @@ class Order:
             feint=bool(data.get("feint", False)), shade=data.get("shade"), mission=data.get("mission"),
             target=data.get("target"), rounds=data.get("rounds"), disposition=data.get("disposition"),
             to=data.get("to") if recipient else None,
+            choice=data.get("choice") if data["kind"] == "discover" else None,
         )
 
 

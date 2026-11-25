@@ -55,7 +55,7 @@ Submitting and validating orders answer 200 even when some orders are refused: t
 | POST | `/v1/orders/validate` | `{"orders": [...]}` | `results[{ok, cp_cost, reason?, message?, warning?}]`, `ok_count` |
 | POST | `/v1/orders` | `{"orders": [...], "mode"}` | `accepted[]`, `rejected[]`, `orders_hash`, `cp_left`, `warnings[]?` |
 | DELETE | `/v1/orders/{id}` | | `order_id`, `cp_cost`, `orders_hash`, `cp_left` |
-| PATCH | `/v1/orders/{id}` | `{"units"?, "unit"?, "count"?, "to"?, "pact"?, "feint"?, "disposition"?}` | the same plus the changed `order`, `warning?` |
+| PATCH | `/v1/orders/{id}` | `{"units"?, "unit"?, "count"?, "to"?, "pact"?, "feint"?, "disposition"?, "choice"?}` | the same plus the changed `order`, `warning?` |
 | POST | `/v1/estimate` | see [Estimate](#estimate) | `win_prob`, average losses |
 | POST | `/v1/messages` | `{"to": [nick, ...] \| "all", "text"}` | `message_id` (count of own sent), `inbox_id` (number in the inbox, for `since`), `left{}` |
 | GET | `/v1/inbox` | `?since=` | `messages[]`, `last_id`, `text` |
@@ -182,7 +182,9 @@ none) gives the whole state; a later turn is `400 INVALID`.
 `buildings`, `fortified`). The score is under fog (SCORING.md 5): the own `score` is exact, the others' a known
 lower bound (`score_exact: false`; with a non-default scoring also `score_known {src: n | null}`, `null` unknown);
 after the match everyone's is the total with `score_exact: true`. With a non-default scoring `you` also has
-`score_parts`, `war {points, cap_left}` (when war scores) and `objectives`, and visible foreign provinces show
+`score_parts` (with `betrayal`, negative, once the seat broke a pact), `war {points, cap_left}` (when war scores)
+and `objectives` (each with `points` and, when the pack sets it, `difficulty` easy/medium/hard), and visible foreign
+provinces show
 `building_now` for a great work in progress. The text has the line «Счёт: ты 12 [зем 8 нау 3 стр 0 вой 1] | Ник ≥7
 [зем ≥5 нау ? стр 2 вой ?] | твоя цель «…» +5 — сейчас: нет» (at most 300 characters), after the match «Итог: …»
 with the breakdowns and the revealed objectives. When the
@@ -244,7 +246,7 @@ host (`dah game create --espionage on|off --conquest on|off`). While a system is
 `NOT_AVAILABLE` and the espionage routes `409 NOT_AVAILABLE`; no other answer changes.
 
 **Espionage.** `list_spies`, `get_intel` and `estimate_mission` are in `allowed` of every phase except setup.
-- `GET /v1/spies` — `text`: `S1 C1 · Теней 1/2, на заданиях 1/1 · найм 25 Сплав, +1 Провиант/ход`, a line per Shade
+- `GET /v1/spies` — `text`: `S1 C1 · Теней 1/2, на заданиях 1/1 · найм 20 Сплав, +1 Провиант/ход`, a line per Shade
   (`s1 Наблюдение → P07 1/2 K1 V0 — последнее: #r4`; one lost this turn — `s3: нет связи, потеряна`), the missions on
   one line and, in N2 of a capture, `ПОЙМАНА У ТЕБЯ: …`.
 - `GET /v1/intel` — the reports of the recon step of turn `turn` (default: the last one held), compact; `shade` —
@@ -270,6 +272,10 @@ host (`dah game create --espionage on|off --conquest on|off`). While a system is
   `via: get_state`), and `/v1/phase` and `/v1/wait_phase` in N2 add `intel: {reports, caught}` (this turn's reports,
   Shades caught at the seat) and the tail `донесений: N` to `text`.
 
+- Every seat may start with free Shades (`spy.shades_free`, 1 in `core`: `s1`, hired on turn 0); while one is idle,
+  `/v1/state` in N1 and actions has the line `ТЕНИ: свободна s1 — …`. The mission `secret` (target: a nick) reads
+  the seat's secret objective exactly; it exists only with secret objectives on.
+
 **Conquest.** No route of its own.
 - Orders `{"kind":"dispose","province":"P07","disposition":"subjugate","to"?:nick}` and
   `{"kind":"policy","disposition":"subjugate" | null}` go through `/v1/orders` (actions and N2, 0 CP; in N1 —
@@ -285,6 +291,39 @@ host (`dah game create --espionage on|off --conquest on|off`). While a system is
   mission); never another seat's.
 - Turn report: `captured` (`status`; its sides also see `mode`), `disposition`, `occupation_revolt`, `claim_created`,
   `claim_ended`, `ruin_ended` are public; `policy_set`, `policy_unaffordable`, `dispose_failed` only for the seat.
+
+### Abandoned lands and finds
+
+Stage 5 ([ABANDONED_LANDS.md](../ABANDONED_LANDS.md), in Russian; [Game rules](rules.md#abandoned-lands-and-finds-stage-5)),
+switched on by the scenario or the host (`dah game create --discoveries on|off`). No route of its own; while the
+system is off, `discover` answers `NOT_AVAILABLE` and no other answer changes.
+
+- **The order** `{"kind": "discover", "province": "P16", "choice": "wake"}` decides a mixed find waiting for the seat
+  (the `НАХОДКА` line). Actions and N2, 0 CP (new in N2 and `PATCH` free); in N1 validation only; one entry per find.
+  Other spellings: fields `option`/`variant`/`decision` (choice), `target`/`province_id` (province). `PATCH
+  {"choice": "leave"}` changes the choice. Reasons: `NO_PENDING` (no choice of the seat in that province; the
+  message names the provinces that wait), `BAD_CHOICE` (with the valid choices), `INVALID` (no `choice`, or a second
+  entry for the same find). A stale entry at the resolution gives `order_rejected` and the default choice.
+- **Warnings.** `validate` and `POST /v1/orders` answer `warning` for a move into an Abandoned province the seat does
+  not hold: «P16 — Заброшенная: возможна находка при входе, до боя; …» (a find the seat observed is named). It is
+  said for every such province, so it gives no find away.
+- **`/v1/state` text.** Province tags `[заброш.]`, `[руины]`, `[стража]` (public at the ruins, a find's guard where seen), `[логово n/cap]` (where seen),
+  `[находка «X»]` (only finds the seat knows), `[доход ×0.5]`, and the statuses `[разорена]`, `[пепелище до хN]`
+  (shown with conquest or discoveries on; ones a find set only where the province is seen). Up to two lines `НАХОДКА P16 «…»: choice (p% outcome / …, EV) | …; без
+  приказа — default. {"kind":"discover",…}` (≤ 300 characters each), then `НАХОДКИ: +k`.
+- **`/v1/state` JSON.** Top level `abandoned` (public, sorted) and `discoveries_pending [{province, id, name,
+  default, choices [{id, ev, risk}]}]`; provinces get `abandoned`, `ruins`, `guard {lair, cap?}` and, for finds the seat
+  knows, `discovery {id, state}` (`hidden`, `site`: opened, nobody holds it, or `pending`).
+- **Turn report.** `discovery_found` (the entrants: name, shares `{seat: {resources, units, lost, artifact}}`,
+  realized value; those who only see the province: `entrants`, `find_kind`, `province_effects`, `public: true`);
+  private to the seat: `discovery_chosen` (choice, `by_default`, outcome), `discovery_units`, `discovery_pending`,
+  `order_clipped`; by province visibility: `guard_cleared`, `lair_grew`. The journal writes the layout
+  (`discoveries_placed`) at creation; it is admin-only until `game_over`.
+- **Other routes.** `/v1/rules` has the core line ЗАБРОШЕННЫЕ and the topic `discoveries` only while the match has
+  Abandoned lands or finds; `/v1/describe` knows the kind `discovery` (effects, chances, power, risk, EV of each
+  choice; the pool is public, only the layout is hidden); `/v1/estimate` with a guard's or neutrals' province as
+  `defender` takes the visible neutrals and the province's defense, and its `note` says that a find is not in the
+  forecast. Observation of an Abandoned province adds `facts.discovery {id, name, kind} | null` to the report.
 
 ### Ready
 

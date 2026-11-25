@@ -114,6 +114,16 @@ Stage 4 (docs/SCORING.md: victory points, score under fog)
         objectives_view, science_view; Player.tally {war_value, homes_taken}, Player.objectives [{id, target?}]
     TurnReport.scores / .score_parts (private; public has no scores), scores_of(); report events war_credit (sides),
         work_started / work_completed (public); result + score_parts, objectives, winners_open (non-default scoring)
+
+Stage 5 (docs/ABANDONED_LANDS.md as amended by CONCEPT decision 25: Abandoned lands and finds)
+    build_ruleset(..., discoveries={knob: value} | None); system "discoveries"; Ruleset.discoveries {id: DiscoveryDef
+        (kind boon|hindrance|mixed, rarity, weight, effects | choices + default_choice, power, risk, ev,
+        power_small)}; ScenarioDef.discoveries (souls ravage|halve|ashes, garrison {units, reward}, density, extra,
+        rings, w, max_ring, fair_tolerance, tries, observe_mirrors, fair_mirror, ruins_find, pool); MapDef.rotation
+    new_game_state(..., objectives_salt) lays out finds from seed|salt; resolve(..., salt=) rolls them
+    GameState.abandoned [pid], .discoveries {pid: {id, state hidden|site|pending, known, pending?{seat, turn}}};
+        Province.status guard {reward, grow?}, income_mul; Order.choice (`discover {province, choice}`, NO_PENDING,
+        BAD_CHOICE); engine.discoveries: place, DiscoveryStep, pending_lines, province_tags, public_event
 """
 
 from .catalog import describe, describe_effect, find

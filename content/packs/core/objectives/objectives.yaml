@@ -1,28 +1,37 @@
 # Secret objectives (core 0.5.0, SCORING.md 2.5, 11): one is dealt to every seat, checked at game over on the final
-# state; all are worth 5. A mirror start is a capital + forge + agri + waste, so every "hold" needs a province
-# beyond the own start: feasible, never free (the build validator checks every map, faction and seat count).
+# state; worth 3, 5 or 7 by difficulty (core 0.6.0). A mirror start is a capital + forge + agri + waste, so every
+# "hold" needs a province beyond the own start: feasible, never free (the build validator checks every map, faction
+# and seat count).
 # Balance (SCORING.md «Баланс core 0.5.0»): points 3 -> 5 (reveal_flip), conqueror 2 -> 1 province, mechanicus 3 -> 4
 # techs; the branch objectives stay off mirror4 (12 turns: met by 75-90%), on mirror4 granary (all agri worlds are in
 # the starts) gives way to shrine_keeper (all shrines are central); capital objectives need 3 seats or more (in a duel
 # taking the only rival's capital is winning the game).
+# Core 0.6.0 (decision 26): points by difficulty, easy 3 / medium 5 / hard 7, from the completion rates of the 0.5.0
+# balance (SCORING.md «Баланс core 0.5.0»: non-profile bots) and measurement m7 (agents): easy — architect (39-48%,
+# the Monument is cheap; three of four agents built one), treasurer (44-46%; agents research 6-11 techs a game),
+# shrine_keeper (27% of bots, but in m7 met on turn 1); medium — forge_lord, granary, dominion, conqueror,
+# mechanicus (33-52%); hard — foreign_throne and kingbreaker (12-21%: capitals are the best defended provinces).
 - id: forge_lord
   name: {ru: Хозяин кузниц, en: Forge Lord}
   kind: hold_type
   params: {type: forge, count: 2}
   points: 5
+  difficulty: medium
   description: Держи к концу две Кузни — свою и ещё одну, центральную или чужую.
 - id: granary
   name: {ru: Житница, en: Granary}
   kind: hold_type
   params: {type: agri, count: 2}
   points: 5
+  difficulty: medium
   maps: [mirror2, mirror3]
   description: Держи к концу два Агромира.
 - id: shrine_keeper
   name: {ru: Хранитель святынь, en: Shrine Keeper}
   kind: hold_type
   params: {type: shrine, count: 2}
-  points: 5
+  points: 3
+  difficulty: easy
   maps: [mirror4]
   description: Держи к концу две Святыни (все они в центре карты).
 - id: dominion
@@ -30,6 +39,7 @@
   kind: hold_count
   params: {count: 6}
   points: 5
+  difficulty: medium
   maps: [mirror3, mirror4]
   players: {min: 3}
   description: Держи к концу шесть провинций (на старте их четыре).
@@ -37,7 +47,8 @@
   name: {ru: Чужой престол, en: Foreign Throne}
   kind: capital_other
   params: {count: 1}
-  points: 5
+  points: 7
+  difficulty: hard
   players: {min: 3}
   description: Держи к концу столицу другого места.
 - id: mechanicus
@@ -45,20 +56,23 @@
   kind: techs_branch
   params: {branch: war, count: 4}
   points: 5
+  difficulty: medium
   maps: [mirror2, mirror3]
   description: Изучи приказом четыре технологии ветки «Война» (подарки не в счёт).
 - id: treasurer
   name: {ru: Казначей, en: Treasurer}
   kind: techs_branch
   params: {branch: industry, count: 3}
-  points: 5
+  points: 3
+  difficulty: easy
   maps: [mirror2, mirror3]
   description: Изучи приказом три технологии ветки «Промышленность» (подарки не в счёт).
 - id: architect
   name: {ru: Зодчий, en: Architect}
   kind: great_work
   params: {count: 1}
-  points: 5
+  points: 3
+  difficulty: easy
   requires_system: scoring.works
   description: Держи к концу готовую великую стройку.
 - id: conqueror
@@ -66,10 +80,12 @@
   kind: hold_foreign
   params: {count: 1}
   points: 5
+  difficulty: medium
   description: Держи к концу провинцию из старта другого места.
 - id: kingbreaker
   name: {ru: Цареубийца, en: Kingbreaker}
   kind: rival_capital_taken
-  points: 5
+  points: 7
+  difficulty: hard
   players: {min: 3}
   description: Возьми столицу названного соперника — владей ею в конце или захвати её хоть раз.

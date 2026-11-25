@@ -133,6 +133,8 @@ Creates `games/<id>/` and prints the seat keys once.
 | `--setup-limit T` | length of the setup phase, e.g. `5m`; default from the scenario, else 5m |
 | `--espionage on\|off` | stage 3: espionage (Shades, recon, false entries) for this match; default from the scenario (on in `slice3`, `slice2`, `quad4`, `blitz_spy`) |
 | `--conquest on\|off` | stage 3: conquest (occupation, fates, claims) for this match; default from the scenario |
+| `--discoveries on\|off` | stage 5: Abandoned lands and finds (a start without a seat becomes Abandoned land with ruins, a guard and hidden finds); default from the scenario |
+| `--discovery-extra N` | stage 5: also lay finds into up to N ordinary neutral provinces (0..20; default from the scenario, 0) |
 | `--scoring SRC=W,...` | stage 4: weights of the score sources `territory`, `science`, `works`, `war`, `objectives` (0..5; a source not named: 0), e.g. `territory=1,science=1,works=0,war=1,objectives=1`; default from the scenario (all 1 in `slice3`, `slice2`, `quad4`, `blitz_score`; land only in `blitz_test`, `blitz_spy`) |
 | `--objectives N` | stage 4: secret objectives dealt per seat (N ≥ 1; default from the scenario, 1 in `core`); to switch objectives off use `--scoring ...,objectives=0` |
 | `--games-dir DIR` | where to create the match (default `games`) |
@@ -146,7 +148,10 @@ short `blitz_score` score five sources (land, science, great works, war, a secre
 [Game rules](rules.md#victory-and-scoring)); `dah game create` prints the match's weights as «Счёт: …».
 
 Seat ids are letters and digits, up to 16 characters. Seat ids and nicks must be unique within a match. The
-number of seats is from 1 to the map's number of starts; unused starts stay neutral and empty.
+number of seats is from 1 to the map's number of starts; unused starts stay neutral and empty, or, with
+`--discoveries on`, become Abandoned land ([Game rules](rules.md#abandoned-lands-and-finds-stage-5)). The layout of
+finds is dealt from the seed and the secret `objectives_salt`, so it is the same on replay and hidden from the
+seats.
 
 ### `dah game set-session ID SEAT DT_SESSION_ID`
 

@@ -55,7 +55,7 @@
 | POST | `/v1/orders/validate` | `{"orders": [...]}` | `results[{ok, cp_cost, reason?, message?, warning?}]`, `ok_count` |
 | POST | `/v1/orders` | `{"orders": [...], "mode"}` | `accepted[]`, `rejected[]`, `orders_hash`, `cp_left`, `warnings[]?` |
 | DELETE | `/v1/orders/{id}` | | `order_id`, `cp_cost`, `orders_hash`, `cp_left` |
-| PATCH | `/v1/orders/{id}` | `{"units"?, "unit"?, "count"?, "to"?, "pact"?, "feint"?, "disposition"?}` | то же, изменённый `order`, `warning?` |
+| PATCH | `/v1/orders/{id}` | `{"units"?, "unit"?, "count"?, "to"?, "pact"?, "feint"?, "disposition"?, "choice"?}` | то же, изменённый `order`, `warning?` |
 | POST | `/v1/estimate` | см. [Estimate](#estimate) | `win_prob`, средние потери |
 | POST | `/v1/messages` | `{"to": [ник, ...] \| "all", "text"}` | `message_id` (счёт своих отправленных), `inbox_id` (номер во входящих, для `since`), `left{}` |
 | GET | `/v1/inbox` | `?since=` | `messages[]`, `last_id`, `text` |
@@ -179,8 +179,9 @@ pacts|spying|conquest|combat|units|buildings|abilities|victory|...` (`victory` �
 `score`, `score_exact`) и `provinces` (`visible`, а у видимых — `units`, `buildings`, `fortified`). Счёт под
 туманом (SCORING.md 5): у своего места `score` точный, у других — известная нижняя граница (`score_exact: false`;
 при счёте не по умолчанию ещё `score_known {src: n | null}`, `null` — неизвестно), после конца партии у всех —
-итог и `score_exact: true`. При счёте не по умолчанию у `you` — `score_parts`, `war {points, cap_left}` (если
-война в счёте) и `objectives`, а у видимых чужих провинций — `building_now` строящейся великой стройки. В тексте —
+итог и `score_exact: true`. При счёте не по умолчанию у `you` — `score_parts` (с отрицательным `betrayal`, если
+место разрывало пакт), `war {points, cap_left}` (если война в счёте) и `objectives` (у каждой `points` и, если пак
+её задал, `difficulty` easy/medium/hard), а у видимых чужих провинций — `building_now` строящейся великой стройки. В тексте —
 строка «Счёт: ты 12 [зем 8 нау 3 стр 0 вой 1] | Ник ≥7 [зем ≥5 нау ? стр 2 вой ?] | твоя цель «…» +5 — сейчас:
 нет» (≤ 300 символов), после партии — «Итог: …» с разбивкой и раскрытыми целями. Если в наборе есть технологии или
 артефакты: у `you` — `techs`, `researching`, `research`, `artifacts` (и `research_ordered {tech, order}`, пока приказ
@@ -237,7 +238,7 @@ pacts|spying|conquest|combat|units|buildings|abilities|victory|...` (`victory` �
 шпионажа — `409 NOT_AVAILABLE` («шпионаж выключен в этой партии»); ответы прочих маршрутов не меняются.
 
 **Шпионаж.** `list_spies`, `get_intel`, `estimate_mission` есть в `allowed` всех фаз, кроме фазы старта.
-- `GET /v1/spies` — `text`: `S1 C1 · Теней 1/2, на заданиях 1/1 · найм 25 Сплав, +1 Провиант/ход`, строка на Тень
+- `GET /v1/spies` — `text`: `S1 C1 · Теней 1/2, на заданиях 1/1 · найм 20 Сплав, +1 Провиант/ход`, строка на Тень
   (`s1 Наблюдение → P07 1/2 K1 V0 — последнее: #r4`; потерянная в этом ходу — `s3: нет связи, потеряна`), миссии
   одной строкой, в П2 хода поимки — `ПОЙМАНА У ТЕБЯ: …`.
 - `GET /v1/intel` — донесения разведсреза хода `turn` (по умолчанию последнего прошедшего), свёрнуто; `shade` —
@@ -262,6 +263,10 @@ pacts|spying|conquest|combat|units|buildings|abilities|victory|...` (`victory` �
   `via: get_state`), а `/v1/phase` и `/v1/wait_phase` в П2 — `intel: {reports, caught}` (донесений этого хода, Теней,
   пойманных у места) и хвост `донесений: N` в `text`.
 
+- У каждого места могут быть Тени даром с начала (`spy.shades_free`, в `core` — 1: `s1`, нанята на ходу 0); пока
+  она свободна, `/v1/state` в П1 и Д пишет строку `ТЕНИ: свободна s1 — …`. Миссия `secret` (цель — ник) читает
+  тайную цель места точно; она есть только при включённых тайных целях.
+
 **Завоевание.** Отдельного маршрута нет.
 - Приказы `{"kind":"dispose","province":"P07","disposition":"subjugate","to"?:ник}` и
   `{"kind":"policy","disposition":"subjugate" | null}` идут через `/v1/orders` (Д и П2, 0 ОК; в П1 — только
@@ -277,6 +282,39 @@ pacts|spying|conquest|combat|units|buildings|abilities|victory|...` (`victory` �
 - Отчёт хода: `captured` (`status`; своим сторонам ещё `mode`), `disposition`, `occupation_revolt`,
   `claim_created`, `claim_ended`, `ruin_ended` — публично; `policy_set`, `policy_unaffordable`, `dispose_failed` —
   только своему месту.
+
+### Заброшенные земли и находки
+
+Этап 5 ([ABANDONED_LANDS.md](../ABANDONED_LANDS.md); [Правила игры](rules.md#заброшенные-земли-и-находки-этап-5)),
+включается сценарием или хостом (`dah game create --discoveries on|off`). Своего маршрута нет; пока система
+выключена, `discover` отвечает `NOT_AVAILABLE`, остальные ответы не меняются.
+
+- **Приказ** `{"kind": "discover", "province": "P16", "choice": "wake"}` решает смешанную находку, ждущую выбора места
+  (строка `НАХОДКА`). Д и П2, 0 ОК (новый в П2 и `PATCH` бесплатны); в П1 — только проверка; одна запись на находку.
+  Другие написания: поля `option`/`variant`/`decision` (вариант), `target`/`province_id` (провинция). `PATCH
+  {"choice": "leave"}` меняет вариант. Причины: `NO_PENDING` (у места в этой провинции нет выбора; сообщение
+  называет провинции, где выбор ждёт), `BAD_CHOICE` (с перечнем вариантов), `INVALID` (нет `choice` или вторая запись
+  на ту же находку). Устаревшая запись в расчёте даёт `order_rejected` и вариант по умолчанию.
+- **Предупреждения.** `validate` и `POST /v1/orders` отвечают `warning` на ход в Заброшенную провинцию, которую место
+  не держит: «P16 — Заброшенная: возможна находка при входе, до боя; …» (находку, которую место наблюдало, называет).
+  Оно звучит для любой такой провинции, поэтому находку не выдаёт.
+- **Текст `/v1/state`.** Метки провинций `[заброш.]`, `[руины]`, `[стража]` (у руин — публичная, стража находки —
+  где видно), `[логово n/предел]` (где видно), `[находка «X»]` (только известные месту), `[доход ×0.5]` и статусы `[разорена]`, `[пепелище до хN]` (при
+  включённом завоевании или находках; поставленные находкой — только где провинция видна). До двух строк `НАХОДКА P16 «…»: вариант (p% исход / …, EV) | …; без приказа —
+  умолчание. {"kind":"discover",…}` (≤ 300 символов каждая), затем `НАХОДКИ: +k`.
+- **JSON `/v1/state`.** На верхнем уровне `abandoned` (публично, по порядку) и `discoveries_pending [{province, id,
+  name, default, choices [{id, ev, risk}]}]`; у провинций — `abandoned`, `ruins`, `guard {lair, cap?}` и для известных
+  месту находок `discovery {id, state}` (`hidden`, `site` — открыта, её никто не держит, или `pending`).
+- **Отчёт хода.** `discovery_found` (вошедшим — название, доли `{seat: {resources, units, lost, artifact}}`,
+  реализованная ценность; тем, кто только видит провинцию, — `entrants`, `find_kind`, `province_effects`,
+  `public: true`); только месту — `discovery_chosen` (вариант, `by_default`, исход), `discovery_units`,
+  `discovery_pending`, `order_clipped`; по видимости провинции — `guard_cleared`, `lair_grew`. Раскладку журнал
+  пишет при создании (`discoveries_placed`), до `game_over` она видна только админу.
+- **Другие маршруты.** В `/v1/rules` строка ядра ЗАБРОШЕННЫЕ и тема `discoveries` есть, только пока в партии есть
+  Заброшенные земли или находки; `/v1/describe` знает вид `discovery` (эффекты, шансы, сила, риск, EV каждого
+  варианта; пул публичен, скрыта только раскладка); `/v1/estimate` с провинцией стражи или нейтралов в `defender`
+  берёт видимых нейтралов и оборону провинции, а его `note` напоминает, что находка в прогноз не входит. Наблюдение
+  Заброшенной провинции добавляет в донесение `facts.discovery {id, name, kind} | null`.
 
 ### Ready
 

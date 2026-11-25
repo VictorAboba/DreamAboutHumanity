@@ -9,6 +9,7 @@ from typing import Any, Mapping, Sequence, Union
 
 from . import conquest as cq
 from . import diplomacy as dip
+from . import discoveries as disc
 from . import espionage as esp
 from . import scoring as sc_
 from .combat import Force, fight, pick_losses, round_half_up, strength
@@ -33,7 +34,8 @@ def new_game_state(ruleset: Ruleset, seats: Sequence[Mapping[str, Any]], seed: i
     """Initial state. ``seats``: [{seat, nick, faction?, artifacts?}]; starts are dealt to seats by a seeded
     shuffle (independent of factions and artifacts, so a setup phase never moves a start).
 
-    Unused starts stay neutral and empty. Artifacts (full ids, from the setup phase) apply their one-off effects now
+    Unused starts stay neutral and empty; with the `discoveries` system they become Abandoned lands (ruins under a
+    guard, «Души снижены», hidden finds laid out from seed and salt: engine/discoveries.py). Artifacts (full ids, from the setup phase) apply their one-off effects now
     (resources, units and buildings in the capital, flags, techs); their passive effects count through the seat's
     stat key for the whole game.
     """
@@ -83,7 +85,16 @@ def new_game_state(ruleset: Ruleset, seats: Sequence[Mapping[str, Any]], seed: i
     state = GameState(turn=1, phase="negotiation_1", provinces=provinces, players=dict(sorted(players.items())),
                       origins=dict(sorted(origins.items())))
     for seat, player in state.players.items():
-        player.command_points = int(ruleset.stat("command_points", stat_key(state, ruleset, seat)))
+        key = stat_key(state, ruleset, seat)
+        player.command_points = int(ruleset.stat("command_points", key))
+        if ruleset.system("espionage"):
+            # core 0.6.0 (decision 26): free Shades from the start (hired_turn 0), idle, within spy.shades_max;
+            # without `spy.shades_free` (older packs) nothing changes
+            free = min(int(ruleset.stat("spy.shades_free", key)), int(ruleset.stat("spy.shades_max", key)))
+            for _ in range(max(0, free)):
+                player.spy_seq["shade"] = player.spy_seq.get("shade", 0) + 1
+                player.shades.append({"id": f"s{player.spy_seq['shade']}", "xp": 0, "status": "idle",
+                                      "hired_turn": 0, "mission": None})
     # secret objectives (SCORING.md 2.5): from the seats and the seed only, so the provisional turn 1 of a setup
     # phase and the final one get the same deal. `objectives_salt` (config, admin-only) is a second secret no public
     # stream uses, so the seed recovered from starts, drafts or combat rolls does not reveal the deal; without it
@@ -91,6 +102,10 @@ def new_game_state(ruleset: Ruleset, seats: Sequence[Mapping[str, Any]], seed: i
     deal_seed = seed if objectives_salt is None else f"{seed}|{objectives_salt}"
     for seat, hand in sc_.deal_objectives(ruleset, deal_seed, list(state.players)).items():
         state.players[seat].objectives = hand
+    if ruleset.system("discoveries"):
+        # Abandoned lands (ABANDONED_LANDS.md 1, 2, 5): the layout reads the map, the occupied starts and the pool only
+        capitals = {seat_cfg["seat"]: start.capital for seat_cfg, start in zip(seats, starts)}
+        disc.setup_abandoned(ruleset, state, starts[len(seats):], capitals, seed, objectives_salt)
     return state
 
 
@@ -184,13 +199,16 @@ class TurnReport:
 # ---------------------------------------------------------------- resolution
 
 def resolve(state: GameState, orders_by_seat: OrdersInput, ruleset: Ruleset,
-            seed: int | str, diplomacy: Sequence[Mapping[str, Any]] = ()) -> tuple[GameState, TurnReport]:
+            seed: int | str, diplomacy: Sequence[Mapping[str, Any]] = (),
+            salt: int | str | None = None) -> tuple[GameState, TurnReport]:
     """Resolve one turn. Orders are re-checked; invalid ones are dropped and reported.
 
     ``diplomacy``: the turn's diplomacy ops, already applied to ``state`` (engine/diplomacy.py); they only go into
     the report (gifts and signed pacts are public facts of the turn, amounts and ids stay with the two seats).
+    ``salt``: the game's secret salt (config `objectives_salt`): the rolls of finds use seed and salt
+    (engine/discoveries.py); nothing else reads it.
     """
-    r = _Resolution(copy.deepcopy(state), ruleset, seed)
+    r = _Resolution(copy.deepcopy(state), ruleset, seed, salt)
     return r.run({seat: _book(v) for seat, v in orders_by_seat.items()}, diplomacy)
 
 
@@ -199,10 +217,11 @@ def _book(value: SeatOrders | Sequence[Order]) -> SeatOrders:
 
 
 class _Resolution:
-    def __init__(self, state: GameState, ruleset: Ruleset, seed: int | str):
+    def __init__(self, state: GameState, ruleset: Ruleset, seed: int | str, salt: int | str | None = None):
         self.s = state
         self.rs = ruleset
         self.seed = seed
+        self.secret = disc.secret_seed(seed, salt)
         self.turn = state.turn
         self.events: list[dict[str, Any]] = []
         # each seat's stat key at the start of the resolution (techs researched now count from the next turn)
@@ -211,6 +230,7 @@ class _Resolution:
         self.retreats: list[tuple[str | None, list[str], dict[str, int], str, bool]] = []
         self.conquest = cq.ConquestStep(self) if ruleset.system("conquest") else None
         self.espionage = esp.EspionageStep(self) if ruleset.system("espionage") else None
+        self.discoveries = disc.DiscoveryStep(self) if ruleset.system("discoveries") else None
         self.pacts: dict[frozenset[str], dict[str, Any]] = {}     # pacts in force in this resolution, by pair
         self.broken: dict[frozenset[str], set[str]] = {}          # pair -> seats whose "break" orders broke it
         self.break_targets: list[set[str]] = []                   # per move (in `moves` order): partners it breaks
@@ -253,6 +273,8 @@ class _Resolution:
             if event is not None:
                 self.events.append(event)
         self.start_pacts()
+        if self.discoveries is not None:
+            books = self.discoveries.choose(alive, books)   # 1: mixed finds' choices, before the books' snapshot
         moves, fortify = self.apply_orders(alive, books)
         kept = self.kept_fortifications(alive) - fortify if self.persists else set()
         if self.espionage is not None:
@@ -263,6 +285,8 @@ class _Resolution:
         holding = set(fortified)                  # with persistence: kept through a sabotage's denial of this turn
         if self.espionage is not None:
             self.espionage.strikes(fortified)     # 2b: sabotage strikes (no fortify, defense x defense_mul)
+        if self.discoveries is not None:
+            self.discoveries.trigger(arrivals)    # 3c: finds of the Abandoned lands, before the battles
         owners_before = {pid: p.owner for pid, p in s.provinces.items()}
         for pid in sorted(s.provinces):
             self.battle(pid, arrivals.get(pid, []), pid in fortified)
@@ -279,6 +303,8 @@ class _Resolution:
             for c in changes:
                 self.ev("captured", [c["from"], c["to"]], c["province"], **{"from": c["from"], "to": c["to"]})
             s.pending_builds = [b for b in s.pending_builds if s.provinces[b.province].owner == b.seat]
+        if self.discoveries is not None:
+            self.discoveries.after_battles()      # units of boons, rewards of guards, choices for the new holders
         if sc_.on(self.rs, "objectives"):
             for e in self.events:
                 if e["kind"] == "captured":
@@ -290,11 +316,15 @@ class _Resolution:
                     prov.fortified = False
         self.builds()
         self.research(alive)
-        if self.conquest is not None:
+        if self.discoveries is not None:
+            self.discoveries.timers()             # lairs grow, then the statuses' timers
+        if self.conquest is not None or self.discoveries is not None:
             cq.timers(self)
         eliminated = self.eliminate(alive)
         if self.conquest is not None:
             cq.eliminated(self, eliminated)
+        if self.discoveries is not None:
+            self.discoveries.eliminated(eliminated)
         if self.espionage is not None:
             self.espionage.end(eliminated)        # Shades of the eliminated go; missions against them are void
         self.end_pacts(eliminated)
@@ -320,6 +350,9 @@ class _Resolution:
             public["techs_count"] = tech_counts(s, self.rs)   # public: how many (not which; no artifact grants)
         if sc_.on(self.rs, "works"):
             public["works"] = [dict(e) for e in self.events if e["kind"] in sc_.PUBLIC_KINDS]
+        if self.discoveries is not None:
+            # the delayed spectator's forms (ABANDONED_LANDS.md 10): where finds went off, the kind, no names
+            public["discoveries"] = [disc.public_event(e) for e in self.events if e["kind"] in disc.FOG_KINDS]
         report = TurnReport(self.turn, self.events, by_seat, public, idle, sc, parts)
         return s, report
 
@@ -753,7 +786,7 @@ class _Resolution:
 # Events only their seats see: they would reveal resources or orders (fortify_broken reveals a fortify order).
 _PRIVATE_KINDS = frozenset({"order_rejected", "economy", "starvation", "build_started", "recruited",
                             "fortify_broken", "research_started", "tech_completed"}) | dip.PRIVATE_KINDS \
-    | cq.PRIVATE_KINDS | esp.PRIVATE_KINDS | sc_.PRIVATE_KINDS
+    | cq.PRIVATE_KINDS | esp.PRIVATE_KINDS | sc_.PRIVATE_KINDS | disc.PRIVATE_KINDS
 # Events everyone sees (in their public form when not a side): diplomacy, conquest's fates, revolts and claims, the
 # start and completion of great works.
 _PUBLIC_KINDS = dip.PUBLIC_KINDS | cq.PUBLIC_KINDS | sc_.PUBLIC_KINDS
@@ -770,6 +803,8 @@ def _as_seen(event: dict[str, Any], seat: str) -> dict[str, Any]:
         return event if event.get("seat") == seat else cq.public_event(event)
     if event["kind"] == "captured" and "mode" in event:
         return event if event.get("to") == seat else cq.public_event(event)
+    if event["kind"] in disc.FOG_KINDS and seat not in event["seats"]:
+        return disc.public_event(event)
     if seat in event["seats"]:
         return event
     if event["kind"] in dip.PUBLIC_KINDS:

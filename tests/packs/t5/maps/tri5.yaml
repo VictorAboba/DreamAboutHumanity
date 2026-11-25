@@ -1,0 +1,34 @@
+# Three starts around a centre M1; with two seats the third corner is Abandoned: C1 ruins (ring 3, zone A and B),
+# C2 ring 2 (zone A, by A3), C3 ring 2 (zone B, by B2). Rotation A -> B -> C.
+id: tri5
+name: Треугольник пяти
+max_players: 3
+provinces:
+  - {id: A1, name: Столица Альфа, type: capital}
+  - {id: A2, name: Кузня Альфа, type: forge}
+  - {id: A3, name: Нивы Альфа, type: agri}
+  - {id: B1, name: Столица Бета, type: capital}
+  - {id: B2, name: Кузня Бета, type: forge}
+  - {id: B3, name: Нивы Бета, type: agri}
+  - {id: C1, name: Столица Гамма, type: capital}
+  - {id: C2, name: Кузня Гамма, type: forge}
+  - {id: C3, name: Нивы Гамма, type: agri}
+  - {id: M1, name: Середина, type: agri}
+edges:
+  - [A1, A2]
+  - [A1, A3]
+  - [B1, B2]
+  - [B1, B3]
+  - [C1, C2]
+  - [C1, C3]
+  - [A2, B3]
+  - [B2, C3]
+  - [C2, A3]
+  - [A2, M1]
+  - [B2, M1]
+  - [C2, M1]
+starts:
+  - {capital: A1, provinces: [A2, A3]}
+  - {capital: B1, provinces: [B2, B3]}
+  - {capital: C1, provinces: [C2, C3]}
+rotation: {A1: B1, A2: B2, A3: B3, B1: C1, B2: C2, B3: C3, C1: A1, C2: A2, C3: A3, M1: M1}

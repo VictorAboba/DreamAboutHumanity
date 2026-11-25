@@ -11,27 +11,34 @@ unique unit per turn before assault, and puts a citadel in its capital once fort
 plenty.
 Stage 3 (docs/SPY_AND_CONQUEST.md section 7): after the economy techs it researches the «Зеркала» branch
 (mirror_wards, watch_drill); from turn 3 it hires one Shade (with 35 alloy, before building) and reads the ledger of its
-strongest neighbour. Fates: the policy is subjugate while 15 provisions are free; it subjugates the occupations it can
+strongest neighbour (core 0.6.0: it holds one Shade from the start, and first reads that neighbour's secret objective
+once, mission `secret`). Fates: the policy is subjugate while 15 provisions are free; it subjugates the occupations it can
 pay for and holds the rest (one unit stays in each) until it can.
 Stage 4 (docs/SCORING.md section 10, dah.bots.score): with great works on it saves provisions for the Monument (held
 back from recruiting while they reach the price in time) and lays it once the free provisions cover it and still feed
 the army 3 turns, and the Spire after a mine and a temple, outside the capital, in its most
 protected allowed province. Its objective makes the provinces that advance it preferred targets (and keeps one unit
 in those held) or its branch first in research.
+Stage 5 (docs/ABANDONED_LANDS.md 14.1, dah.bots.finds): cautious in Abandoned land: only an army of 4 units or more
+goes where a find may lie; the ruins' guard and a find's neutrals at estimate >= 0.8 (a lair >= 0.95); mixed finds by
+its rank on the visible score.
 """
 
 from __future__ import annotations
 
 from dah.bots import conquest as cq
-from dah.bots import score, spy
+from dah.bots import finds, score, spy
 from dah.bots.base import Bot, DiplomacyApi, Estimator, Order
 from dah.bots.tactics import (
+    ArmyOk,
+    Reserved,
     capital_of,
     fortify_orders,
     garrison,
     merge_reserved,
     plan_moves,
     recruit_site,
+    reserved_by_orders,
     unique_recruit,
 )
 from dah.bots.view import (
@@ -66,8 +73,12 @@ CITADEL_SPARE = 12  # alloy left after a citadel (one assault)
 SHADE_FROM_TURN = 3
 SHADE_MIN_ALLOY = 35
 LEDGER_ROUNDS = 2
+SECRET_ROUNDS = 2      # core 0.6.0: the secret objective mission (one report is enough)
 MONUMENT = "monument"   # stage 4: great works (docs/SCORING.md 10)
 SPIRE = "dream_spire"
+FIND_ARMY = 4           # stage 5: an army into Abandoned land that may hold a find (dah.bots.finds)
+GUARD_MARGIN = 0.05     # the ruins' guard, a find's neutrals: estimate >= 0.8 (late: 0.65)
+LAIR_MARGIN = 0.2       # a lair: >= 0.95 (late: 0.8)
 
 
 class BuilderBot(Bot):
@@ -146,9 +157,20 @@ class BuilderBot(Bot):
         keep = merge_reserved(garrison(capital_of(view), self.garrison), score.objective_garrison(view))
         if view.conquest:
             keep = merge_reserved(keep, cq.occupation_garrison(view))
-        moves = plan_moves(view, estimate, threshold, self.rng, keep, lambda target: not view.is_partner(target.owner),
-                           score.attack_bonus(view))
+        pre = self.pre_moves(view, keep)        # the scout's sweep (none for the builder)
+        keep = merge_reserved(keep, reserved_by_orders(pre))
+        bonus = finds.merge_bonus(score.attack_bonus(view),
+                                  finds.attack_bonus(view, self.finds, GUARD_MARGIN, LAIR_MARGIN))
+        moves = pre + plan_moves(view, estimate, threshold, self.rng, keep,
+                                 lambda target: not view.is_partner(target.owner), bonus, army_ok=self.army_ok())
         return orders + moves + fortify_orders(full, moves) + extra
+
+    def pre_moves(self, view: StateView, keep: Reserved) -> list[Order]:
+        """Moves planned before the armies' targets (stage 5: the scout bot's sweep); none for the builder."""
+        return []
+
+    def army_ok(self) -> ArmyOk:
+        return finds.army_ok(self.finds, FIND_ARMY)
 
     @staticmethod
     def _core_economy(view: StateView) -> bool:
@@ -184,7 +206,9 @@ class BuilderBot(Bot):
             idle = spy.idle_shades(view)
             target = spy.strongest_neighbour(view)
             if idle and target is not None and spy.can_start(view):
-                got = spy.spy_order(view, idle[0], "ledger", target, LEDGER_ROUNDS, alloy, food)
+                mission = spy.SECRET if spy.secret_wanted(view, self.memory, target) else "ledger"
+                got = spy.spy_order(view, idle[0], mission, target, SECRET_ROUNDS if mission == spy.SECRET
+                                    else LEDGER_ROUNDS, alloy, food)
                 if got is not None:
                     out.append(got[0])
                     alloy -= got[1]

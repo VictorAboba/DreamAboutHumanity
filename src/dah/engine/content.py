@@ -41,6 +41,8 @@ ENTITY_DIRS: dict[str, str] = {
     "dispositions": "disposition",
     # stage 4 (SCORING.md 2.5): secret objectives, optional
     "objectives": "objective",
+    # stage 5 (ABANDONED_LANDS.md 3): finds of the Abandoned lands, optional; all of them need `discoveries`
+    "discoveries": "discovery",
 }
 
 DEFAULT_MESSAGE_LIMITS: dict[str, Any] = {
@@ -247,6 +249,9 @@ class EspionageDef:
     shade_cost: dict[str, int] = field(default_factory=dict)
     shade_upkeep: dict[str, int] = field(default_factory=dict)
     ward_cost: dict[str, int] = field(default_factory=dict)
+    # core 0.6.0 (decision 26): the base of `spy.shades_free`, Shades every seat holds from the start; hashed only
+    # when set, so older packs hash as before
+    shade_free: int = 0
 
 
 @dataclass(frozen=True)
@@ -264,6 +269,9 @@ class ObjectiveDef:
     requires_system: str | None = None
     description: str = ""
     lore: str = ""
+    # core 0.6.0 (decision 26): easy | medium | hard (registry.OBJECTIVE_DIFFICULTIES); `points` grow with it.
+    # Hashed only when set, so older packs hash as before
+    difficulty: str | None = None
 
     @property
     def targeted(self) -> bool:
@@ -272,6 +280,40 @@ class ObjectiveDef:
     def fits(self, map_id: str, players: int) -> bool:
         """The scenario filter of the pool (maps, players); requires_system is applied when the ruleset is built."""
         return ((not self.maps or map_id in self.maps) and (self.players_min is None or players >= self.players_min)
+                and (self.players_max is None or players <= self.players_max))
+
+
+@dataclass(frozen=True)
+class DiscoveryDef:
+    """A find of the Abandoned lands (ABANDONED_LANDS.md 3, 4): a boon or a hindrance with `effects`, or a mixed
+    find with `choices` [{id, label, outcomes: [{p, effects}]}] and a `default_choice`. `power` (against the
+    reference army), `risk`, `ev` {choice: EV} and `power_small` (against small armies, registry.SMALL_ARMIES) are
+    computed by the validator (`discovery_power`), never written by the author."""
+    id: str
+    name: str
+    name_en: str
+    kind: str                              # registry.DISCOVERY_KINDS
+    rarity: str
+    weight: int
+    triggers: tuple[str, ...]
+    effects: tuple[dict[str, Any], ...] = ()          # boon | hindrance: context "discovery"
+    choices: tuple[dict[str, Any], ...] = ()          # mixed: outcome effects in context "discovery_choice"
+    default_choice: str | None = None
+    players_min: int | None = None
+    players_max: int | None = None
+    requires_system: str | None = None
+    power: float = 0.0
+    risk: float = 0.0
+    ev: dict[str, float] = field(default_factory=dict)
+    power_small: tuple[float, ...] = ()
+    description: str = ""
+    lore: str = ""
+
+    def choice(self, cid: str | None) -> dict[str, Any] | None:
+        return next((c for c in self.choices if c["id"] == cid), None)
+
+    def fits(self, players: int) -> bool:
+        return ((self.players_min is None or players >= self.players_min)
                 and (self.players_max is None or players <= self.players_max))
 
 
@@ -317,6 +359,9 @@ class MapDef:
     # Cosmetic only: left out of the ruleset hash, so moving a province on screen never changes a game.
     layout: dict[str, tuple[float, float]] = field(default_factory=dict)
     layout_computed: bool = False
+    # stage 5 (ABANDONED_LANDS.md 5.6): a permutation of provinces taking start i to start i+1 (fair_mirror); hashed
+    # only when the map has one
+    rotation: dict[str, str] | None = None
 
     @property
     def capitals(self) -> frozenset[str]:
@@ -347,6 +392,9 @@ class ScenarioDef:
     # only while objectives have weight > 0
     scoring: dict[str, int] = field(default_factory=lambda: _weights(registry.DEFAULT_SCORING))
     objectives: dict[str, Any] = field(default_factory=dict)
+    # stage 5 (ABANDONED_LANDS.md 11): the Abandoned lands' knobs, registry.DISCOVERY_DEFAULTS filled in and ids
+    # qualified (garrison units, rewards, pool); hashed only while the discoveries system is on
+    discoveries: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -371,6 +419,7 @@ class Ruleset:
     missions: dict[str, MissionDef] = field(default_factory=dict)           # stage 3; empty while espionage is off
     espionage: EspionageDef | None = None                                    # stage 3; None while espionage is off
     objectives: dict[str, ObjectiveDef] = field(default_factory=dict)       # stage 4; the scenario's pool (filtered)
+    discoveries: dict[str, DiscoveryDef] = field(default_factory=dict)     # stage 5; empty while the system is off
     # Inputs of per-seat stat tables (Profile); derived from the hashed content, so not hashed themselves.
     base_stats: dict[str, float] = field(default_factory=dict)
     override_mods: tuple[dict[str, Any], ...] = ()
@@ -493,7 +542,7 @@ class Ruleset:
                                                   "resource": "resources", "province_type": "province_types",
                                                   "faction": "factions", "tech": "techs", "branch": "branches",
                                                   "artifact": "artifacts", "disposition": "dispositions",
-                                                  "mission": "missions"}[kind])
+                                                  "mission": "missions", "discovery": "discoveries"}[kind])
         if not isinstance(ref, str):
             return None
         if ref in table:
@@ -515,6 +564,13 @@ class Ruleset:
             data.pop(derived)
         data["map"].pop("layout", None)
         data["map"].pop("layout_computed", None)
+        if data["map"].get("rotation") is None or not self.system("discoveries"):
+            data["map"].pop("rotation", None)
+        # Stage 5 (ABANDONED_LANDS.md 16): the knobs and the finds only while the system is on.
+        if not self.system("discoveries"):
+            data["scenario"].pop("discoveries", None)
+        if not data["discoveries"]:
+            data.pop("discoveries")
         # Game settings, not rules of resolution: every game's config records its own values, and a new default
         # must not make `dah replay` of an older game report changed content.
         data["scenario"].pop("phase_limits", None)
@@ -542,6 +598,11 @@ class Ruleset:
             data["scenario"].pop("objectives", None)
         if not data["objectives"]:
             data.pop("objectives")
+        if "espionage" in data and not data["espionage"].get("shade_free"):
+            data["espionage"].pop("shade_free", None)
+        for entry in (data.get("objectives") or {}).values():
+            if entry.get("difficulty") is None:
+                entry.pop("difficulty", None)
         for entry in data["buildings"].values():
             for k in ("score", "max_per_owner", "allowed_types"):
                 if entry.get(k) in (0, None, (), []):
@@ -558,7 +619,7 @@ class Ruleset:
         # pack without stage-2 content (no techs, branches, artifacts) keeps it and hashes exactly as before.
         stage2 = any(k in data for k in ("branches", "techs", "artifacts"))
         for table in ("units", "buildings", "factions", "techs", "branches", "artifacts", "dispositions",
-                      "missions", "objectives"):
+                      "missions", "objectives", "discoveries"):
             for entry in (data.get(table) or {}).values():
                 for k in _COSMETIC_FIELDS & entry.keys():
                     if k == "lore" and table == "factions" and not stage2:
@@ -1012,8 +1073,31 @@ class _Builder:
             if ok:
                 out[fid] = ObjectiveDef(fid, self.name(d), self.name_en(d), d["kind"], params, d["points"],
                                         maps, players.get("min"), players.get("max"), d.get("requires_system"),
-                                        d.get("description", ""), self.lore(raw))
+                                        d.get("description", ""), self.lore(raw), d.get("difficulty"))
+        self.objective_tiers(out)
         return out
+
+    def objective_tiers(self, objectives: Mapping[str, ObjectiveDef]) -> None:
+        """Difficulty tiers (core 0.6.0, decision 26): once some objective has one, every objective should (a warning
+        otherwise), and points grow with the tier: every easy objective is worth less than every medium one, every
+        medium less than every hard one (an error otherwise: the tier would mislead)."""
+        tiers = registry.OBJECTIVE_DIFFICULTIES
+        tiered = {fid: o for fid, o in objectives.items() if o.difficulty is not None}
+        if not tiered:
+            return
+        raws = self.l.entities["objective"]
+        for fid in sorted(set(objectives) - set(tiered)):
+            self.warn(raws[fid], ["difficulty"], f"objective {fid} has no difficulty while others have one")
+        points = {t: sorted(o.points for o in tiered.values() if o.difficulty == t) for t in tiers}
+        for lo_tier, hi_tier in zip(tiers, tiers[1:]):
+            lower = [points[t] for t in tiers[:tiers.index(lo_tier) + 1] if points[t]]
+            if not lower or not points[hi_tier]:
+                continue
+            top = max(max(p) for p in lower)
+            for fid, o in sorted(tiered.items()):
+                if o.difficulty == hi_tier and o.points <= top:
+                    self.err(raws[fid], ["points"], f"objective {fid} is {hi_tier} but worth {o.points}: an easier "
+                                                    f"objective is worth {top} (points must grow with difficulty)")
 
     def factions(self) -> tuple[dict[str, FactionDef], dict[str, list[dict[str, Any]]]]:
         out, modifiers = {}, {}
@@ -1176,7 +1260,7 @@ class _Builder:
         return EspionageDef(self.name({"name": name}), self.name_en({"name": name}),
                             self.amounts(raw, shade.get("cost", {}), "shade.cost"),
                             self.amounts(raw, shade.get("upkeep", {}), "shade.upkeep"),
-                            self.amounts(raw, ward.get("cost", {}), "ward.cost"))
+                            self.amounts(raw, ward.get("cost", {}), "ward.cost"), int(shade.get("free", 0)))
 
     def spy_stats(self, missions: Mapping[str, MissionDef], config: EspionageDef | None) -> dict[str, float]:
         """Base values of the pack-given espionage stats (only while espionage is on: SPY_AND_CONQUEST.md 1.2)."""
@@ -1193,6 +1277,8 @@ class _Builder:
                         self.errors.append(Issue("<ruleset>", f"espionage.{prefix}.{res}",
                                                  f"value {n} out of bounds {spec.lo}..{spec.hi}"))
                     stats[f"{prefix}.{res}"] = n
+            if config.shade_free:
+                stats["spy.shades_free"] = config.shade_free
         return stats
 
     def maps(self) -> dict[str, MapDef]:
@@ -1261,8 +1347,9 @@ class _Builder:
         if any(p != profiles[0] for p in profiles):
             self.err(raw, ["starts"], "starts are not symmetric: province types within radius 2 differ")
             return None
+        rotation = map_rotation(self, raw, d.get("rotation"), adjacency, starts)
         return MapDef(raw.id, d["name"], d["max_players"], dict(sorted(provinces.items())), adjacency, tuple(starts),
-                      dict(sorted(layout.items())), not with_pos)
+                      dict(sorted(layout.items())), not with_pos, rotation)
 
     def scenarios(self) -> dict[str, tuple[_Raw, ScenarioDef]]:
         out = {}
@@ -1287,11 +1374,24 @@ class _Builder:
                 dealt = int(given.get("dealt", 1))
                 pool = self.refs(raw, "objective", given.get("pool", []), ["objectives", "pool"])
                 objectives = {"dealt": dealt, "offer": int(given.get("offer", dealt)), "pool": tuple(pool)}
+            found = self.discovery_config(raw, d.get("discoveries") or {})
             out[fid] = (raw, ScenarioDef(
                 fid, d["name"], map_id or d["map"], tuple(f for f in factions if f), d["turn_limit"],
                 {k: _duration(v) for k, v in d["phase_limits"].items()}, limits,
-                _merge(DEFAULT_DIPLOMACY_LIMITS, d.get("diplomacy_limits", {})), setup, systems, scoring, objectives))
+                _merge(DEFAULT_DIPLOMACY_LIMITS, d.get("diplomacy_limits", {})), setup, systems, scoring, objectives,
+                found))
         return out
+
+    def discovery_config(self, raw: _Raw, given: Mapping[str, Any], where: tuple[Any, ...] = ("discoveries",)
+                         ) -> dict[str, Any]:
+        """The scenario's Abandoned-land knobs (ABANDONED_LANDS.md 11): defaults filled in, the «Души снижены»
+        preset (`souls`) unfolded, ids qualified. Also used for the host's overrides (`where` names them)."""
+        return discovery_config(self, raw, given, list(where))
+
+    def discoveries(self, units: Mapping[str, UnitDef], buildings: Mapping[str, BuildingDef],
+                    artifacts: Mapping[str, ArtifactDef]) -> dict[str, DiscoveryDef]:
+        """Finds (ABANDONED_LANDS.md 3, 4): effects checked by context, power and risk computed by the validator."""
+        return build_discoveries(self, units, buildings, artifacts)
 
     def roles(self, resources: Mapping[str, ResourceDef]) -> dict[str, str]:
         by_role: dict[str, list[str]] = {r: [] for r in registry.RESOURCE_ROLES}
@@ -1466,8 +1566,9 @@ def _assemble(loaded: _Loaded) -> tuple[_Builder, dict[str, Any]]:
     parts["missions"] = b.missions()
     parts["espionage"] = b.espionage()
     parts["objectives"] = b.objectives()
+    parts["discoveries"] = b.discoveries(parts["units"], parts["buildings"], parts["artifacts"])
     parts["requires_system"] = {fid: raw.data["requires_system"]
-                                for kind in ("branch", "tech", "building", "artifact", "objective")
+                                for kind in ("branch", "tech", "building", "artifact", "objective", "mission")
                                 for fid, raw in loaded.entities[kind].items() if raw.data.get("requires_system")}
     parts["maps"] = b.maps()
     parts["scenarios"] = b.scenarios()
@@ -1491,7 +1592,7 @@ def _assemble(loaded: _Loaded) -> tuple[_Builder, dict[str, Any]]:
 
 def _ruleset(b: _Builder, parts: dict[str, Any], packs: dict[str, str], scenario_id: str,
              systems: Mapping[str, Any] | None = None, scoring: Mapping[str, Any] | None = None,
-             objectives: int | None = None) -> Ruleset:
+             objectives: int | None = None, discoveries: Mapping[str, Any] | None = None) -> Ruleset:
     scenarios = parts["scenarios"]
     full = scenario_id if scenario_id in scenarios else next(
         (k for k in scenarios if k.split(":", 1)[1] == scenario_id), None)
@@ -1515,8 +1616,14 @@ def _ruleset(b: _Builder, parts: dict[str, Any], packs: dict[str, str], scenario
         raise ContentError([Issue(raw.file, _json_path(raw.path, ["systems", "espionage"]),
                                   "espionage is on but the packs define no missions (espionage/*.yaml)")])
     scenario = _scoring_scenario(raw, scenario, scoring, objectives)
+    if discoveries:
+        # the host's knobs (dah game create --discovery-extra, the simulator's --discovery-knob) over the scenario's
+        given = {**_given_discoveries(raw), **dict(discoveries)}
+        scenario = replace(scenario, discoveries=b.discovery_config(raw, given, ("<host>", "discoveries")))
     off = set(registry.SYSTEMS) - on
     off |= {f"scoring.{src}" for src in registry.SCORE_SOURCES if not scenario.scoring[src]}
+    if scenario.scoring == _weights(registry.DEFAULT_SCORING):
+        off.add(registry.SCORING_ANY)       # the default score: stats of a non-default one (the pact penalty) drop
     parts = _system_parts(parts, off)
     if scenario.scoring["works"]:
         # a great work's points (building.<id>.score) join the base table only while works count (hashes stay)
@@ -1547,6 +1654,7 @@ def _ruleset(b: _Builder, parts: dict[str, Any], packs: dict[str, str], scenario
     if scenario.setup is not None and scenario.setup["artifacts"] != "none" and not parts["artifacts"]:
         b.warnings.append(Issue(raw.file, _json_path(raw.path, ["setup", "artifacts"]),
                                 f"artifact mode {scenario.setup['artifacts']!r} but no artifacts are defined"))
+    finds = discovery_pool(b, raw, scenario, parts["discoveries"], off) if "discoveries" in on else {}
     if b.errors:
         raise ContentError(list(b.errors))
     ruleset = Ruleset(
@@ -1558,7 +1666,7 @@ def _ruleset(b: _Builder, parts: dict[str, Any], packs: dict[str, str], scenario
         dispositions=parts["dispositions"], missions=parts["missions"],
         espionage=(parts["espionage"] or EspionageDef()) if "espionage" in on else None, base_stats=parts["base_stats"], override_mods=tuple(overrides),
         faction_mods={f: tuple(parts["faction_mods"][f]) for f in scenario.factions}, move_default=move_default,
-        objectives=dict(sorted(pool.items())))
+        objectives=dict(sorted(pool.items())), discoveries=finds)
     if ruleset.system("scoring.objectives"):
         from .scoring import validate_objectives    # scoring reads the Ruleset (and conquest's statuses)
         problems = validate_objectives(ruleset)
@@ -1657,23 +1765,26 @@ def _system_parts(parts: dict[str, Any], off: set[str]) -> dict[str, Any]:
         out["dispositions"] = {}
     if "espionage" in off:
         out["missions"], out["espionage"] = {}, None
+    elif hidden & set(parts["missions"]):
+        out["missions"] = {k: v for k, v in parts["missions"].items() if k not in hidden}
     return out
 
 
 def build_ruleset(pack_dirs: Iterable[str | Path] | None, scenario_id: str,
                   systems: Mapping[str, Any] | None = None, scoring: Mapping[str, Any] | None = None,
-                  objectives: int | None = None) -> Ruleset:
+                  objectives: int | None = None, discoveries: Mapping[str, Any] | None = None) -> Ruleset:
     """Load and validate packs, then assemble the ruleset for one scenario. Raises ContentError.
 
     `systems` ({espionage|conquest: bool}, a game's host override) switches stage-3 systems on or off over the
     scenario's `systems` (a key left out or None: the scenario's; a scenario without the key: off).
     `scoring` ({source: weight}, SCORING.md 1.2) replaces the scenario's weights (a source not named: 0);
-    `objectives` (N >= 1) sets both `dealt` and `offer` of the objectives deal."""
+    `objectives` (N >= 1) sets both `dealt` and `offer` of the objectives deal; `discoveries` ({knob: value},
+    ABANDONED_LANDS.md 11) overrides the scenario's Abandoned-land knobs."""
     loaded = _load_all(pack_dirs if pack_dirs is not None else default_pack_dirs())
     b, parts = _assemble(loaded)
     if b.errors:
         raise ContentError(list(b.errors))
-    return _ruleset(b, parts, loaded.packs, scenario_id, systems, scoring, objectives)
+    return _ruleset(b, parts, loaded.packs, scenario_id, systems, scoring, objectives, discoveries)
 
 
 def validate_packs(pack_dirs: Iterable[str | Path]) -> tuple[list[Issue], list[Issue]]:
@@ -1690,6 +1801,16 @@ def validate_packs(pack_dirs: Iterable[str | Path]) -> tuple[list[Issue], list[I
                 errors.extend(i for i in exc.issues if i not in errors)
             warnings.extend(i for i in b.warnings if i not in warnings)
     return errors, warnings
+
+
+def _given_discoveries(raw: _Raw) -> dict[str, Any]:
+    return dict(raw.data.get("discoveries") or {})
+
+
+from .discovery_content import (build_discoveries, discovery_config, discovery_pool,  # noqa: E402
+                                discovery_power, map_rotation)  # noqa: F401
+
+
 
 
 def legacy_pack_sets() -> list[list[Path]]:

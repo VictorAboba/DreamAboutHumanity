@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dah.local/schemas/discovery.schema.json",
+  "description": "a find of the Abandoned lands (ABANDONED_LANDS.md 3): power and risk are computed by the validator",
+  "type": "object",
+  "required": ["id", "name", "kind", "rarity"],
+  "additionalProperties": false,
+  "$defs": {
+    "outcome": {
+      "type": "object",
+      "required": ["p", "effects"],
+      "additionalProperties": false,
+      "properties": {
+        "p": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "effects": {"$ref": "common.schema.json#/$defs/effects"}
+      }
+    },
+    "choice": {
+      "type": "object",
+      "required": ["id"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "common.schema.json#/$defs/id"},
+        "label": {"$ref": "common.schema.json#/$defs/lname"},
+        "outcomes": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/outcome"}},
+        "effects": {"$ref": "common.schema.json#/$defs/effects"}
+      }
+    }
+  },
+  "properties": {
+    "id": {"$ref": "common.schema.json#/$defs/id"},
+    "name": {"$ref": "common.schema.json#/$defs/lname"},
+    "kind": {"enum": ["boon", "hindrance", "mixed"]},
+    "rarity": {"enum": ["common", "uncommon", "rare", "minor", "major"]},
+    "weight": {"type": "integer", "minimum": 1, "maximum": 20},
+    "triggers": {"type": "array", "minItems": 1, "items": {"enum": ["army", "shade"]}},
+    "players": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "min": {"type": "integer", "minimum": 1, "maximum": 16},
+        "max": {"type": "integer", "minimum": 1, "maximum": 16}
+      }
+    },
+    "requires_system": {"oneOf": [{"type": "null"}, {"$ref": "common.schema.json#/$defs/system"}]},
+    "description": {"type": "string", "maxLength": 400},
+    "lore": {"$ref": "common.schema.json#/$defs/lore"},
+    "effects": {"$ref": "common.schema.json#/$defs/effects"},
+    "choices": {"type": "array", "minItems": 2, "items": {"$ref": "#/$defs/choice"}},
+    "default_choice": {"$ref": "common.schema.json#/$defs/id"}
+  }
+}

@@ -17,6 +17,7 @@ mymod/
   resources/  province_types/  units/  buildings/  factions/  maps/  scenarios/
   branches/  techs/  artifacts/  lore/      # этап 2 (необязательно)
   objectives/                             # этап 4 (необязательно)
+  discoveries/                            # этап 5 (необязательно)
 ```
 
 - Читаются все файлы `*.yaml` в каталоге типа. В файле лежит одна сущность или список сущностей.
@@ -79,7 +80,8 @@ engine_api: "^1"        # версия API движка — 1
 
 ## Эффекты
 
-Типов эффектов восемь (шесть ниже плюс `unlock` и `grant_tech`, см. «Контент этапа 2»), и каждый разрешён
+Типов эффектов двенадцать (шесть ниже, `unlock` и `grant_tech` из «Контента этапа 2» и `grant_artifact`,
+`lose_units`, `spawn_neutral`, `set_status` находок из «Контента этапа 5»), и каждый разрешён
 только в определённых местах.
 
 | Эффект | Параметры | Где |
@@ -202,17 +204,20 @@ engine_api: "^1"        # версия API движка — 1
   ветка скрывает свои технологии), а строки `modify` по её характеристикам — из технологий, артефактов, зданий и
   фракций.
 - **`espionage/*.yaml`** (нужен при включённом шпионаже): необязательный `config` — `shade {name, cost, upkeep}` и
-  `ward {cost}` (3b) — и `missions: [...]`. У миссии: `id`, `name`, `behavior` (`observe_province`, `read_ledger`,
-  `read_orders`, `sabotage`), `target` (`province`, `owned_province`, `seat`), `difficulty`, `rounds: [min, max]`,
-  `requires: {whisper, tech?}`, `cost` (разово), `cost_per_round`, `params` (у саботажа: `deny_fortify`,
-  `defense_mul`, `income_mul`), `description`.
+  `ward {cost}` (3b), `shade.free` (0..3: свободные Тени каждого места с начала партии, в пределах лимита; `core`
+  0.6.0 задаёт 1) — и `missions: [...]`. У миссии: `id`, `name`, `behavior` (`observe_province`, `read_ledger`,
+  `read_objective`, `read_orders`, `sabotage`), `target` (`province`, `owned_province`, `seat`), `difficulty`,
+  `rounds: [min, max]`, `requires: {whisper, tech?}`, `cost` (разово), `cost_per_round`, `params` (у саботажа:
+  `deny_fortify`, `defense_mul`, `income_mul`), `requires_system` (например, `scoring.objectives` у
+  `read_objective`: без системы миссии нет), `description`.
 - **`dispositions/*.yaml`** (нужен при включённом завоевании): судьбы захваченной провинции — `id`, `name`,
   `behavior` (`annex`, `raze` с `params.ruin_turns`, `raid` с `params.ravage_turns`, `release`), `cost`, `loot`,
   `description`.
 - **`conquest_value`** (1..5, по умолчанию 1) у типа провинции умножает цену и добычу судеб (у столицы в `core` — 3).
 - **Характеристики** (только при включённой системе): `spy.*` (`spy.whisper`, `spy.mirrors`, `spy.shades_max`,
   `spy.rounds_bonus`, `spy.detect.army`, `spy.attribution.base`, `spy.mission.<id>.difficulty|max_rounds`,
-  `spy.shade.cost|upkeep.<res>` и др.), `province.mirrors`, `p2.cost.spy`, `p2.cost.recall`, `feint.cp_cost`,
+  `spy.shade.cost|upkeep.<res>`, `spy.shades_free` и др.), `province.mirrors`, `p2.cost.spy`, `p2.cost.recall`,
+  `feint.cp_cost`,
   `disposition.<id>.cost_mul|loot_mul`, `conquest.claim_turns`, `conquest.claim_bonus`, `conquest.loot_cooldown`.
   Полная таблица с диапазонами — раздел 1.2 спецификации; числа партии — `rules(topic="spying")` и
   `rules(topic="conquest")`.
@@ -235,16 +240,78 @@ engine_api: "^1"        # версия API движка — 1
   у неё `build_turns` < 2.
 - **`objectives/*.yaml`**: `id`, `name`, `kind` (виды движка: `hold_type {type, count}`, `hold_count {count}`,
   `hold_foreign {count}`, `capital_other {count}`, `techs_branch {branch, count}`, `great_work {count}`,
-  `rival_capital_taken` — против соперника), `params`, `points` (1..8), `maps` (пусто — любая), `players {min, max}`,
-  `requires_system`, `description`, `lore`. Сценарий с целями задаёт `objectives: {dealt: 1}` (по желанию
+  `rival_capital_taken` — против соперника), `params`, `points` (1..8), `difficulty` (необязательно: `easy`,
+  `medium`, `hard`; очки должны расти с уровнем, пропуск уровня рядом с заданными — предупреждение), `maps` (пусто —
+  любая), `players {min, max}`, `requires_system`, `description`, `lore`. Сценарий с целями задаёт `objectives: {dealt: 1}` (по желанию
   `pool: [...]`; `offer` должен равняться `dealt`).
 - **Проверка целей** (каждый сценарий с целями, каждое число мест 2..`max_players` его карты, каждая допустимая
   фракция): пул после фильтров `maps`/`players`/`requires_system` — не меньше max(3, `dealt`); ни одна цель не
   выполнена ни на одном старте (после стартовых эффектов); каждая выполнима (хватает провинций типа, технологий ветки,
   изучаемых каждой фракцией, есть великая стройка, которую каждая фракция может строить на карте, и т. д.).
 - **Характеристики** (только пока источник включён): `score.territory.province|capital`, `score.science.tier1..4`,
-  `score.science.branch`, `score.war.per_point|cap_per_victim|cap|defense_pct`. Числа партии — в
+  `score.science.branch`, `score.war.per_point|cap_per_victim|cap|defense_pct`, `score.betrayal.per_break` (0..10,
+  очков минус за каждый разорванный местом пакт; действует при любом счёте не по умолчанию). Числа партии — в
   `rules(topic="victory")`.
+
+## Контент этапа 5: Заброшенные земли и находки
+
+Точное описание — разделы 2–5, 8, 9 и 11 [спецификации этапа 5](../ABANDONED_LANDS.md) с поправками решения 25
+[концепции](../CONCEPT.md) и разделом «Реализация: уточнения». Всё необязательно: при выключенной системе (нет
+`systems: {discoveries: true}` в сценарии и нет `--discoveries on`) папка `discoveries/`, ручки сценария
+`discoveries` и `rotation` карт в набор правил и его хэш не попадают.
+
+- **`discoveries/*.yaml`** — находки:
+
+```yaml
+- id: sleeping_golem
+  name: {ru: Спящий голем, en: Sleeping Golem}
+  kind: mixed                 # boon | hindrance | mixed
+  rarity: common              # boon/mixed: common|uncommon|rare; hindrance: minor|major
+  weight: 3                   # необязательно, 1..20; по умолчанию — вес редкости
+  triggers: [army]            # shade — предупреждение «ignored in this stage»
+  players: {min: 2}           # необязательно, как у целей
+  requires_system: conquest   # необязательно
+  description: {ru: "…", en: "…"}
+  choices:                    # только mixed; у boon/hindrance вместо них effects: [...]
+    - id: wake
+      label: {ru: Разбудить, en: Wake}
+      outcomes:               # сумма p — 1
+        - {p: 0.7, effects: [{effect: grant_units, unit: walker, count: 2, where: here}]}
+        - {p: 0.3, effects: [{effect: lose_units, frac: 0.3, min: 2}]}
+    - {id: leave, label: {ru: Не трогать, en: Leave}, effects: []}
+  default_choice: leave
+```
+
+- **Эффекты находок.** `add_resource {resource, amount}` (плюшка делится по цене армий; отрицательная сумма — помеха,
+  которую каждое вошедшее место платит полностью, не ниже 0), `grant_units {unit, count, where: here}` (приходят после
+  боёв), `grant_building {building, where: here}`, `grant_artifact {artifact}` (только обычный артефакт, все эффекты
+  которого пассивны; достаётся месту с самой дорогой армией; у кого он уже есть — 15 × его силу ресурсом стройки),
+  `lose_units {frac, min?}` (каждой армии: самые дешёвые юниты, пока не снята доля `frac` её цены и не меньше `min`
+  юнитов; 0..20), `spawn_neutral {units, grow? {every, add, cap}, reward? [...]}` (стража или логово; не внутри
+  выбора), `set_status {status: ravaged|ruined, turns}`. `where: here` вне находок отвергается. Награда
+  (`spawn_neutral.reward`, `garrison.reward` сценария) принимает только `add_resource > 0` и `grant_units`.
+- **Сила.** Автор её не пишет: валидатор считает `power` против эталонной армии (5 юнитов ценой 12; 1 P = 15
+  ресурсов = цена юнита 20) и `power_small` против 1 и 2 самых дешёвых общих юнитов пака; у смешанной — EV каждого
+  варианта (`power` — лучший EV) и `risk` (лучший исход минус худший). Их показывают `describe`,
+  `rules(topic="discoveries")` и `dah pack validate`. **Ошибки:** сила вне диапазона редкости (boon common 1.0–2.5,
+  uncommon 2.5–4.0, rare 4.0–6.0; hindrance minor −1.5…−0.5, major −3.0…−1.5; mixed — как boon, common от 0.5),
+  boon ≤ 0 или hindrance ≥ 0, сумма p ≠ 1, `default_choice` не среди вариантов, эффект вне своего контекста,
+  непассивный или фракционный артефакт. **Предупреждения:** триггер `shade`; рычаг риска (у какого-то варианта EV
+  выше, чем у варианта по умолчанию, а вариант по умолчанию — наименее рискованный); **scout sweep pays** —
+  средневзвешенная `power_small` пула сценария или одного из его колец ≥ 0 для армии из 1 или 2 юнитов. Находку
+  запускает любая армия, поэтому помехи должны быть достаточно серьёзными (высокий `min` у `lose_units`, потеря
+  ресурса), чтобы разведка одиночками в среднем была убыточной.
+- **Ручки сценария `discoveries`** (все необязательны): `souls` (`ravage` — Разорение 3 хода, `halve` — доход ×0.5
+  навсегда, `ashes` — Пепелище 2 хода; `ravaged_turns`, `ruined_turns`, `income_mul` рядом перекрывают пресет),
+  `garrison {units, reward}` (стража руин и её награда), `density` (0..1, доля Заброшенных кандидатов с находкой;
+  0.67), `extra` (0..20: кандидаты и из обычных нейтральных провинций), `rings` (`{кольцо: [токены редкости]}`,
+  кольцо ≥ 2 — кольцо 1 у старта остаётся пустым; токены `common`, `uncommon`, `rare`, `boon`, `minor`, `major`,
+  `hindrance`, `mixed`, `mixed_common`, …), `w` (`{кольцо: вес}` бюджета честности), `max_ring` (3),
+  `fair_tolerance` (1.0), `tries` (64), `observe_mirrors` (0..5, C Наблюдения Заброшенной земли; 2), `fair_mirror`
+  (копировать находки по повороту карты), `ruins_find` (false), `pool` (подмножество ID находок). Неизвестная ручка —
+  ошибка.
+- **Карты** могут задать `rotation: {провинция: провинция}` — перестановку, сохраняющую рёбра и переводящую старт *i*
+  в старт *i+1*; ею пользуется `fair_mirror`. Хэшируется только при включённой системе.
 
 ## Проверка
 

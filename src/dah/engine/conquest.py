@@ -90,11 +90,13 @@ def income_factor(prov: Province, turn: int, strikes: bool = False) -> float:
         return 1.0
     if not is_full(prov, turn) or is_ravaged(prov, turn):
         return 0.0
+    # stage 5 (ABANDONED_LANDS.md 2.2): an Abandoned province's lasting x income_mul, times a strike's
+    lasting = float(prov.status.get("income_mul", 1.0))
     if strikes:
         muls = [float(m["income_mul"]) for m in strike_marks(prov, turn) if "income_mul" in m]
         if muls:
-            return min(muls)
-    return 1.0
+            return min(muls) * lasting
+    return lasting
 
 
 def scores_province(prov: Province, turn: int) -> bool:
@@ -408,10 +410,12 @@ class ConquestStep:
             prov.buildings = []
             self.s.pending_builds = [b for b in self.s.pending_builds if b.province != pid]
             prov.status["ruined_until"] = self.turn + int(d.params["ruin_turns"])
+            drop_find_mark(prov, "ruined_until")
         elif d.behavior == RAID:
             owner_after = occ_from if self.alive(occ_from) else None
             prov.status.pop("occupied", None)
             prov.status["ravaged_until"] = self.turn + int(d.params["ravage_turns"])
+            drop_find_mark(prov, "ravaged_until")
             leaving = True
         else:   # release
             owner_after = self.recipient(pid, seat, to, occ_from)
@@ -526,6 +530,18 @@ class ConquestStep:
         self.s.claims = keep
 
 
+FIND_MARKS = "find_marks"   # Province.status note of the Ravage/Ashes a find set (shown only where seen)
+
+
+def drop_find_mark(prov: Province, key: str) -> None:
+    """A conquest disposition set `key` publicly: it is no longer a find's mark."""
+    marks = prov.status.get(FIND_MARKS)
+    if marks and key in marks:
+        del marks[key]
+        if not marks:
+            del prov.status[FIND_MARKS]
+
+
 def timers(r: _Resolution) -> None:
     """Step 7: ruins and ravage that end before the next turn are lifted, expired claims end, strikes are cleared."""
     s, turn = r.s, r.turn
@@ -538,6 +554,12 @@ def timers(r: _Resolution) -> None:
         if "ravaged_until" in prov.status and prov.status["ravaged_until"] <= turn + 1:
             del prov.status["ravaged_until"]
         prov.status.pop("sabotaged", None)
+        marks = prov.status.get(FIND_MARKS)
+        if marks is not None:   # stage 5: notes of marks a find set (engine/discoveries.py), dropped once stale
+            for k in [k for k, v in marks.items() if prov.status.get(k) != v]:
+                del marks[k]
+            if not marks:
+                del prov.status[FIND_MARKS]
     keep = []
     for c in s.claims:
         if c["until_turn"] <= turn:
@@ -561,7 +583,8 @@ def eliminated(r: _Resolution, seats: list[str]) -> None:
 
 
 def statuses_for(state: GameState, turn: int | None = None) -> dict[str, dict[str, Any]]:
-    """Public statuses of provinces {pid: {occupied?, ruined_until?, ravaged_until?}} (no sabotage, no loot mark)."""
+    """Public statuses of provinces {pid: {occupied?, ruined_until?, ravaged_until?, income_mul?}} (no sabotage, no
+    loot mark; a guard is shown by engine/discoveries.py)."""
     turn = state.turn if turn is None else turn
     out = {}
     for pid, prov in sorted(state.provinces.items()):
@@ -572,6 +595,8 @@ def statuses_for(state: GameState, turn: int | None = None) -> dict[str, dict[st
             entry["ruined_until"] = prov.status["ruined_until"]
         if is_ravaged(prov, turn):
             entry["ravaged_until"] = prov.status["ravaged_until"]
+        if prov.status.get("income_mul") is not None:
+            entry["income_mul"] = prov.status["income_mul"]      # stage 5: a lasting multiplier (Abandoned land)
         if entry:
             out[pid] = entry
     return out

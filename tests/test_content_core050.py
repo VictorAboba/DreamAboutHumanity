@@ -24,7 +24,8 @@ PLAIN = ("blitz_test", "blitz_spy")
 ALL_ON = dict.fromkeys(SCORE_SOURCES, 1)
 SMALL = ("core:mirror2", "core:mirror3")
 POOL = {
-    # id: (kind, params, maps, players min); numbers of the 0.5.0 balance (SCORING.md «Баланс core 0.5.0»)
+    # id: (kind, params, maps, players min); numbers of the 0.5.0 balance (SCORING.md «Баланс core 0.5.0»); the
+    # points by difficulty of core 0.6.0 (TIERS)
     "forge_lord": ("hold_type", {"type": "core:forge", "count": 2}, (), None),
     "granary": ("hold_type", {"type": "core:agri", "count": 2}, SMALL, None),
     "shrine_keeper": ("hold_type", {"type": "core:shrine", "count": 2}, ("core:mirror4",), None),
@@ -36,7 +37,10 @@ POOL = {
     "conqueror": ("hold_foreign", {"count": 1}, (), None),
     "kingbreaker": ("rival_capital_taken", {}, (), 3),
 }
-POINTS = 5
+TIERS = {"forge_lord": "medium", "granary": "medium", "shrine_keeper": "easy", "dominion": "medium",
+         "foreign_throne": "hard", "mechanicus": "medium", "treasurer": "easy", "architect": "easy",
+         "conqueror": "medium", "kingbreaker": "hard"}
+POINTS = {"easy": 3, "medium": 5, "hard": 7}          # core 0.6.0 (decision 26); 0.5.0: all 5
 
 
 def _seats(n: int) -> list[dict]:
@@ -44,7 +48,8 @@ def _seats(n: int) -> list[dict]:
 
 
 def test_pack_version_and_validation():
-    assert "version: 0.5.0" in (Path(default_pack_dirs()[0]) / "pack.yaml").read_text(encoding="utf-8")
+    assert "version: 0.6.0" in (Path(default_pack_dirs()[0]) / "pack.yaml").read_text(encoding="utf-8")
+    assert "version: 0.5.0" in (LEGACY_PACKS_DIR / "core-0.5.0" / "pack.yaml").read_text(encoding="utf-8")
     assert validate_packs(default_pack_dirs()) == ([], [])
     for sid in SCORED + PLAIN:
         assert build_ruleset(None, sid).warnings == (), sid
@@ -87,11 +92,12 @@ def test_great_works_follow_the_spec():
     mon, spire = rs.buildings["core:monument"], rs.buildings["core:dream_spire"]
     assert (mon.name, spire.name) == ("Монумент Предела", "Шпиль Сна")
     assert mon.cost == {"core:provisions": 25, "core:alloy": 10} and mon.build_turns == 2 and mon.score == 3
-    assert spire.cost == {"core:provisions": 150, "core:alloy": 50} and spire.build_turns == 4 and spire.score == 3
+    # core 0.6.0 (decision 26): the Spire scores 7 (0.5.0: 3); balance 0.6.0: 100 + 60 (0.5.0: 150 + 50)
+    assert spire.cost == {"core:provisions": 100, "core:alloy": 60} and spire.build_turns == 4 and spire.score == 7
     assert mon.max_per_owner == spire.max_per_owner == mon.max_per_province == spire.max_per_province == 1
     assert not mon.allowed_types
     assert set(spire.allowed_types) == {"core:forge", "core:agri", "core:waste", "core:shrine"}
-    assert rs.stat("building.core:monument.score") == 3 and rs.stat("building.core:dream_spire.score") == 3
+    assert rs.stat("building.core:monument.score") == 3 and rs.stat("building.core:dream_spire.score") == 7
     assert mon.lore and spire.lore and "Монумент" in describe(rs, "building", "core:monument")["text"]
 
 
@@ -108,7 +114,8 @@ def test_objectives_pool_follows_the_spec():
     assert set(small.objectives) | set(quad.objectives) == {f"core:{k}" for k in POOL}
     for oid, (kind, params, maps, pmin) in POOL.items():
         o = small.objectives.get(f"core:{oid}") or quad.objectives[f"core:{oid}"]
-        assert (o.kind, dict(o.params), tuple(o.maps), o.players_min, o.points) ==             (kind, params, maps, pmin, POINTS), oid
+        got = (o.kind, dict(o.params), tuple(o.maps), o.players_min, o.difficulty, o.points)
+        assert got == (kind, params, maps, pmin, TIERS[oid], POINTS[TIERS[oid]]), oid
         assert o.name and o.description
         assert (f"core:{oid}" in quad.objectives) == (not maps or "core:mirror4" in maps), oid
     assert small.objectives["core:architect"].requires_system == "scoring.works"

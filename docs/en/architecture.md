@@ -22,10 +22,10 @@
 ```
 content/packs/core/        the base pack: resources, province types, units, buildings, factions, maps, scenarios,
                            tech branches, techs, artifacts, lore
-content/legacy/            frozen earlier pack versions (core-0.2.0), loaded only to replay or continue old matches
+content/legacy/            frozen earlier pack versions (core-0.2.0, core-0.3.0, core-0.4.0, core-0.5.0), loaded by ruleset hash only to replay or continue old matches
 src/dah/
   engine/                  pure rules library, no I/O
-    registry.py            stats with bounds, the 8 effect types and their contexts, abilities, modifier arithmetic
+    registry.py            stats with bounds, the 12 effect types and their contexts, abilities, modifier arithmetic
     content.py             loading packs, JSON Schema validation, assembling a Ruleset
     schemas/               a JSON Schema for each content type
     model.py               game state (dataclasses), canonical JSON, state_hash
@@ -38,6 +38,11 @@ src/dah/
     catalog.py             describe/find: full descriptions of units, buildings, techs, factions, artifacts
     rules.py               the rules text and its topics, built from the ruleset
     view.py                fog of war, state text, turn reports
+    espionage.py           Shades, the recon step (a pure function), sabotage, report texts
+    conquest.py            occupation, fates, claims, province statuses (ravage, ruins)
+    scoring.py             victory points: sources, great works, secret objectives, the pact-break penalty
+    discoveries.py         Abandoned lands: the layout of finds, their resolution steps, choices, fog and views
+    discovery_content.py   finds in packs: power against the reference and small armies, scenario knobs
     rng.py                 random streams from seed|turn|system|entity
   game.py                  a match: phases, deadlines, ready, orders, messages, replay
   journal.py               the JSONL journal

@@ -161,7 +161,11 @@ h4 { margin: 12px 0 6px; font-size: 14px; }
                    retreat_lost: "гибель", destroyed: "уничтожены", recruited: "найм", build_started: "стройка",
                    build_done: "построено", fortify_broken: "укрепление", starvation: "голод",
                    order_rejected: "приказ", economy: "экономика", research_started: "наука",
-                   tech_completed: "технология"};
+                   tech_completed: "технология", discovery_found: "находка", discovery_chosen: "находка",
+                   discovery_units: "находка", discovery_pending: "находка", guard_cleared: "стража",
+                   lair_grew: "логово", order_clipped: "приказ"};
+  var FIND_KINDS = {boon: "плюшка", hindrance: "помеха", mixed: "смешанная"};
+  var FIND_STATES = {hidden: "не тронута", site: "открыта, ждёт держателя", pending: "ждёт выбора", spent: "сработала"};
   var REASONS = {last_standing: "остался последним", turn_limit: "по лимиту ходов"};
   var parts = location.pathname.split("/").filter(Boolean);
   var gameId = decodeURIComponent(parts[parts.length - 1] || "");
@@ -253,6 +257,12 @@ h4 { margin: 12px 0 6px; font-size: 14px; }
     for (var u in units || {}) if (units[u]) out.push(nameOf("unit_names", u) + " ×" + units[u]);
     return out.join(", ") || "нет";
   }
+  // stage 5 (ABANDONED_LANDS.md 10): finds of this snapshot's turn that went off (public form for the delayed level)
+  function findsHere(id) {
+    return (S.snap ? S.snap.events : []).filter(function (e) { return e.kind === "discovery_found" && e.province === id; });
+  }
+  function layoutOf(id) { return S.snap && S.snap.finds_layout ? S.snap.finds_layout[id] || null : null; }
+  function findName(fid) { return nameOf("discovery_names", fid); }
   function fmtSecs(v) { return v == null ? "—" : (v < 100 ? v.toFixed(1) : Math.round(v)) + " с"; }
   function fmtLeft(s) {
     if (s == null) return "—";
@@ -349,6 +359,23 @@ h4 { margin: 12px 0 6px; font-size: 14px; }
       if (st.occupied) g.appendChild(sv("circle", {cx: x, cy: y, r: 5.5, fill: "none", stroke: st.occupied.from ? seatColor(st.occupied.from) : "var(--fg)",
                                                     "stroke-width": "0.9", "stroke-dasharray": "1 0.7"}));
       if (st.ruined_until || st.ravaged_until) g.appendChild(sv("circle", {cx: x, cy: y, r: 4.6, fill: st.ruined_until ? "rgba(0,0,0,.55)" : "rgba(160,90,0,.35)"}));
+      // stage 5: Abandoned land (a dotted outer ring), its guard or lair, finds (the layout at the full levels and
+      // after the game; a find that went off this turn for every level)
+      if (sp.abandoned) g.appendChild(sv("circle", {cx: x, cy: y, r: 7.2, fill: "none", stroke: "var(--muted)", "stroke-width": "0.45",
+                                                    "stroke-dasharray": "0.5 0.9"}));
+      if (sp.guard) {
+        var gt = sv("text", {x: x - 6.6, y: y - 3.6, "font-size": "3", fill: "var(--danger)", stroke: "var(--panel)",
+                             "stroke-width": "0.6", "paint-order": "stroke"});
+        gt.textContent = sp.guard.lair ? "☠" : "⚔";
+        g.appendChild(gt);
+      }
+      var lay = layoutOf(p.id), went = findsHere(p.id).length > 0;
+      if (lay || went) {
+        var dx = x + 4.6, dy = y + 3.4, d = 1.6;
+        var spent = went || (lay && lay.state !== "hidden");
+        g.appendChild(sv("polygon", {points: [dx, dy - d, dx + d, dy, dx, dy + d, dx - d, dy].join(" "),
+                                     fill: spent ? "var(--accent)" : "var(--panel)", stroke: "var(--accent)", "stroke-width": "0.45"}));
+      }
       var t = sv("text", {x: x, y: y + 1.1, "text-anchor": "middle", "font-size": "3", "font-weight": "700", fill: "#fff",
                           stroke: "rgba(0,0,0,.55)", "stroke-width": "0.5", "paint-order": "stroke"});
       t.textContent = p.id;
@@ -387,7 +414,12 @@ h4 { margin: 12px 0 6px; font-size: 14px; }
     });
     var nsw = el("span", {cls: "sw"});
     nsw.style.background = "var(--neutral)";
-    lg.appendChild(el("span", {}, [nsw, "нейтральные / заброшенные"]));
+    lg.appendChild(el("span", {}, [nsw, "нейтральные"]));
+    if (S.snap && S.snap.abandoned) {
+      lg.appendChild(el("span", {}, ["◌ заброшенные (★ — руины столицы); ⚔ стража, ☠ логово"]));
+      lg.appendChild(el("span", {}, [S.snap.finds_layout ? "◇ находка не тронута, ◆ сработала / открыта"
+                                                        : "◆ здесь сработала находка (название — после партии)"]));
+    }
   }
   function renderDetails() {
     var box = $("details");
@@ -403,9 +435,23 @@ h4 { margin: 12px 0 6px; font-size: 14px; }
     if (st.occupied) marks.push("оккупирована (взята у " + nick(st.occupied.from) + ", с хода " + st.occupied.since + ")");
     if (st.ruined_until) marks.push("пепелище до хода " + st.ruined_until);
     if (st.ravaged_until) marks.push("разорена до хода " + st.ravaged_until);
+    if (st.income_mul) marks.push("доход ×" + st.income_mul);
     if (marks.length) row("Статус", marks.join("; "));
     var claims = ((S.snap && S.snap.claims) || []).filter(function (c) { return c.province === p.id; });
     if (claims.length) row("Притязания", claims.map(function (c) { return c.nick + " до хода " + c.until_turn; }).join(", "));
+    if (sp.abandoned) row("Заброшенная", sp.ruins ? "руины бывшей столицы" : "земля свободного места");
+    if (sp.guard) row(sp.guard.lair ? "Логово" : "Стража", sp.guard.lair ? "нейтралы растут" + (sp.guard.cap ? " до " + sp.guard.cap : "")
+                                                                         : "нейтралы с наградой тому, кто возьмёт провинцию");
+    var lay = layoutOf(p.id);
+    if (lay) {
+      var kind = S.snap.discovery_kinds ? FIND_KINDS[S.snap.discovery_kinds[lay.id]] : null;
+      var known = sp.discovery && sp.discovery.known && sp.discovery.known.length ? "; знают: " + sp.discovery.known.map(nick).join(", ") : "";
+      row("Находка", "«" + findName(lay.id) + "»" + (kind ? " (" + kind + ")" : "") + " — " + (FIND_STATES[lay.state] || lay.state) + known);
+    } else if (findsHere(p.id).length) {
+      row("Находка", findsHere(p.id).map(function (e) {
+        return (e.id ? "«" + findName(e.id) + "» " : "") + (FIND_KINDS[e.find_kind] || "") + " — вошли " + (e.entrants || []).map(nick).join(", ");
+      }).join("; "));
+    }
     row("Соседи", p.neighbors.join(", "));
     if (S.snap && S.snap.full) {
       row("Войска", unitsText(sp.units) + (sp.fortified ? " (укреплена)" : ""));
@@ -447,6 +493,7 @@ h4 { margin: 12px 0 6px; font-size: 14px; }
     if (o.kind === "build") return "стройка в " + o.province + ": " + nameOf("building_names", o.building) + hasty;
     if (o.kind === "fortify") return "укрепить " + o.province + hasty;
     if (o.kind === "research") return "исследование: " + nameOf("tech_names", o.tech) + hasty;
+    if (o.kind === "discover") return "находка в " + o.province + ": " + o.choice + hasty;
     return o.kind;
   }
   function renderFeed() {
@@ -569,8 +616,8 @@ h4 { margin: 12px 0 6px; font-size: 14px; }
       : "Очки: 1 за провинцию, +3 за каждую столицу."}));
     renderFinal(box, l, seats);
   }
-  var SCORE_LABELS = {territory: "зем", science: "нау", works: "стр", war: "вой"};
-  var FINAL_LABELS = {territory: "зем", science: "нау", works: "стр", war: "вой", objectives: "цель"};
+  var SCORE_LABELS = {territory: "зем", science: "нау", works: "стр", war: "вой", betrayal: "разрыв"};
+  var FINAL_LABELS = {territory: "зем", science: "нау", works: "стр", war: "вой", objectives: "цель", betrayal: "разрыв"};
   // the end of a scored game: the final score by source and every seat's objective (revealed to all); while the game
   // runs only the full level (admin) gets the objectives with their progress, the delayed spectator sees «?»
   function renderFinal(box, l, seats) {

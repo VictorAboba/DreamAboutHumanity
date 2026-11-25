@@ -38,6 +38,13 @@
       "minimum": 1,
       "maximum": 8
     },
+    "difficulty": {
+      "enum": [
+        "easy",
+        "medium",
+        "hard"
+      ]
+    },
     "maps": {
       "$ref": "common.schema.json#/$defs/refs"
     },

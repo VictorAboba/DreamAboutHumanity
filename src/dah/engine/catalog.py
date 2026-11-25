@@ -7,13 +7,17 @@ from typing import Any, Mapping
 from . import registry
 from .content import Ruleset
 
-KINDS = ("unit", "building", "tech", "artifact", "faction", "branch", "resource", "province_type", "objective")
+KINDS = ("unit", "building", "tech", "artifact", "faction", "branch", "resource", "province_type", "objective",
+         "discovery")
 KIND_LABELS = {"unit": "юнит", "building": "здание", "tech": "технология", "artifact": "артефакт",
                "faction": "фракция", "branch": "ветка технологий", "resource": "ресурс",
-               "province_type": "тип провинции", "objective": "тайная цель"}
+               "province_type": "тип провинции", "objective": "тайная цель", "discovery": "находка"}
 _TABLES = {"unit": "units", "building": "buildings", "tech": "techs", "artifact": "artifacts",
            "faction": "factions", "branch": "branches", "resource": "resources", "province_type": "province_types",
-           "objective": "objectives"}
+           "objective": "objectives", "discovery": "discoveries"}
+# stage 5 (ABANDONED_LANDS.md 3, 4): kinds and rarities of finds
+DISCOVERY_KIND_TEXT = {"boon": "плюшка", "hindrance": "помеха", "mixed": "смешанная"}
+RARITY_TEXT = {"common": "обычная", "uncommon": "необычная", "rare": "редкая", "minor": "малая", "major": "большая"}
 
 ABILITY_TEXT = {
     "ignore_fortify": "укрепление защитника против него не действует",
@@ -21,6 +25,8 @@ ABILITY_TEXT = {
     "garrison": "+{defense:g} к обороне в своей провинции",
     "fast": "ходит на {range:g} ребра и по чужой земле",
 }
+# difficulty tiers of secret objectives (core 0.6.0, registry.OBJECTIVE_DIFFICULTIES)
+DIFFICULTY_TEXT = {"easy": "лёгкая", "medium": "средняя", "hard": "трудная"}
 _STAT_TEXT = {
     "command_points": "очки командования", "p2.hasty_penalty": "штраф «наспех»",
     "p2.cost.new_attack": "цена новой атаки в П2 (ОК)", "p2.cancel_refund": "возврат резерва при отмене в П2",
@@ -32,7 +38,7 @@ _STAT_TEXT = {
     "conquest.loot_cooldown": "перерыв между добычей с провинции (ходов)",
     # espionage (SPY_AND_CONQUEST.md 1.2)
     "spy.whisper": "Шёпот (S)", "spy.mirrors": "Зеркала (C)", "province.mirrors": "Зеркала в провинции (C_лок)",
-    "spy.shades_max": "Теней всего", "spy.active_base": "Теней на заданиях (база)",
+    "spy.shades_max": "Теней всего", "spy.shades_free": "Теней даром на старте", "spy.active_base": "Теней на заданиях (база)",
     "spy.rounds_bonus": "срок заданий (раундов)", "spy.detect.army": "армия в провинции к C_лок",
     "spy.attribution.base": "шанс узнать хозяина пойманной Тени", "spy.intel.width": "ширина интервалов донесений",
     "spy.xp_max": "опыт Тени (предел)", "spy.cover_max": "прикрытие Тени (предел)",
@@ -46,6 +52,7 @@ _STAT_TEXT = {
     "score.war.per_point": "цена убитых за 1 очко войны (меньше — лучше)",
     "score.war.cap_per_victim": "предел очков войны с одного соперника",
     "score.war.cap": "предел очков войны", "score.war.defense_pct": "доля очков войны в обороне, %",
+    "score.betrayal.per_break": "штраф очков за нарушенный пакт",
 }
 
 
@@ -272,8 +279,28 @@ def describe(ruleset: Ruleset, kind: str, fid: str) -> dict[str, Any]:
         from .scoring import objective_text     # scoring imports this module's neighbours
         out.update(kind_id=entity.kind, params=dict(entity.params), points=entity.points,
                    weighted=entity.points * ruleset.weight("objectives"))
-        lines.append(f"{objective_text(ruleset, None, {'id': fid})}; +{out['weighted']} очк. к итогу, если "
+        tier = DIFFICULTY_TEXT.get(entity.difficulty or "")
+        if tier:
+            out["difficulty"] = entity.difficulty
+        lines.append(f"{objective_text(ruleset, None, {'id': fid})}; +{out['weighted']} очк."
+                     + (f" ({tier})" if tier else "") + " к итогу, если "
                      "выполнена в конце (проверка при game_over). Кому какая цель — тайна до конца партии")
+    elif kind == "discovery":
+        from .discoveries import choice_text, effects_text     # discoveries imports content and combat
+        out.update(find_kind=entity.kind, rarity=entity.rarity, weight=entity.weight, power=entity.power,
+                   risk=entity.risk, power_small=list(entity.power_small), ev=dict(entity.ev),
+                   default_choice=entity.default_choice)
+        lines.append(f"{DISCOVERY_KIND_TEXT[entity.kind]}, {RARITY_TEXT.get(entity.rarity, entity.rarity)}; сила "
+                     f"{entity.power:+.2f} P (5 штурм.), одиночке {entity.power_small[0]:+.2f} P"
+                     + (f", риск {entity.risk:.2f}" if entity.kind == "mixed" else ""))
+        if entity.effects:
+            lines.append("при входе армии: " + effects_text(ruleset, entity.effects))
+        for c in entity.choices:
+            lines.append(f"- {c['label']}: {choice_text(ruleset, entity, c)}"
+                         + (" — по умолчанию" if c["id"] == entity.default_choice else ""))
+        if entity.description:
+            lines.append(entity.description)
+        lines.append("где лежит — тайна; Наблюдение раскрывает, не запуская")
     elif kind == "resource":
         out.update(role=entity.role)
         lines.append(f"роль: {entity.role}")

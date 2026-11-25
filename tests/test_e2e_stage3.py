@@ -111,7 +111,10 @@ def test_bots_use_espionage_and_conquest_orders(played):
         data = read_json(played["gdir"].path / "private" / "orders" / f"turn_{turn}.json")
         for seat, book in data.items():
             kinds.setdefault(seat, set()).update(o["kind"] for o in book.get("orders", []))
-    assert "hire_shade" in kinds["A"] | kinds["B"] | kinds["C"]
+    # core 0.6.0: every seat holds a free Shade from the start (journaled `shade_hired` with `free`), so a hire is not
+    # needed for a mission
+    free = [e for e in read_events(played["gdir"].journal_path) if e["type"] == "shade_hired" and e.get("free")]
+    assert sorted(e["seat"] for e in free) == ["A", "B", "C"] and all(e["turn"] == 0 for e in free)
     assert "spy" in kinds["A"] | kinds["B"] | kinds["C"]
     assert "policy" in kinds["A"] | kinds["B"] | kinds["C"]
     assert all(not any(o.get("kind") == "dispose" and not o.get("province") for o in
@@ -149,7 +152,8 @@ def test_no_seat_sees_truth_or_other_shades(played):
         for node in _walk(payload):
             assert "truth" not in node, node
             if node.get("seat") not in (None, seat):
-                assert "espionage" not in node and "shades" not in node, node
+                # a ledger report about another seat holds the number of its Shades (2.2), never the Shades
+                assert "espionage" not in node and not isinstance(node.get("shades"), list), node
         if isinstance(payload.get("intel"), dict) and isinstance(payload["intel"].get("reports"), list):
             intel += 1
             assert all(r.get("shade") for r in payload["intel"]["reports"])
@@ -196,7 +200,7 @@ def test_report_has_stage3_block(played, capsys):
     report = json.loads(capsys.readouterr().out)
     block = report["stage3"]
     assert set(block) == {"A", "B", "C"}
-    assert sum(t["shades_hired"] for t in block.values()) >= 1
+    assert sum(t["shades_hired"] + t["shades_free"] for t in block.values()) >= 3     # 0.6.0: one free each
     assert sum(sum(t["missions"].values()) for t in block.values()) >= 1
     assert main(["report", GAME, "--games-dir", str(played["games"])]) == 0
     assert "ШПИОНАЖ И ЗАВОЕВАНИЕ" in capsys.readouterr().out

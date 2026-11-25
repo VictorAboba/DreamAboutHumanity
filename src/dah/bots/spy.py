@@ -38,6 +38,7 @@ class SpyMemory:
     strike_turn: int | None = None
     seen_turn: int | None = None                        # the recon step last absorbed
     caught: int = 0                                     # Shades caught at us (all, attributed or not)
+    objectives: dict[str, list[dict[str, Any]]] = field(default_factory=dict)  # seat -> its secret objectives read
 
     def absorb(self, intel: Mapping[str, Any] | None) -> None:
         """Take in one recon step's own intel (`intel_json`); a step already absorbed is skipped."""
@@ -52,6 +53,8 @@ class SpyMemory:
                                                              (facts.get("units") or {}).items()})
             elif r.get("behavior") == "read_orders" and facts.get("seat"):
                 self.orders[str(facts["seat"])] = (turn, list(facts.get("entries") or []))
+            elif r.get("behavior") == "read_objective" and facts.get("seat"):
+                self.objectives[str(facts["seat"])] = [dict(o) for o in facts.get("objectives") or []]
         self.strikes = {str(r["target"]) for r in intel.get("rounds") or [] if r.get("outcome") == "struck"}
         self.strike_turn = turn
         for c in intel.get("caught") or []:
@@ -144,6 +147,17 @@ def shade_savings(view: StateView, memory: SpyMemory, *, from_turn: int, alloy: 
     income = (view.net_income or {}).get(BUILD_RESOURCE) if view.net_income is not None else None
     need = shade_cost() if income is None else shade_cost() - max(0, int(income))
     return max(0, min(alloy, need))
+
+
+SECRET = "secret"       # core 0.6.0: the mission that reads a seat's secret objective (bots.view MISSIONS)
+
+
+def secret_wanted(view: StateView, memory: SpyMemory, target: str | None) -> bool:
+    """Read the target's secret objective first (core 0.6.0): the game deals objectives (the bot holds one), the pack
+    has the mission and the bot has not read this target's yet (an objective never changes: one report is enough)."""
+    return (target is not None and SECRET in MISSIONS and bool(view.objectives) and target not in memory.objectives
+            and target not in {str((sh.get("mission") or {}).get("target")) for sh in active_shades(view)
+                               if str((sh.get("mission") or {}).get("type", "")).endswith(SECRET)})
 
 
 def can_start(view: StateView) -> bool:

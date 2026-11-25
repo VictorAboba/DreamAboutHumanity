@@ -157,6 +157,9 @@
         },
         "conquest": {
           "type": "boolean"
+        },
+        "discoveries": {
+          "type": "boolean"
         }
       }
     },
@@ -212,6 +215,10 @@
           "$ref": "common.schema.json#/$defs/refs"
         }
       }
+    },
+    "discoveries": {
+      "description": "stage 5 (ABANDONED_LANDS.md 11): knobs of the Abandoned lands (checked by the engine)",
+      "type": "object"
     }
   }
 }

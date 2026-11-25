@@ -41,6 +41,7 @@ DONE, EMPTY, STRUCK, RECALLED, VOID, CAUGHT = "done", "empty", "struck", "recall
 # a round's outcome for the Shade's owner
 FOUND, NOTHING, LOST, HIT, VOIDED = "found", "nothing", "lost", "struck", "void"
 OBSERVE, LEDGER, READ_ORDERS, SABOTAGE = "observe_province", "read_ledger", "read_orders", "sabotage"
+READ_OBJECTIVE = "read_objective"     # core 0.6.0 (decision 26): the target's secret objectives
 
 # Report events only their sides see (resolve._PRIVATE_KINDS); the victim of a `sabotage` sees it without its author.
 PRIVATE_KINDS = frozenset({"sabotage", "strike_cancelled", "feint", "mission_started", "mission_end"})
@@ -194,6 +195,10 @@ def local_mirrors(state: GameState, rs: Ruleset, place: str) -> int:
     spy.detect.army if the owner has units there; 0 for a neutral province."""
     prov = state.provinces[place]
     if prov.owner is None:
+        # stage 5 (ABANDONED_LANDS.md 10): Observation of Abandoned land is not free; the same for every Abandoned
+        # province, with a find or without (a failure must not tell which)
+        if rs.system("discoveries") and place in state.abandoned:
+            return int(rs.scenario.discoveries.get("observe_mirrors", 0))
         return 0
     key = stat_key(state, rs, prov.owner)
     c = mirrors(rs, key) + int(province_stat(state, rs, place, "province.mirrors", key))
@@ -321,6 +326,8 @@ def _entry(order: Order) -> dict[str, Any]:
     out = order.to_dict()
     for k in ("id", "phase_added", "feint", "shade"):
         out.pop(k, None)
+    if order.kind == "discover":
+        out.pop("choice", None)      # the variant would name the find (ABANDONED_LANDS.md 10)
     return out
 
 
@@ -338,6 +345,11 @@ def _observe(snap: GameState, rs: Ruleset, seed: int | str, spy: str, pid: str,
              "buildings": sorted(prov.buildings),
              "building_now": [[b.building, b.turns_left] for b in snap.pending_builds if b.province == pid],
              "fortified": prov.fortified, "status": cq.statuses_for(snap).get(pid, {})}
+    if rs.system("discoveries") and (snap.abandoned or snap.discoveries):
+        # a find is revealed, never triggered (ABANDONED_LANDS.md 10): exact, or None («находок нет»)
+        entry = snap.discoveries.get(pid)
+        d = rs.discoveries.get(entry["id"]) if entry else None
+        truth["discovery"] = {"id": d.id, "name": d.name, "kind": d.kind} if d is not None else None
     facts = {**truth, "units": {u: honest_range(seed, spy, pid, "units", u, n, width)
                                 for u, n in truth["units"].items()}}
     return facts, truth
@@ -362,6 +374,17 @@ def _ledger(snap: GameState, rs: Ruleset, seed: int | str, spy: str, target: str
     if research:
         facts["progress"] = honest_range(seed, spy, target, "research", research, truth["progress"], width)
     return facts, truth
+
+
+def _objective(snap: GameState, rs: Ruleset, target: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """read_objective (core 0.6.0, decision 26): the target's secret objectives as at the close of actions — id,
+    the rival it names (if any), points and progress. Exact (an objective is a fact, not a count to blur): the one
+    payoff of a Shade talk cannot give. The objective never changes, so one report is enough; progress is a snapshot."""
+    from .scoring import objective_status
+    goals = [{k: o[k] for k in ("id", "target", "points", "met", "have", "need")}
+             for o in objective_status(snap, rs, target)]
+    truth = {"seat": target, "objectives": goals}
+    return truth, copy.deepcopy(truth)
 
 
 def _read_orders(snap: GameState, rs: Ruleset, seed: int | str, turn: int, spy: str, target: str, book: SeatOrders,
@@ -590,8 +613,13 @@ def _report(s: GameState, snap: GameState, rs: Ruleset, seed: int | str, books: 
     extra: dict[str, Any] = {}
     if mission.behavior == OBSERVE:
         facts, truth = _observe(snap, rs, seed, seat, target, width)
+        entry = s.discoveries.get(target) if facts.get("discovery") else None
+        if entry is not None and seat not in entry.get("known", []):
+            entry["known"] = sorted({*entry.get("known", []), seat})     # the find is known to the observer now
     elif mission.behavior == LEDGER:
         facts, truth = _ledger(snap, rs, seed, seat, target, books.get(target, SeatOrders()), width)
+    elif mission.behavior == READ_OBJECTIVE:
+        facts, truth = _objective(snap, rs, target)
     else:       # read_orders
         facts, truth, feints = _read_orders(snap, rs, seed, s.turn, seat, target, books.get(target, SeatOrders()),
                                             uid(seat, shade["id"]), S, C, key)
@@ -886,6 +914,8 @@ def _entry_text(rs: Ruleset, state: GameState, e: Mapping[str, Any], me: str | N
     if kind == "policy":
         d = rs.dispositions.get(e.get("disposition") or "")
         return f"политика {d.name.lower() if d else 'нет'}"
+    if kind == "discover":
+        return f"запись о находке в {e.get('province')}"
     return kind
 
 
@@ -924,6 +954,26 @@ def _orders_body(rs: Ruleset, state: GameState, facts: Mapping[str, Any], me: st
     return out
 
 
+def _status_text(state: GameState, status: Mapping[str, Any], me: str | None) -> str:
+    """An Observation's province status in the words of the province line: оккуп. у X, пепелище до хN, разорена,
+    доход ×0.5 (an unknown key as is)."""
+    parts = []
+    for key in sorted(status):
+        value = status[key]
+        if key == "occupied":
+            frm = (value or {}).get("from")
+            parts.append(f"оккуп. (взята у {_nick(state, frm, me)})" if frm else "оккуп.")
+        elif key == "ruined_until":
+            parts.append(f"пепелище до х{value}")
+        elif key == "ravaged_until":
+            parts.append(f"разорена до х{value}")
+        elif key == "income_mul":
+            parts.append(f"доход ×{float(value):g}")
+        else:
+            parts.append(str(key))
+    return ", ".join(parts)
+
+
 def report_text(report: Mapping[str, Any], rs: Ruleset, state: GameState, me: str, full: bool = False) -> str:
     """One report (2.4): compact (<= 400 chars) or full (<= 1200, get_intel(report_id))."""
     facts = report["facts"]
@@ -944,7 +994,10 @@ def report_text(report: Mapping[str, Any], rs: Ruleset, state: GameState, me: st
             body += "; стройка: " + ", ".join(f"{rs.short(b)} ({n})" for b, n in facts["building_now"])
         status = facts.get("status") or {}
         if status:
-            body += "; статус: " + ", ".join(sorted(status))
+            body += "; статус: " + _status_text(state, status, me)
+        if "discovery" in facts:
+            found = facts["discovery"]
+            body += f"; находка «{found['name']}»" if found else "; находок нет"
         lines.append(body)
     elif behavior == LEDGER:
         body = f"запасы: {_res(rs, facts.get('stock') or {})}"
@@ -964,11 +1017,29 @@ def report_text(report: Mapping[str, Any], rs: Ruleset, state: GameState, me: st
             body += (f"; счёт {sum(parts.values())} [" + " ".join(f"{LABELS[k]} {v}" for k, v in parts.items())
                      + "] без цели")
         lines.append(body)
+    elif behavior == READ_OBJECTIVE:
+        lines.append(_objective_body(rs, state, facts, me))
     else:
         lines += _orders_body(rs, state, facts, me, full)
     text = "\n".join(lines)
     limit = FULL_CHARS if full else COMPACT_CHARS
     return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _objective_body(rs: Ruleset, state: GameState, facts: Mapping[str, Any], me: str) -> str:
+    """«цель «Хозяин кузниц» +5: в конце держать ≥2 провинц. типа «Кузня»; сейчас: нет (1/2)»."""
+    from .scoring import objective_text
+    items = []
+    for o in facts.get("objectives") or []:
+        obj = rs.objectives.get(o["id"])
+        cond = objective_text(rs, state, o)
+        if o.get("target") == me and me in state.players:       # objective_text names the rival by nick
+            cond = cond.replace(f"столицу {state.players[me].nick}", "твою столицу")
+        need = o.get("need") or 1
+        now = "да" if o.get("met") else ("нет" if need <= 1 else f"нет ({o.get('have')}/{need})")
+        pts = o.get("points", 0) * rs.weight("objectives")
+        items.append(f"цель «{obj.name if obj else o['id']}» +{pts}: {cond}; сейчас: {now}")
+    return "; ".join(items) or "тайной цели нет"
 
 
 def capture_text(rs: Ruleset, state: GameState, c: Mapping[str, Any], me: str) -> str:
@@ -1003,6 +1074,15 @@ def state_line(rep: Mapping[str, Any] | None, rs: Ruleset, state: GameState, sea
         items.append(f"ПОЙМАНА У ТЕБЯ: {c['province']} ({_mission_name(rs, c['mission'])} "
                      f"{target_label(rs, state, c['target'], seat)})")
     return "ДОНЕСЕНИЯ: " + " · ".join(items) if items else None
+
+
+def idle_line(state: GameState, seat: str) -> str | None:
+    """get_state in П1 and Д (core 0.6.0, m7: agents left their Shades unused): the seat's idle Shades, if any."""
+    player = state.players.get(seat)
+    idle = [sh["id"] for sh in (player.shades if player else []) if sh.get("status") == IDLE]
+    if not idle:
+        return None
+    return f"ТЕНИ: свободн{'а' if len(idle) == 1 else 'ы'} {', '.join(idle)} — задание spy в Д; миссии: list_spies"
 
 
 def notice_text(rep: Mapping[str, Any], seat: str) -> str | None:

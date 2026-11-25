@@ -8,7 +8,8 @@
   every province whose army stays put. The garrison and how long it builds (to turn 3-5) are fixed per bot by its
   seed.
 - Betrayal: in the last two turns it attacks a partner's province with "pact": "break" when the estimate shows a
-  decisive win (>= 0.85), since a broken pact costs little once the game is about to end.
+  decisive win (>= 0.85), since a broken pact costs little once the game is about to end; in a scored game (core
+  0.6.0: a break costs points) only a province worth more than the penalty (a capital, or one its objective needs).
 - Stage 2: prefers factions of command and cunning (synclite, captains, ash_choir), artifacts of command and income,
   researches logistics first (more command points), then industry; recruits one of its faction's unique unit per
   turn before assault.
@@ -17,18 +18,22 @@
   income lacks for it; the second and replacements with 35 alloy) reading the orders of its strongest neighbouring
   partner (3 rounds; the ledger while S < 2; the strongest neighbour when it has no partner). In negotiation_2, a
   `move` of that book into its land not marked as false gets a fortify there (1 CP); it recalls a sabotage aimed at a
-  partner. One false entry in the last 2 turns, before the betrayal. Fates: occupations of a partner's own land are
+  partner. One false entry in the last 2 turns, before the betrayal. Core 0.6.0: it holds one Shade from the start and
+  first reads the secret objective of that seat (mission `secret`, 2 rounds) once. Fates: occupations of a partner's own land are
   liberated to that partner; else subjugate what the provisions pay for (policy subjugate while 15 are free).
 - Stage 4 (docs/SCORING.md section 10, dah.bots.score): with great works on it saves provisions after its building
   turns (from turn 1 for a great_work objective; recruits only what the net income leaves) and lays the Monument once the free provisions cover it and still
   feed the army 3 turns; with science scoring it lays a temple once it has a mine. Its objective
   makes the provinces that advance it preferred targets (and keeps one unit in those held) or its branch first.
+- Stage 5 (docs/ABANDONED_LANDS.md 14.1, dah.bots.finds): Abandoned land that may hold a find only with 4 units or
+  more; guards and a find's neutrals at estimate >= 0.75 (a lair >= 0.9); mixed finds by its rank.
 """
 
 from __future__ import annotations
 
 from dah.bots import conquest as cq
-from dah.bots import score, spy
+from dah.bots import finds, score, spy
+from dah.bots import view as bv
 from dah.bots.base import Bot, DiplomacyApi, Estimator, Order
 from dah.bots.builder import choose_build, total_upkeep
 from dah.bots.tactics import (
@@ -69,9 +74,13 @@ SHADE_FROM_TURN = 2
 SHADE_MIN_ALLOY = 35   # the second Shade and replacements; the first needs only its price, saved for (m6)
 MAX_SHADES = 2
 READ_ROUNDS = 3
+SECRET_ROUNDS = 2      # core 0.6.0: the secret objective mission (one report is enough)
 P2_FORTIFY_CP = 1   # registry: a fortify given in negotiation_2
 P2_RECALL_CP = 1    # registry default of p2.cost.recall
 MONUMENT = "monument"   # stage 4 (docs/SCORING.md 10)
+FIND_ARMY = 4           # stage 5: an army into Abandoned land that may hold a find (dah.bots.finds)
+GUARD_MARGIN = 0.1      # the ruins' guard, a find's neutrals: estimate >= 0.75
+LAIR_MARGIN = 0.25      # a lair: >= 0.9
 
 
 class DiplomatBot(Bot):
@@ -155,8 +164,10 @@ class DiplomatBot(Bot):
                               score.objective_garrison(view))
         if view.conquest:
             keep = merge_reserved(keep, cq.occupation_garrison(view))
+        bonus = finds.merge_bonus(score.attack_bonus(view),
+                                  finds.attack_bonus(view, self.finds, GUARD_MARGIN, LAIR_MARGIN))
         moves += plan_moves(view, estimate, ATTACK_WIN, self.rng, keep, lambda t: not view.is_partner(t.owner),
-                            score.attack_bonus(view))
+                            bonus, army_ok=finds.army_ok(self.finds, FIND_ARMY))
         late = bool(view.turn_limit) and view.turn > view.turn_limit - BETRAY_TURNS
         if view.espionage is not None and not self.feinted and late:
             feint = spy.feint_order(full, merge_reserved(keep, reserved_by_orders(moves)), moves,
@@ -188,7 +199,10 @@ class DiplomatBot(Bot):
             idle = spy.idle_shades(view)
             if idle and target is not None and target not in busy and spy.can_start(view):
                 mission = "read_orders" if view.whisper >= spy.MISSIONS["read_orders"][0] else "ledger"
-                got = spy.spy_order(view, idle[0], mission, target, READ_ROUNDS, alloy, food)
+                if spy.secret_wanted(view, self.memory, target):
+                    mission = spy.SECRET
+                got = spy.spy_order(view, idle[0], mission, target, SECRET_ROUNDS if mission == spy.SECRET
+                                    else READ_ROUNDS, alloy, food)
                 if got is not None:
                     out.append(got[0])
                     alloy -= got[1]
@@ -233,10 +247,21 @@ class DiplomatBot(Bot):
     def _betrayal(self, view: StateView, estimate: Estimator) -> Order | None:
         if not view.turn_limit or view.turn <= view.turn_limit - BETRAY_TURNS:
             return None
-        attack = best_attack(view, {}, estimate, False, BETRAY_WIN, self.rng, lambda t: view.is_partner(t.owner))
+        attack = best_attack(view, {}, estimate, False, BETRAY_WIN, self.rng,
+                             lambda t: view.is_partner(t.owner) and worth_betrayal(view, t))
         if attack is not None:
             attack["pact"] = "break"
         return attack
+
+
+def worth_betrayal(view: StateView, target: Province) -> bool:
+    """Core 0.6.0: in a scored game a broken pact costs bv.BETRAYAL_PENALTY points, so only a target worth more is
+    attacked: a capital (1 + 3 points) or a province that advances the open objective."""
+    penalty = bv.BETRAYAL_PENALTY if view.score_parts is not None else 0
+    if penalty <= 0:
+        return True
+    value = 1 + (3 if target.kind == "capital" else 0)
+    return value > penalty or any(score.advances(view, o, target) for o in view.open_objectives())
 
 
 def neighbours(view: StateView) -> list[str]:

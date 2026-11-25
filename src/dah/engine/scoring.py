@@ -7,7 +7,9 @@ Sources (registry.SCORE_SOURCES, weights in `Ruleset.scenario.scoring`, 0 = off)
     war         tally      Player.tally.war_value {victim: value}, capped per victim and in total
     objectives  at the end the seat's secret objectives that are met (Player.objectives)
 
-`score_parts` holds *weighted* points per source (they sum to the score); a source with weight 0 is not in it. The turn
+`score_parts` holds *weighted* points per source (they sum to the score); a source with weight 0 is not in it. Core
+0.6.0 (decision 26): `betrayal`, a penalty line (<= 0) of `score.betrayal.per_break` per pact the seat broke, joins
+the parts of a seat that broke one while that stat is > 0 (never under the default scoring). The turn
 score leaves objectives out; the final total (`final_scores`, at game over only) adds them for living seats. With the
 default scoring ({territory: 1}) `scores` is the slice's 1 per province + 3 per capital, bit for bit.
 """
@@ -28,8 +30,12 @@ if TYPE_CHECKING:       # pragma: no cover
 
 SOURCES = registry.SCORE_SOURCES
 TURN_SOURCES = registry.TURN_SOURCES
-LABELS = {"territory": "зем", "science": "нау", "works": "стр", "war": "вой", "objectives": "цель"}
-NAMES = {"territory": "земля", "science": "наука", "works": "стройки", "war": "война", "objectives": "тайная цель"}
+LABELS = {"territory": "зем", "science": "нау", "works": "стр", "war": "вой", "objectives": "цель",
+          "betrayal": "разрыв"}
+NAMES = {"territory": "земля", "science": "наука", "works": "стройки", "war": "война", "objectives": "тайная цель",
+         "betrayal": "разрыв пакта"}
+BETRAYAL = "betrayal"           # the penalty line of the parts (not a weighted source)
+PART_ORDER = (*registry.SCORE_SOURCES, BETRAYAL)      # the order breakdowns are shown in
 SCORE_LINE_LIMIT = 300
 
 # Report events: public (everyone sees them, SCORING.md 2.3) and private to their sides (2.4)
@@ -159,10 +165,38 @@ def raw_points(state: GameState, rs: Ruleset, seat: str) -> dict[str, int]:
     return {src: _POINTS[src](state, rs, seat, key=key) for src in turn_sources(rs)}
 
 
+def betrayal_on(rs: Ruleset) -> bool:
+    """The pact-break penalty is in play (core 0.6.0): a non-default scoring and score.betrayal.per_break > 0 for some
+    faction of the scenario."""
+    return not rs.default_scoring and any(_stat(rs, "score.betrayal.per_break", f) > 0
+                                          for f in (None, *rs.scenario.factions))
+
+
+def pacts_broken(state: GameState, seat: str) -> int:
+    """Pacts the seat broke (status broken, the seat among `broken_by`): public, every seat knows them."""
+    return sum(1 for p in state.pacts if p.get("status") == "broken" and seat in (p.get("broken_by") or ()))
+
+
+def betrayal(state: GameState, rs: Ruleset, seat: str, key: StatKey = ...) -> int:
+    """The penalty line (<= 0): -score.betrayal.per_break per pact the seat broke; 0 when the penalty is off."""
+    if not betrayal_on(rs):
+        return 0
+    if key is ...:
+        key = stat_key(state, rs, seat)
+    return -_stat(rs, "score.betrayal.per_break", key) * pacts_broken(state, seat)
+
+
 def score_parts(state: GameState, rs: Ruleset) -> dict[str, dict[str, int]]:
-    """{seat: {source: weighted points}} of the turn score (objectives left out)."""
-    return {seat: {src: rs.weight(src) * n for src, n in raw_points(state, rs, seat).items()}
-            for seat in state.players}
+    """{seat: {source: weighted points}} of the turn score (objectives left out), plus `betrayal` (negative) for a
+    seat that broke a pact while the penalty is on."""
+    out = {}
+    for seat in state.players:
+        parts = {src: rs.weight(src) * n for src, n in raw_points(state, rs, seat).items()}
+        penalty = betrayal(state, rs, seat)
+        if penalty:
+            parts[BETRAYAL] = penalty
+        out[seat] = parts
+    return out
 
 
 def scores(state: GameState, rs: Ruleset) -> dict[str, int]:
@@ -491,6 +525,9 @@ def score_known(state: GameState, rs: Ruleset, viewer: str, seat: str) -> dict[s
             parts[src] = rs.weight(src) * works(state, rs, seat, key)
         else:
             parts[src] = None
+    penalty = betrayal(state, rs, seat, key)
+    if penalty:         # pact breaks are public events: every seat knows the penalty exactly
+        parts[BETRAYAL] = penalty
     return {"exact": False, "score": sum(v for v in parts.values() if v is not None), "parts": parts}
 
 
@@ -535,6 +572,8 @@ def objectives_view(state: GameState, rs: Ruleset, seat: str) -> list[dict[str, 
                                  "kind": obj.kind if obj else None, "params": dict(obj.params) if obj else {},
                                  "text": objective_text(rs, state, st), "points": st["points"],
                                  "met_now": st["met"], "have": st["have"], "need": st["need"]}
+        if obj is not None and obj.difficulty:
+            entry["difficulty"] = obj.difficulty        # core 0.6.0: easy | medium | hard (points grow with it)
         if st.get("target"):
             entry["target"] = st["target"]
             entry["target_nick"] = state.players[st["target"]].nick if st["target"] in state.players else None
@@ -544,7 +583,7 @@ def objectives_view(state: GameState, rs: Ruleset, seat: str) -> list[dict[str, 
 
 def _parts_text(parts: Mapping[str, int | None], exact: bool) -> str:
     items = []
-    for src in TURN_SOURCES:
+    for src in (*TURN_SOURCES, BETRAYAL):
         if src not in parts:
             continue
         v = parts[src]
@@ -612,7 +651,7 @@ def final_line(state: GameState, rs: Ruleset, viewer: str, result: Mapping[str, 
         text = f"{name(s)} {final.get(s, 0)}" + ("" if state.players[s].alive else " выбыл")
         parts = parts_all.get(s) or {}
         if detail and parts and not rs.default_scoring:
-            text += " [" + " ".join(f"{LABELS[src]} {parts[src]}" for src in SOURCES if src in parts) + "]"
+            text += " [" + " ".join(f"{LABELS[src]} {parts[src]}" for src in PART_ORDER if src in parts) + "]"
         return text
 
     goals = []
@@ -651,6 +690,8 @@ def final_text(state: GameState, rs: Ruleset, result: Mapping[str, Any]) -> list
     for seat, p in state.players.items():
         parts = parts_all.get(seat) or {}
         body = " + ".join(f"{LABELS[src]} {parts[src]}" for src in SOURCES if src in parts)
+        if parts.get(BETRAYAL):
+            body += f" − {LABELS[BETRAYAL]} {-parts[BETRAYAL]}"
         objs = []
         for o in objectives.get(seat) or []:
             obj = rs.objectives.get(o["id"])

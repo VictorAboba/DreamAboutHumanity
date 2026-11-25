@@ -44,6 +44,13 @@ and ruins in the feed; the full levels also see each seat's conquest policy and 
 Espionage is private: the delayed spectator sees only «саботаж в P07» without nicks, never Shades, missions or captures;
 the full levels see each seat's Shades (count, missions) and the turn's captures (`shade_captured` with the owner and
 whether the victim learned it) next to the sabotage with its author.
+
+Stage 5 (docs/ABANDONED_LANDS.md 10): with the Abandoned lands on, every level sees `abandoned` and the public marks of
+a province (`abandoned`, `ruins`, the ruins' guard; a lair only where the full levels look or after the game) and the
+pool's names and kinds; the delayed spectator sees a find only when it went off, in its public form (where, who
+entered, its kind and what shows in the province: never its name or gains); the full levels see each province's find
+(`discovery {id, state, known}`), the full find events, and `finds_layout`, every find as laid out at creation with its
+state after the turn (hidden, site, pending or spent). After game_over the revealed level shows all of it.
 """
 
 from __future__ import annotations
@@ -66,9 +73,10 @@ from dah.engine import GameState, TurnReport, scores, stat_key
 from dah.engine import scoring as sc_
 from dah.engine import conquest as cq
 from dah.engine import diplomacy as dip
+from dah.engine import discoveries as disc
 from dah.engine.techs import public_techs
 from dah.engine.view import PHASE_LABELS, event_text
-from dah.game import GAME_OVER, SETUP, Game, iso_time
+from dah.game import GAME_OVER, SETUP, Game, iso_time, secret_salt
 from dah.journal import read_events
 from dah.report import build_report
 from dah.store import hash_key
@@ -139,6 +147,7 @@ class GameCache:
         # (journal stamp, built at monotonic time, payload)
         self.timings: tuple[tuple[int, int], float, dict[str, Any]] | None = None
         self.timings_lock = asyncio.Lock()
+        self.layout: dict[str, str] | None = None     # stage 5: province -> find placed at creation (full levels)
 
     def scores_at_start(self, game: Game) -> dict[str, int]:
         if self.start_scores is None:
@@ -150,6 +159,18 @@ class GameCache:
                 return start
             self.start_scores = start
         return self.start_scores
+
+    def finds_layout(self, game: Game) -> dict[str, str]:
+        """Stage 5 (ABANDONED_LANDS.md 10): every find as laid out at creation, recomputed from the turn-0 state, the
+        seed and the salt (the layout reads no factions, so a provisional turn 1 gives the same one)."""
+        if self.layout is None:
+            raw = game.gdir.load_turn("states", 1)
+            if raw is None:
+                return {}
+            info = disc.journal_layout(game.ruleset, GameState.from_dict(raw), game.config["seed"],
+                                       secret_salt(game.config))
+            self.layout = dict((info or {}).get("finds") or {})
+        return self.layout
 
     def parts_at_start(self, game: Game) -> dict[str, dict[str, int]]:
         """Turn-0 score by source (non-default scoring), cached like `scores_at_start`."""
@@ -354,6 +375,8 @@ def _public_events(report: dict[str, Any], game: Game, state: GameState) -> list
     # no Shades, missions or captures ever
     events += [{"kind": "sabotage", "province": e.get("province"), "seats": []}
                for e in report.get("events", []) if e.get("kind") == "sabotage"]
+    # Abandoned lands (ABANDONED_LANDS.md 10): where a find went off and its kind, never its name
+    events += [dict(e) for e in public.get("discoveries", [])]
     return [_event_entry(e, game, state) for e in events]
 
 
@@ -428,13 +451,21 @@ def snapshot(game: Game, cache: GameCache, turn: int, level: str) -> dict[str, A
         # the end: the final score by source, the revealed objectives included (SCORING.md 9)
         parts, sc = state.result["score_parts"], dict(state.result.get("scores") or sc)
     conquest = rs.system("conquest")
-    statuses = cq.statuses_for(state) if conquest else {}
+    statuses = cq.statuses_for(state) if disc.statuses_active(rs) else {}
+    finds = disc.on(rs)
     provinces = []
     works_on = sc_.on(rs, "works")
     for pid, p in sorted(state.provinces.items()):
         entry: dict[str, Any] = {"id": pid, "owner": p.owner}
-        if pid in statuses:
-            entry["status"] = statuses[pid]      # public marks: occupied, ruined_until, ravaged_until
+        status = disc.public_status(p, statuses.get(pid), full or state.phase == GAME_OVER)  # a find's: if seen
+        if status:
+            entry["status"] = status      # public marks: occupied, ruined_until, ravaged_until
+        if finds:
+            entry.update(disc.province_json(rs, state, None, pid, full or state.phase == GAME_OVER))   # marks
+            found = state.discoveries.get(pid)
+            if found is not None and (full or state.phase == GAME_OVER):
+                # the full levels see the layout; the delayed spectator only after the game (ABANDONED_LANDS.md 10)
+                entry["discovery"] = {"id": found["id"], "state": found["state"], "known": list(found.get("known") or [])}
         if works_on and not full:
             # great works are public (SCORING.md 2.3, 9): the delayed level gets their map marks, ordinary
             # buildings stay hidden; the full levels see them in `buildings`/`building_now`
@@ -531,6 +562,15 @@ def snapshot(game: Game, cache: GameCache, turn: int, level: str) -> dict[str, A
             out["artifact_names"] = {a: d.name for a, d in rs.artifacts.items()}
     if rs.techs:
         out["techs_total"] = len(rs.techs)
+    if finds:
+        out["abandoned"] = list(state.abandoned)
+        out["discovery_names"] = {d: v.name for d, v in rs.discoveries.items()}     # the pool is public
+        out["discovery_kinds"] = {d: v.kind for d, v in rs.discoveries.items()}
+        if full:
+            # the whole layout as placed at creation with each find's state after this turn (hidden, site, pending,
+            # or spent once it went off or was chosen); the delayed spectator gets it with the full reveal after game_over (ABANDONED_LANDS.md 10)
+            out["finds_layout"] = {pid: {"id": fid, "state": (state.discoveries.get(pid) or {}).get("state", "spent")}
+                                   for pid, fid in sorted(cache.finds_layout(game).items())}
     if provisional:
         out["provisional"] = True
     if not in_progress and not provisional:

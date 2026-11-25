@@ -5,7 +5,7 @@
 These are the rules as the engine implements them: the vertical slice plus stage 2 (techs, the setup phase,
 factions and artifacts). The exact contracts are in the [slice specification](../SLICE.md) and the
 [stage-2 specification](../TECH_AND_SETUP.md) (both in Russian); the [full concept](../CONCEPT.md) (in Russian)
-describes the game the slice grows towards. Numbers below are the defaults of the `core` pack, version 0.4.0 (stage 3a: espionage and conquest, both on by default in `slice3`, `slice2` and `quad4`); a
+describes the game the slice grows towards. Numbers below are the defaults of the `core` pack, version 0.6.0 (espionage and conquest of stage 3a, the scoring of stage 4; both on by default in `slice3`, `slice2` and `quad4`; the Abandoned lands of stage 5 are described [below](#abandoned-lands-and-finds-stage-5)); a
 scenario or a pack can change them ([Content packs](modding.md)). The tables of units, buildings, techs, factions and
 artifacts are a snapshot: the match's own numbers are always in `rules(topic)` and `describe(id)` (see the end of
 this page).
@@ -162,7 +162,7 @@ unit. (A match on core 0.2.0, which has no techs, keeps one edge per move.)
 | `warehouse` | Склад | 20 alloy | 1 turn | +2 provisions; recruiting here 20% cheaper; needs Supply Routes |
 | `hq` | Штаб | 35 alloy | 2 turns | allows recruiting; province defense +0.1; +25% back on N2 cancels; needs Staff Litanies |
 | `monument` | Монумент Предела | 25 provisions + 10 alloy | 2 turns | great work: +3 points; one per seat |
-| `dream_spire` | Шпиль Сна | 150 provisions + 50 alloy | 4 turns | great work: +3 points; one per seat; not in a capital (forge, agri, waste, shrine) |
+| `dream_spire` | Шпиль Сна | 100 provisions + 60 alloy | 4 turns | great work: +7 points; one per seat; not in a capital (forge, agri, waste, shrine) |
 
 A province holds at most one building of each kind. Recruiting is possible only in a province with barracks (or a
 headquarters). The warehouse discount is counted per unit and rounded in the seat's favour (the unit price is rounded
@@ -438,17 +438,21 @@ line. `format=json` gives the same view as JSON.
   - **science**: 1 per tech researched by order, tier 1 or 2 (gifts of artifacts and start techs give 0), +1 per
     completed branch;
   - **great works**: Monument of the Verge (`monument`, 25 provisions + 10 alloy, 2 turns, +3, any province) and
-    Dream Spire (`dream_spire`, 150 provisions + 50 alloy, 4 turns, +3, not in a capital); one of each per seat;
+    Dream Spire (`dream_spire`, 100 provisions + 60 alloy, 4 turns, +7, not in a capital); one of each per seat;
     they score while ready in an own full province and pass with the province; their start and completion are
     public;
   - **war**: the price of the other seats' units killed in battle (half when defending), 1 point per 15 (the
     Growth: per 10), at most 3 from one rival and 5 in all; neutrals, starvation, revolts and retreat losses give nothing;
   - **secret objective**: one per seat, dealt at the start (hold two forges, six provinces, a province of another
     seat's start, a ready great work; on `mirror2`/`mirror3` also two agri worlds, four War or three Industry techs,
-    on `mirror4` two shrines; with three seats or more a rival's capital, or take the named rival's capital); +5 if
-    met at the end. Revealed only at game over.
+    on `mirror4` two shrines; with three seats or more a rival's capital, or take the named rival's capital); points
+    by difficulty if met at the end: easy +3 (a ready great work, three Industry techs, two shrines), medium +5, hard
+    +7 (a rival's capital, the named rival's capital). Revealed only at game over;
+  - **pact break**: −3 per pact the seat broke with a `"pact": "break"` move (on the last turn too; `leave_pact` costs
+    nothing); breaks are public, so everyone knows the penalty.
 - The turn score is not public (decision 24): a seat sees its own in full and only a lower bound «≥» of the others'
-  (the land it sees, the public great works); a spy's «Счётная книга» mission reads a rival's exact breakdown.
+  (the land it sees, the public great works, the pact-break penalty); a spy's «Счётная книга» mission reads a rival's
+  exact breakdown, its «Тайная цель» mission the rival's secret objective.
   `rules(topic="victory")` gives a match's numbers and its objective pool.
 - `blitz_test` and `blitz_spy` keep the old score: 1 point per province plus 3 per capital, own or captured; the
   others' score is also only the «≥» of what you see.
@@ -502,8 +506,12 @@ before. The numbers below are the defaults; a game's exact numbers are in `rules
 
 **Espionage.**
 - A Shade is a record of the seat, not a unit. Hiring, `{"kind": "hire_shade"}`, is actions only, only with one's own
-  full starting capital, one per turn, up to `spy.shades_max` (2); price and upkeep come from the pack (25 alloy,
-  1 provision per turn).
+  full starting capital, one per turn, up to `spy.shades_max` (2); price and upkeep come from the pack (20 alloy,
+  1 provision per turn). Every seat holds one Shade (`s1`) from the start for free (`spy.shades_free`, within the
+  limit); while it is idle, `get_state` shows a `ТЕНИ:` line in N1 and actions.
+- Core missions: Observe (`observe`), Ledger (`ledger`), Secret Objective (`secret`: the seat's objective exactly —
+  condition, points, met now; only with secret objectives; D1, 1–3 rounds, 2 provisions a round), Read Orders
+  (`read_orders`), Sabotage (`sabotage`).
 - A mission, `{"kind": "spy", "shade": "s1", "mission": "observe", "target": "P07", "rounds": 2}`: given in actions,
   its first round is this turn; given in N2 (1 CP), from the next turn. The whole term is reserved when given and is
   not refunded. `{"kind": "recall", "shade": "s1"}` ends a mission (in N2: 1 CP, this turn's strike is cancelled).
@@ -534,6 +542,54 @@ before. The numbers below are the defaults; a game's exact numbers are in `rules
 - `get_state` shows the tags `[оккуп. Ник]`, `[пепелище до хN]`, `[разорена]` and the sections `ОККУПАЦИЯ`,
   `ПРИТЯЗАНИЯ`, `ПОЛИТИКА`. Occupations and ruins score nothing.
 
+## Abandoned lands and finds (stage 5)
+
+The [stage-5 specification](../ABANDONED_LANDS.md) (in Russian) as amended by decision 25 of the
+[concept](../CONCEPT.md). The system is switched on by the scenario (`systems: {discoveries: true}`) or by the host
+(`dah game create --discoveries on|off`). While it is off there is no `discover` order (`NOT_AVAILABLE`), no rules
+section, no tag and no hash change. A match's own numbers and its pool of finds are in `rules(topic="discoveries")`
+and `describe(<find>)`.
+
+- **When.** A map start that no seat takes is Abandoned: its provinces are neutral and tagged `[заброш.]`, its
+  capital is ruins (`[руины]`) under a neutral guard (`[стража]`) that never moves or attacks. Whoever destroys the
+  guard and holds the ruins gets the scenario's reward once (resources, units). With every start taken there are no
+  Abandoned lands, and `rules(topic="discoveries")` says so.
+- **Reduced souls.** The scenario's `discoveries.souls` decides what the Abandoned land is worth at first: `ravage`
+  (ravaged on turns 1–3: no income, points count), `halve` (income ×0.5 for the whole match, tag `[доход ×0.5]`) or
+  `ashes` (ruined on turns 1–2: no income, no points, no building). Taking Abandoned land is a free, full capture (no
+  `dispose`); it scores as ordinary land, the ruins as a capital.
+- **Geography is not equalised.** The free corner goes to whoever is closest; nobody is compensated for being far.
+  Only the spread of finds over the Abandoned land itself is balanced (a budget per zone and parity of the number
+  of finds).
+- **Finds** lie hidden in the Abandoned provinces (never next to a start; how many is the scenario's `density`); their number is not told. A find
+  goes off once, when **any** army enters, even a single unit, before the battles; a Shade never sets it off. Kinds:
+  boons (resources, units, a passive artifact), hindrances (losses, neutrals, a status, a resource loss) and mixed
+  finds (a choice). Hindrances are serious: losses take the cheapest units first up to a share of the army's price
+  and at least a minimum number of units, so a small army can be wiped out whole; a sweep of single cheap units
+  through the Abandoned land is meant not to pay (the validator warns about a pool where it would).
+- **Entering together.** Each army takes a hindrance in full; boons are shared by army price; boon units arrive after
+  the battles (in the find's province if the seat holds it, else where the army came from). A wiped army does not
+  fight. Pact partners entering together share a boon, they do not double it.
+- **Mixed finds.** The entrants see the find; whoever holds the province after the battles gets the line
+  `НАХОДКА P16 «…»: wake (70% … / 30% …, EV 1.4) | leave (…); без приказа — leave. {"kind":"discover",…}` in
+  `get_state` and decides in the next turn with `{"kind": "discover", "province": "P16", "choice": "wake"}` (actions
+  or N2, 0 CP; one decision per find). Without the order the default choice applies. The choice is rolled at the
+  start of the resolution, before any movement; the army does not freeze, and moves out of the province that lack
+  units after a loss are cut down (`order_clipped`). Refusals: `NO_PENDING` (no choice of yours there), `BAD_CHOICE`
+  (with the list of choices).
+- **Lairs.** A hindrance may leave neutrals that grow every few turns up to a cap (`[логово n/cap]`); they never
+  attack. Whoever clears and holds the province gets the lair's reward.
+- **Fog.** Hidden finds are seen by nobody, the delayed spectator included, until the match ends. Observation
+  (`observe`) of an Abandoned province reveals its find without setting it off (the tag `[находка «…»]` then shows to
+  that seat only); on Abandoned land the place's C is `observe_mirrors` (2 by default), with or without a find, so
+  the Shade can be caught. Those who only see
+  the province learn the kind of a find that went off and its visible consequences, not its name or the gains. Read
+  orders shows a `discover` entry without its choice.
+- **Warnings and forecasts.** `validate_orders` and `submit_orders` warn about a move into an Abandoned province
+  the seat does not hold (for every such province, so the warning tells nothing about where finds lie). `estimate`
+  against a guard or neutrals works as against any visible army; its `note` says that a find is not part of the
+  forecast.
+
 ## The core content
 
 - Factions: the six above.
@@ -550,13 +606,25 @@ before. The numbers below are the defaults; a game's exact numbers are in `rules
 | `core:blitz_test` | `mirror3` | 6 | none (`covenant` only) | — / 5s / 5s / 5s | off / off |
 | `core:blitz_spy` | `mirror3` | 6 | none (`covenant` only) | — / 5s / 5s / 5s | on / on |
 | `core:blitz_score` | `mirror3` | 6 | 3 factions, artifact draft (3 offered) | 5s / 5s / 5s / 5s | on / on |
+| `core:blitz_finds` | `mirror3` | 6 | 3 factions, artifact draft (3 offered) | 5s / 5s / 5s / 5s | on / on |
 
 Scoring: `slice3`, `slice2`, `quad4` and `blitz_score` count all five sources with weight 1 and deal one secret
 objective; `blitz_test` and `blitz_spy` count land only. Great works are in `buildings/great_works.yaml`, objectives in
 `objectives/objectives.yaml`.
 
+Abandoned lands (stage 5): on in `slice3`, `quad4` and `blitz_finds`, and they work only with fewer players than the
+map has starts (`slice3` and `blitz_finds` for two, `quad4` for two or three); off in `slice2` (its map is always
+full), `blitz_test`, `blitz_spy` and `blitz_score`. The ruins' guard is 2 Assault and 2 Militia, the Treasury +45
+alloy, +25 provisions, +20 creed; «Souls reduced» is income ×0.5 for the whole match (`halve`, the winner of the A/B/C
+measurement); every Abandoned province past ring 1 but the ruins holds a find (`density: 1.0`). The pool is 17 finds in
+`discoveries/discoveries.yaml`: 9 boons (the three richest under a guard of neutrals: the reward goes to whoever
+destroys them and takes the province), 6 hindrances (losses with a minimum of 2-3 units, so a lone unit or a pair
+dies whole, tolls on every entrant, neutrals, Ashes, a lair) and 2 mixed. On average a find is worth less than zero to one or two Militia and more than
+zero to an army of 5.
+
 `dah game create --limits`, `--turns` and the setup flags override the scenario's values for one match;
-`--espionage on|off` and `--conquest on|off` switch the stage-3 systems, `--scoring
+`--espionage on|off` and `--conquest on|off` switch the stage-3 systems, `--discoveries on|off` the Abandoned
+lands of stage 5 (`--discovery-extra N`: finds also in N ordinary neutral provinces), `--scoring
 territory=1,science=1,works=0,war=1,objectives=1` sets the source weights (a source not named: 0), and
 `--objectives N` the number of secret objectives dealt per seat.
 
@@ -571,7 +639,8 @@ With `topic` it returns one section in full, built from the match's content: `tu
 setup phase), `resources`, `provinces`, `units`, `abilities` (unit abilities), `buildings`, `orders`, `p2` (or
 `cp`), `combat` (or `resolution`), `victory` (or `score`, `scoring`, `objectives`, `works`, `очки`, `цели`,
 `счёт`, `стройки`: the formulas with the match's numbers, the great works, the objective pool, the score under fog),
-`pacts` (or `diplomacy`, `gifts`), `spying` (or `espionage`, `spies`,
+`pacts` (or `diplomacy`, `gifts`), `discoveries` (or `находки`, `abandoned`, `руины`, `логово`: only while the
+match has Abandoned lands; the core then has one line ЗАБРОШЕННЫЕ), `spying` (or `espionage`, `spies`,
 `intel`, `feint`), `conquest` (or `capture`, `occupation`, `dispose`, `claims`), `fog` (or `visibility`),
 `messages`, `techs` (the whole tree: branches, tiers, costs, requirements, effects), `factions` (bonuses,
 drawbacks, start, unique content), `artifacts` (every artifact with power, cost and effects). Only the topics the

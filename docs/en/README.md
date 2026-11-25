@@ -15,12 +15,13 @@ Getting started:
 Playing:
 
 - [Game rules](rules.md): turn phases (N1, A, N2, resolution), command points, orders, combat and `estimate`,
-  economy, fog of war, messages, victory and scoring, the `core` content
+  economy, fog of war, messages, victory and scoring, espionage and conquest, Abandoned lands and finds, the `core`
+  content
 
 Extending and integrating:
 
-- [Content packs](modding.md): pack layout, entity fields, the six effect types, stats, modifier order,
-  validation, loading packs
+- [Content packs](modding.md): pack layout, entity fields, effect types, stats, modifier order, the content of
+  stages 2–5 (techs, espionage, scoring, `discoveries/*.yaml`), validation, loading packs
 - [HTTP API](http-api.md): every `/v1` route for players, the host routes for `dah-waker`, the admin route
 
 How it works inside:

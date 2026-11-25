@@ -18,6 +18,7 @@ mymod/
   resources/  province_types/  units/  buildings/  factions/  maps/  scenarios/
   branches/  techs/  artifacts/  lore/      # stage 2 (optional)
   objectives/                             # stage 4 (optional)
+  discoveries/                            # stage 5 (optional)
 ```
 
 - Every `*.yaml` file in a type folder is read. A file holds one entity or a list of entities.
@@ -80,7 +81,8 @@ Details:
 
 ## Effects
 
-There are eight effect types (the six below plus `unlock` and `grant_tech`, see Stage-2 content). Each one is
+There are twelve effect types (the six below, `unlock` and `grant_tech` of Stage-2 content, and `grant_artifact`,
+`lose_units`, `spawn_neutral`, `set_status` of finds, see Stage-5 content). Each one is
 allowed only in some places.
 
 | Effect | Parameters | Where |
@@ -202,10 +204,12 @@ scenario with both systems off, hashes and plays as before stage 3.
   branch hides its techs), and `modify` lines aimed at the system's stats are dropped from techs, artifacts,
   buildings and factions.
 - **`espionage/*.yaml`** (needed when espionage is on): an optional `config` — `shade {name, cost, upkeep}` and
-  `ward {cost}` (3b) — and `missions: [...]`. A mission has `id`, `name`, `behavior` (`observe_province`,
-  `read_ledger`, `read_orders`, `sabotage`), `target` (`province`, `owned_province`, `seat`), `difficulty`,
-  `rounds: [min, max]`, `requires: {whisper, tech?}`, `cost` (once), `cost_per_round`, `params` (sabotage:
-  `deny_fortify`, `defense_mul`, `income_mul`), `description`.
+  `ward {cost}` (3b), `shade.free` (0..3: idle Shades every seat holds from the start, within the limit; `core`
+  0.6.0 sets 1) — and `missions: [...]`. A mission has `id`, `name`, `behavior` (`observe_province`,
+  `read_ledger`, `read_objective`, `read_orders`, `sabotage`), `target` (`province`, `owned_province`, `seat`),
+  `difficulty`, `rounds: [min, max]`, `requires: {whisper, tech?}`, `cost` (once), `cost_per_round`, `params`
+  (sabotage: `deny_fortify`, `defense_mul`, `income_mul`), `requires_system` (e.g. `scoring.objectives` for
+  `read_objective`: without the system the mission does not exist), `description`.
 - **`dispositions/*.yaml`** (needed when conquest is on): the fates of a captured province — `id`, `name`,
   `behavior` (`annex`, `raze` with `params.ruin_turns`, `raid` with `params.ravage_turns`, `release`), `cost`,
   `loot`, `description`.
@@ -213,7 +217,7 @@ scenario with both systems off, hashes and plays as before stage 3.
   `core`).
 - **Stats** (only while their system is on): `spy.*` (`spy.whisper`, `spy.mirrors`, `spy.shades_max`,
   `spy.rounds_bonus`, `spy.detect.army`, `spy.attribution.base`, `spy.mission.<id>.difficulty|max_rounds`,
-  `spy.shade.cost|upkeep.<res>`, ...), `province.mirrors`, `p2.cost.spy`, `p2.cost.recall`, `feint.cp_cost`,
+  `spy.shade.cost|upkeep.<res>`, `spy.shades_free`, ...), `province.mirrors`, `p2.cost.spy`, `p2.cost.recall`, `feint.cp_cost`,
   `disposition.<id>.cost_mul|loot_mul`, `conquest.claim_turns`, `conquest.claim_bonus`, `conquest.loot_cooldown`. The
   full table with ranges is section 1.2 of the specification; `rules(topic="spying")` and `rules(topic="conquest")`
   show a match's numbers.
@@ -236,16 +240,80 @@ only (1 per province, +3 per capital) and hashes as before.
   `build_turns` < 2.
 - **`objectives/*.yaml`**: `id`, `name`, `kind` (engine kinds: `hold_type {type, count}`, `hold_count {count}`,
   `hold_foreign {count}`, `capital_other {count}`, `techs_branch {branch, count}`, `great_work {count}`,
-  `rival_capital_taken` — targets a rival seat), `params`, `points` (1..8), `maps` (empty: any), `players {min,
-  max}`, `requires_system`, `description`, `lore`. A scenario with objectives on sets `objectives: {dealt: 1}`
+  `rival_capital_taken` — targets a rival seat), `params`, `points` (1..8), `difficulty` (optional: `easy`,
+  `medium`, `hard`; points must grow with the tier, a missing tier next to set ones is a warning), `maps` (empty:
+  any), `players {min, max}`, `requires_system`, `description`, `lore`. A scenario with objectives on sets `objectives: {dealt: 1}`
   (optionally `pool: [...]`; `offer` must equal `dealt`).
 - **Validation of objectives** (every scenario with objectives on, every seat count 2..`max_players` of its map, every
   admitted faction): the pool after the `maps`/`players`/`requires_system` filters holds at least max(3, `dealt`)
   objectives; none is met at any start (after start effects); each can be met (enough provinces of the type, techs of
   the branch researchable by every faction, a great work every faction can build on the map, ...).
 - **Stats** (only while their source is on): `score.territory.province|capital`, `score.science.tier1..4`,
-  `score.science.branch`, `score.war.per_point|cap_per_victim|cap|defense_pct`. `rules(topic="victory")` shows a
+  `score.science.branch`, `score.war.per_point|cap_per_victim|cap|defense_pct`, `score.betrayal.per_break` (0..10,
+  points lost per pact the seat broke; works under any non-default scoring). `rules(topic="victory")` shows a
   match's numbers.
+
+## Stage-5 content: Abandoned lands and finds
+
+The authoritative description is sections 2–5, 8, 9 and 11 of the [stage-5 specification](../ABANDONED_LANDS.md)
+(in Russian), as amended by decision 25 of the [concept](../CONCEPT.md) and its «Реализация: уточнения» section.
+Everything is optional: with the system off (no `systems: {discoveries: true}` in the scenario and no
+`--discoveries on`), the folder `discoveries/`, the scenario's `discoveries` knobs and the maps' `rotation` are left
+out of the ruleset and its hash.
+
+- **`discoveries/*.yaml`** — finds:
+
+```yaml
+- id: sleeping_golem
+  name: {ru: Спящий голем, en: Sleeping Golem}
+  kind: mixed                 # boon | hindrance | mixed
+  rarity: common              # boon/mixed: common|uncommon|rare; hindrance: minor|major
+  weight: 3                   # optional, 1..20; default: the rarity's weight
+  triggers: [army]            # `shade` gives the warning «ignored in this stage»
+  players: {min: 2}           # optional, like objectives
+  requires_system: conquest   # optional
+  description: {ru: "…", en: "…"}
+  choices:                    # mixed only; boon/hindrance have `effects: [...]` instead
+    - id: wake
+      label: {ru: Разбудить, en: Wake}
+      outcomes:               # p sum to 1
+        - {p: 0.7, effects: [{effect: grant_units, unit: walker, count: 2, where: here}]}
+        - {p: 0.3, effects: [{effect: lose_units, frac: 0.3, min: 2}]}
+    - {id: leave, label: {ru: Не трогать, en: Leave}, effects: []}
+  default_choice: leave
+```
+
+- **Effects of finds.** `add_resource {resource, amount}` (a boon is shared by army price; a negative amount is a
+  hindrance every entering seat pays in full, never below 0), `grant_units {unit, count, where: here}` (they arrive
+  after the battles), `grant_building {building, where: here}`, `grant_artifact {artifact}` (only an ordinary
+  artifact whose effects are all passive; the most expensive army's seat gets it; a seat that already has it gets
+  15 × its power in the build resource), `lose_units {frac, min?}` (each army: cheapest units first until `frac` of
+  its price and at least `min` units; 0..20), `spawn_neutral {units, grow? {every, add, cap}, reward? [...]}` (a
+  guard or a lair; not inside a choice), `set_status {status: ravaged|ruined, turns}`. `where: here` is refused
+  outside finds. A reward (`spawn_neutral.reward`, the scenario's `garrison.reward`) takes only `add_resource > 0`
+  and `grant_units`.
+- **Power.** The author does not write it: the validator computes `power` against a reference army (5 units of
+  price 12; 1 P = 15 resources = a unit price of 20) and `power_small` against 1 and 2 of the pack's cheapest common
+  unit; a mixed find gets the EV of each choice (its `power` is the best EV) and `risk` (best minus worst outcome).
+  `describe`, `rules(topic="discoveries")` and `dah pack validate` show them. **Errors:** power outside its rarity's
+  range (boon common 1.0–2.5, uncommon 2.5–4.0, rare 4.0–6.0; hindrance minor −1.5…−0.5, major −3.0…−1.5; mixed as
+  boons, common from 0.5), a boon ≤ 0 or a hindrance ≥ 0, p not summing to 1, a `default_choice` not among the
+  choices, an effect outside its context, a non-passive or faction-unique artifact. **Warnings:** the `shade`
+  trigger; the risk lever (some choice must have a higher EV than the default, and the default must be the least
+  risky); **scout sweep pays** — the weight-averaged `power_small` of the scenario's pool, or of one of its rings,
+  is ≥ 0 for a 1- or 2-unit army. Any army sets a find off, so hindrances must be serious enough (a high `min` of
+  `lose_units`, a resource loss) that sweeping with single cheap units loses on average.
+- **The scenario's `discoveries` knobs** (all optional): `souls` (`ravage` — ravaged 3 turns, `halve` — income ×0.5
+  for good, `ashes` — ruined 2 turns; `ravaged_turns`, `ruined_turns`, `income_mul` next to it override the preset),
+  `garrison {units, reward}` (the ruins' guard and its reward), `density` (0..1, share of the Abandoned candidates
+  that get a find; 0.67), `extra` (0..20: candidates from ordinary neutral provinces too), `rings` (`{ring: [rarity
+  tokens]}`, ring ≥ 2 — ring 1 next to a start stays empty; tokens `common`, `uncommon`, `rare`, `boon`, `minor`,
+  `major`, `hindrance`, `mixed`, `mixed_common`, …), `w` (`{ring: weight}` of the fairness budget), `max_ring` (3),
+  `fair_tolerance` (1.0), `tries` (64), `observe_mirrors` (0..5, C of an Observation of Abandoned land; 2),
+  `fair_mirror` (copy finds over the map's rotation), `ruins_find` (false), `pool` (a subset of find ids). An unknown
+  knob is an error.
+- **Maps** may set `rotation: {province: province}`: a permutation that keeps the edges and steps start *i* to start
+  *i+1*; `fair_mirror` uses it. It is hashed only with the system on.
 
 ## Validation
 

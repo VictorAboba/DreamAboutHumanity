@@ -10,6 +10,7 @@ from itertools import count as _counter
 from typing import Any, Callable, Iterable, Mapping
 
 from . import conquest as cq
+from . import discoveries as disc
 from . import espionage as esp
 from .content import Ruleset, StatKey
 from .diplomacy import pact_between
@@ -32,7 +33,7 @@ P2_LOCKED_NEW = {"recruit": "найм и стройка в П2 запрещен�
                  "hire_shade": "Тень нанимают только в фазе Д", "ward": "заставу ставят только в фазе Д"}
 P2_LOCKED_EDIT = {"research": "исследование выбирают только в фазе Д"}
 P2_LOCKED_RECON = "эту запись уже исполнил разведсрез (конец Д): в П2 её не изменить и не отменить"
-SYSTEM_NAMES = {"espionage": "шпионаж", "conquest": "завоевание"}
+SYSTEM_NAMES = {"espionage": "шпионаж", "conquest": "завоевание", "discoveries": "Заброшенные земли"}
 
 NOT_ADJACENT = "NOT_ADJACENT"
 NOT_OWNER = "NOT_OWNER"
@@ -62,6 +63,9 @@ NO_RECIPIENT = "NO_RECIPIENT"
 STAGE3_REASONS = (SHADE_BUSY, SHADE_LIMIT, TOO_MANY_MISSIONS, MISSION_LOCKED, BAD_TARGET, BAD_ROUNDS, NO_CAPITAL,
                   NOT_OCCUPIED, OCCUPIED, RUINED, NO_RECIPIENT)
 CONQUEST_REASONS = (BAD_TARGET, NOT_OCCUPIED, OCCUPIED, RUINED, NO_RECIPIENT)
+# stage 5 (ABANDONED_LANDS.md 8): the `discover` order
+NO_PENDING, BAD_CHOICE = disc.NO_PENDING, disc.BAD_CHOICE
+DISCOVERY_REASONS = disc.REASONS
 
 
 def recon_consumed(order: Order) -> bool:
@@ -310,6 +314,7 @@ FIELD_ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
     "spy": {"shade": ("shade_id", "spy"), "mission": ("mission_id", "type"), "target": ("province", "seat", "player"),
             "rounds": ("turns", "duration", "term")},
     "recall": {"shade": ("shade_id", "spy")},
+    "discover": {"choice": ("option", "variant", "decision"), "province": ("target", "province_id")},
 }
 
 
@@ -361,6 +366,8 @@ def parse_order(ruleset: Ruleset, data: Mapping[str, Any], order_id: str, phase:
         return _dispose_order(ruleset, data, order_id, added)
     if kind == "policy":
         return _policy_order(ruleset, data, order_id, added)
+    if kind == "discover":
+        return _discover_order(data, order_id, added)
     if kind == "hire_shade":
         return Order(order_id, kind, added)
     if kind == "spy":
@@ -451,6 +458,15 @@ def _dispose_order(ruleset: Ruleset, data: Mapping[str, Any], order_id: str, add
             raise OrderRejected(INVALID, f"to — место или ник получателя, получено {_shown(to)}")
     return Order(order_id, "dispose", added, province=province, disposition=did,
                  to=to.strip() if isinstance(to, str) else None)
+
+
+def _discover_order(data: Mapping[str, Any], order_id: str, added: str) -> Order:
+    province = _require_str(data, "province")
+    choice = data.get("choice")
+    if not isinstance(choice, str) or not choice.strip():
+        raise OrderRejected(INVALID, f"поле 'choice' — вариант находки, получено {_shown(choice)}. "
+                                     f"Пример: {disc.DISCOVER_EXAMPLE}")
+    return Order(order_id, "discover", added, province=province.strip(), choice=choice.strip())
 
 
 def _policy_order(ruleset: Ruleset, data: Mapping[str, Any], order_id: str, added: str) -> Order:
@@ -577,6 +593,10 @@ def _rules_problem(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrde
     if order.kind in ("hire_shade", "spy", "recall"):
         problem = esp.order_problem(state, ruleset, seat, order, others, key)
         return problem or _resources_problem(state, ruleset, seat, book, order, others, key)
+    if order.kind == "discover":
+        if any(o.kind == "discover" and o.province == order.province for o in others):
+            return INVALID, f"выбор в {order.province} уже задан (одна запись на находку): поправь или отмени его"
+        return disc.discover_problem(state, ruleset, seat, order)
     if order.kind in ORDER_SYSTEMS:
         return NOT_AVAILABLE, f"приказ {order.kind} пока не поддерживается"
     target = order.src if order.kind == "move" else order.province
@@ -699,7 +719,13 @@ def _check(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders, orde
     if priced > cp_left(state, seat, book):
         return Check(False, NOT_ENOUGH_CP, f"нужно {priced} ОК, осталось {cp_left(state, seat, book)}",
                      cp_cost=priced, order=order)
-    return Check(True, cp_cost=priced, order=order, warning=pact_warning(state, seat, order))
+    return Check(True, cp_cost=priced, order=order, warning=move_warnings(state, ruleset, seat, order))
+
+
+def move_warnings(state: GameState, ruleset: Ruleset, seat: str, order: Order) -> str | None:
+    """The warnings of an accepted order: a pact bounce or breach, a possible find in an Abandoned province."""
+    found = [w for w in (pact_warning(state, seat, order), disc.move_warning(state, ruleset, seat, order)) if w]
+    return "; ".join(found) or None
 
 
 def pact_warning(state: GameState, seat: str, order: Order) -> str | None:
@@ -838,12 +864,12 @@ def amend_order(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders,
         patch = {k: v for k, v in patch.items() if v is not None or k == "disposition"}
         patch = {k: v for k, v in patch.items() if k == "disposition" or k not in FIELD_ALIASES["policy"]["disposition"]}
     else:
-        if old.kind in ("dispose", "spy", "recall"):
+        if old.kind in ("dispose", "spy", "recall", "discover"):
             patch = {k: v for k, v in _with_aliases(old.kind, patch).items()
                      if k not in {a for alts in FIELD_ALIASES[old.kind].values() for a in alts}}
         patch = {k: v for k, v in patch.items() if v is not None}     # null-filling clients: null = not changed
     allowed = {"move": {"units", "to", "pact", "feint"}, "recruit": {"count"}, "research": {"tech"},
-               "dispose": {"disposition", "to"}, "policy": {"disposition"}}.get(old.kind, set())
+               "dispose": {"disposition", "to"}, "policy": {"disposition"}, "discover": {"choice"}}.get(old.kind, set())
     if phase == P2 and recon_consumed(old):
         return EditResult(False, book, PHASE_LOCKED, P2_LOCKED_RECON)
     accepted = allowed | ({"unit", "count"} if old.kind == "move" else set())   # move: the flat form too
@@ -870,6 +896,9 @@ def amend_order(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders,
             new = normalize_order(state, new)
         elif old.kind == "policy":
             new = replace(old, disposition=_policy_order(ruleset, patch, old.id, old.phase_added).disposition)
+        elif old.kind == "discover":
+            new = replace(old, choice=_discover_order({"province": old.province, **patch}, old.id,
+                                                      old.phase_added).choice)
         else:
             new = replace(old, count=_positive_int(patch["count"], "count"))
     except OrderRejected as exc:
@@ -898,7 +927,7 @@ def amend_order(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders,
         return EditResult(False, book, NOT_ENOUGH_CP, f"нужно {cost} ОК, осталось {cp_left(state, seat, book)}",
                           cost)
     work.cp_spent += cost
-    return EditResult(True, work, cp_cost=cost, order=new, warning=pact_warning(state, seat, new))
+    return EditResult(True, work, cp_cost=cost, order=new, warning=move_warnings(state, ruleset, seat, new))
 
 
 def _amend_price(ruleset: Ruleset, faction: StatKey, old: Order, new: Order) -> tuple[int, bool]:

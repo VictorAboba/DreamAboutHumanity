@@ -63,3 +63,5 @@ starts:
   - {capital: P06, provinces: [P07, P08, P09]}
   - {capital: P11, provinces: [P12, P13, P14]}
   - {capital: P16, provinces: [P17, P18, P19]}
+# rotation (stage 5, fair_mirror): 90 degrees clockwise, start 1 -> 2 -> 3 -> 4 -> 1; the centre stays.
+rotation: {P01: P06, P02: P07, P03: P08, P04: P09, P05: P10, P06: P11, P07: P12, P08: P13, P09: P14, P10: P15, P11: P16, P12: P17, P13: P18, P14: P19, P15: P20, P16: P01, P17: P02, P18: P03, P19: P04, P20: P05, P21: P21}

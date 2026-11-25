@@ -1,8 +1,10 @@
 # Espionage of core 0.4.0 (docs/SPY_AND_CONQUEST.md 2.2, section 5). Only while the scenario (or the host) turns
-# espionage on. The Shade is dear on purpose (decision 22): a caught Shade is lost for good, so 25 alloy (two or three
-# units, or two mines at the start) makes a loss felt.
+# espionage on. The Shade is dear on purpose (decision 22): a caught Shade is lost for good, so a loss is felt.
+# Core 0.6.0 (decision 26, measurement m7: four agents hired no Shade at all): a Shade costs 20 alloy (was 25) and
+# every seat holds one from the start for free (`free`, counted in the Shade limit); the new mission `secret` reads
+# what talk cannot give, the target's secret objective.
 config:
-  shade: {name: {ru: Тень, en: Shade}, cost: {alloy: 25}, upkeep: {provisions: 1}}
+  shade: {name: {ru: Тень, en: Shade}, cost: {alloy: 20}, upkeep: {provisions: 1}, free: 1}
   ward: {cost: {alloy: 5}}     # Застава, stage 3b
 missions:
   - id: observe
@@ -25,6 +27,19 @@ missions:
     description: >-
       Свободные запасы места (интервалы), изученные технологии, активное исследование и прогресс, артефакты, Шёпот и
       Зеркала цели, число её Теней.
+  - id: secret
+    name: {ru: Тайная цель, en: Secret Objective}
+    behavior: read_objective
+    target: seat
+    difficulty: 1                # as the ledger: against a capital with an army 55/60/65% found, 22/18/14% caught
+                                 # (D2 lost 44% of the bots' Shades on it in a trial run); the price is twice the ledger's
+    rounds: [1, 3]
+    requires: {whisper: 1}
+    cost_per_round: {provisions: 2}
+    requires_system: scoring.objectives
+    description: >-
+      Тайная цель места: название, условие, очки и выполнена ли сейчас (на конец Д). Цель не меняется до конца
+      партии: одного донесения хватит.
   - id: read_orders
     name: {ru: Чтение приказов, en: Read Orders}
     behavior: read_orders

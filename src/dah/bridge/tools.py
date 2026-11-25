@@ -22,9 +22,11 @@ _ORDER_ITEM = {
                    "units {юнит: число} или несколько приказов",
     "properties": {
         "kind": {"type": "string", "enum": ["move", "recruit", "build", "fortify", "research", "dispose", "policy",
-                                            "hire_shade", "spy", "recall"],
+                                            "hire_shade", "spy", "recall", "discover"],
                  "description": "dispose/policy — только с завоеванием, hire_shade/spy/recall и feint — только со "
-                                "шпионажем (rules покажет разделы ЗАВОЕВАНИЕ и ШПИОНАЖ)"},
+                                "шпионажем, discover {province, choice} — выбор смешанной находки, только с Заброшенными "
+                                "землями (rules покажет разделы "
+                                "ЗАВОЕВАНИЕ, ШПИОНАЖ, ЗАБРОШЕННЫЕ)"},
         "from": {"type": "string", "description": "move: откуда (P01)"},
         "to": {"type": "string", "description": "move: куда, соседняя провинция (P04); dispose с освобождением: "
                                                 "ник получателя"},
@@ -46,10 +48,12 @@ _ORDER_ITEM = {
                         "description": "dispose/policy: судьба провинции — ID или название (subjugate, raze, raid, "
                                        "release; список — rules(topic=\"conquest\")); policy: null — без политики"},
         "shade": {"type": ["string", "integer"], "description": "spy/recall: Тень (\"s1\" или 1) из list_spies"},
-        "mission": {"type": "string", "description": "spy: миссия — ID или название (observe, ledger, read_orders, "
+        "mission": {"type": "string", "description": "spy: миссия — ID или название (observe, ledger, secret, read_orders, "
                                                      "sabotage; список — rules(topic=\"spying\"))"},
         "target": {"type": "string", "description": "spy: цель — провинция (P07) или ник игрока, по миссии"},
         "rounds": {"type": "integer", "minimum": 1, "description": "spy: срок задания в раундах (по одному за ход)"},
+        "choice": {"type": "string", "description": "discover: вариант смешанной находки из строки НАХОДКА "
+                                                    "(province — её провинция)"},
     },
     "required": ["kind"],
 }
@@ -78,14 +82,16 @@ _PATCH = {"type": "object",
                          "feint": {"type": "boolean", "description": "move: false — ложную запись сделать настоящей "
                                                                      "(в П2 — как новая атака)"},
                          "tech": {"type": "string", "description": "research: другая технология"},
+                         "choice": {"type": "string", "description": "discover: другой вариант находки"},
                          "pact": {"type": "string", "enum": ["honor", "break"],
                                   "description": "move: honor или break (в П2 honor→break стоит как новая атака)"}}}
 RESEARCH = '{"kind": "research", "tech": "deep_drilling"}'
 _ORDERS_HINT = (f" Плоская форма move: {FLAT_MOVE}; исследование: {RESEARCH}; если вложенные объекты теряются — "
                 "передай orders одной JSON-строкой.")
 _LIST_OR_STRING = {"anyOf": [{"type": "array", "items": {"type": "string"}}, {"type": "string"}]}
-RULE_TOPICS = ("turn, setup, units, buildings, orders, p2, combat, pacts, spying, conquest, fog, messages, techs, "
-               "factions, artifacts, abilities, resources, provinces, victory (очки, стройки, тайные цели)")
+RULE_TOPICS = ("turn, setup, units, buildings, orders, p2, combat, pacts, spying, conquest, discoveries, fog, "
+               "messages, techs, factions, artifacts, abilities, resources, provinces, victory (очки, стройки, тайные "
+               "цели)")
 DISPOSE = '{"kind": "dispose", "province": "P07", "disposition": "subjugate"}'
 SPY = '{"kind": "spy", "shade": "s1", "mission": "observe", "target": "P07", "rounds": 2}'
 SPY_ONLY = " Только в партиях со шпионажем."
@@ -135,14 +141,16 @@ TOOLS: tuple[ToolSpec, ...] = (
                                "description": "true — всё дерево с закрытыми технологиями и требованиями"}})),
     ToolSpec("describe", "Полное описание любого контента партии по ID или названию: юнит, здание, технология, "
                          "артефакт, фракция, ветка, ресурс, тип провинции, тайная цель пула (что нужно и сколько "
-                         "очков), великая стройка (очки, где строить). Пример: describe(id=\"throne_warden\").",
+                         "очков), великая стройка (очки, где строить), находка (эффекты, шансы, сила, EV вариантов). Пример: "
+                         "describe(id=\"throne_warden\").",
              _schema({"id": {"type": "string", "description": "ID (assault, core:assault) или название (можно начало)"}}, ["id"])),
     ToolSpec("wait_phase", "Ждать смены фазы (до max_seconds, по умолчанию 45).",
              _schema({"max_seconds": {"type": "integer", "minimum": 1, "maximum": 55, "default": 45}})),
     ToolSpec("get_state", "Состояние твоей державы и видимой карты. Без аргументов — всё, со строкой «Счёт:» (твой "
                           "счёт с разбивкой, у соперников — известная нижняя граница «≥», твоя тайная цель и "
-                          "выполнена ли она сейчас; после партии — «Итог:» всех); since_turn=N — только изменения с "
-                          "хода N (обычно прошлый ход; 0 — всё). Пример: get_state(since_turn=2).",
+                          "выполнена ли она сейчас; после партии — «Итог:» всех), строками НАХОДКА (смешанная "
+                          "находка ждёт приказа discover) и ТЕНИ (свободная Тень); since_turn=N — только изменения "
+                          "с хода N (обычно прошлый ход; 0 — всё). Пример: get_state(since_turn=2).",
              _schema({"since_turn": {"type": "integer", "minimum": 0,
                                      "description": "Ход 1..текущий: показать только изменения с него; 0 или без "
                                                     "него — всё состояние"},
@@ -150,7 +158,8 @@ TOOLS: tuple[ToolSpec, ...] = (
                                  "description": "text (коротко, по умолчанию) или json"}})),
     ToolSpec("list_orders", "Твои поданные приказы, их хэш и остаток ОК.", _schema()),
     ToolSpec("validate_orders", "Проверить приказы без подачи (в любой фазе, в П1 — как будто сейчас Д): причина "
-                                "отказа, цена в ОК, предупреждения (ход в провинцию союзника по пакту вернётся)."
+                                "отказа, цена в ОК, предупреждения (ход в провинцию союзника по пакту вернётся; вход в "
+                                "Заброшенную провинцию может запустить находку)."
                                 + _ORDERS_HINT,
              _schema({"orders": _ORDERS}, ["orders"])),
     ToolSpec("submit_orders", "Подать приказы — только в фазе Д (в П2 — append за ОК; в П1 нельзя, только "
@@ -162,7 +171,7 @@ TOOLS: tuple[ToolSpec, ...] = (
              _schema({"id": _ID}, ["id"])),
     ToolSpec("amend_order", "Изменить приказ (в Д бесплатно, в П2 стоит ОК; в П1 нельзя): у move — юниты (плоско "
                             "unit+count или units), to, pact и/или feint, у recruit — count, у dispose — "
-                            "disposition и/или to, у policy — disposition. Пример: amend_order(id=\"o3\", "
+                            "disposition и/или to, у policy — disposition, у discover — choice. Пример: amend_order(id=\"o3\", "
                             "patch={\"unit\": \"assault\", \"count\": 1}); patch можно передать одной JSON-строкой.",
              _schema({"id": _ID, "patch": _PATCH}, ["id", "patch"])),
     ToolSpec("estimate", "Прогноз боя: вероятность победы атакующего и средние потери сторон (200 прогонов). "

@@ -68,12 +68,18 @@ def _stage3_goal_lines(config: dict[str, Any]) -> list[str]:
     on = config.get("systems") or {}
     lines = []
     if on.get("espionage"):
-        lines.append("В партии есть шпионаж: Тени (приказы hire_shade, spy, recall; dah.rules(topic=\"spying\")). "
+        lines.append("В партии есть шпионаж: Тени (приказы hire_shade, spy, recall; свободную Тень покажет строка "
+                     "ТЕНИ в get_state; dah.rules(topic=\"spying\")). "
                      "Донесения разведсреза приходят в начале П2: dah.get_intel(), Тени — dah.list_spies(), шансы "
                      "задания — dah.estimate_mission().")
     if on.get("conquest"):
         lines.append("В партии есть завоевание: отнятая у игрока провинция — оккупация, её судьбу решают приказы "
                      "dispose и policy (dah.rules(topic=\"conquest\"); разделы ОККУПАЦИЯ, ПРИТЯЗАНИЯ в get_state).")
+    if on.get("discoveries"):
+        lines.append("В партии есть Заброшенные земли, если мест меньше, чем стартов карты (метки [заброш.], "
+                     "[руины] в get_state): вход любой армии запускает скрытую находку — плюшку или помеху (помеха "
+                     "может стереть мелкую армию целиком); выбор смешанной — приказ discover по строке НАХОДКА; руины "
+                     "охраняет стража с наградой (dah.rules(topic=\"discoveries\")).")
     return lines
 
 
@@ -90,8 +96,10 @@ def _victory_goal_line(config: dict[str, Any]) -> str:
     names = " + ".join(SCORE_NAMES[src] + (f" ×{weights[src]}" if weights[src] != 1 else "")
                        for src in SCORE_NAMES if weights.get(src))      # the config on disk has sorted keys
     where = "dah.get_setup() и dah.get_state()" if config.get("setup") else "dah.get_state()"
-    secret = (f" Твоя тайная цель — в {where} (выполнена ли сейчас); её очки добавятся в конце, чужие цели тайные."
-              if weights.get("objectives") else "")
+    spy = (" (узнать чужую можно Тенью, миссия secret)"
+           if (config.get("systems") or {}).get("espionage") else "")
+    secret = (f" Твоя тайная цель — в {where} (выполнена ли сейчас); её очки добавятся в конце, чужие цели тайные"
+              f"{spy}." if weights.get("objectives") else "")
     return (f"Цель игры: после хода {config['turn_limit']} иметь больший итог очков: {names} (числа — "
             "dah.rules(topic=\"victory\")), или остаться последним живым. Свой счёт с разбивкой — строка «Счёт:» в "
             f"dah.get_state(); чужой виден только как нижняя граница «≥».{secret}")
@@ -208,7 +216,9 @@ def cmd_game_create(args: argparse.Namespace) -> int:
                          phase_limits=limits or None, turn_limit=args.turns, pack_dirs=args.packs,
                          artifacts=args.artifacts, artifact_offer=args.artifact_offer,
                          artifact_points=args.artifact_points,
-                         systems={"espionage": _switch(args.espionage), "conquest": _switch(args.conquest)},
+                         systems={"espionage": _switch(args.espionage), "conquest": _switch(args.conquest),
+                                  "discoveries": _switch(args.discoveries)},
+                         discoveries={"extra": args.discovery_extra} if args.discovery_extra is not None else None,
                          scoring=parse_scoring(args.scoring) if args.scoring else None, objectives=args.objectives,
                          objectives_salt=secrets.randbits(63))
     gdir, keys = init_game_dir(args.games_dir, config)
@@ -223,7 +233,7 @@ def cmd_game_create(args: argparse.Namespace) -> int:
         print(f"Фаза старта: {config['phase_limits']['setup']} с; артефакты — {mode}; уникальные фракции: "
               f"{'да' if st['unique_factions'] else 'нет'}.")
     if config.get("systems"):
-        names = {"espionage": "шпионаж", "conquest": "завоевание"}
+        names = {"espionage": "шпионаж", "conquest": "завоевание", "discoveries": "Заброшенные земли"}
         print("Системы: " + ", ".join(f"{names.get(k, k)} {'вкл' if v else 'выкл'}"
                                       for k, v in config["systems"].items()) + ".")
     if config.get("scoring"):
@@ -341,6 +351,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="шпионаж в этой партии (по умолчанию — как в сценарии)")
     create.add_argument("--conquest", choices=("on", "off"),
                         help="завоевание в этой партии (по умолчанию — как в сценарии)")
+    create.add_argument("--discoveries", choices=("on", "off"),
+                        help="Заброшенные земли и находки (по умолчанию — как в сценарии)")
+    create.add_argument("--discovery-extra", type=int,
+                        help="сколько находок положить в обычные нейтральные провинции (0..20; по умолчанию — из "
+                             "сценария)")
     create.add_argument("--scoring", help="веса источников очков, например territory=1,science=1,works=0,war=1,"
                                           "objectives=1 (не названный — 0; по умолчанию — из сценария)")
     create.add_argument("--objectives", type=int, help="тайных целей на место (N >= 1; выключить — --scoring "

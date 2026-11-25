@@ -1,0 +1,25 @@
+- id: iron
+  name: Железный Обет
+  starting:
+    resources: {alloy: 30, provisions: 30}
+    units: {militia: 3}
+    buildings: [barracks]
+- id: ash
+  name: Пепельный Двор
+  bonuses:
+    - {effect: modify, target: disposition.raid.loot_mul, op: mul, value: 1.5}
+    - {effect: modify, target: unit.militia.cost.alloy, op: mul, value: 0.5}
+  penalties:
+    - {effect: modify, target: disposition.subjugate.cost_mul, op: mul, value: 1.3}
+  starting:
+    resources: {alloy: 30, provisions: 30}
+    units: {militia: 3}
+    buildings: [barracks]
+- id: sage
+  name: Книжники
+  starting:
+    resources: {alloy: 30, provisions: 30}
+    units: {militia: 3}
+    buildings: [barracks]
+    effects:
+      - {effect: grant_tech, tech: drill}

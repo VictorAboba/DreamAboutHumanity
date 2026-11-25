@@ -12,7 +12,7 @@ ALLOY, FOOD, CREED = "core:alloy", "core:provisions", "core:creed"
 
 
 # The slice rules: core 0.4.0 turns espionage and conquest on in slice2/slice3; these tests are about the slice.
-OFF = {"espionage": False, "conquest": False}
+OFF = {"espionage": False, "conquest": False, "discoveries": False}     # the plain slice flow
 LAND = {"territory": 1}      # core 0.5.0 scores every source; these tests keep the slice score
 
 

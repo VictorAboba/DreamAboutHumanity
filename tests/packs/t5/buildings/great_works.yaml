@@ -1,0 +1,15 @@
+- id: monument
+  name: Монумент Предела
+  cost: {alloy: 10, provisions: 10}
+  build_turns: 2
+  score: 2
+  max_per_owner: 1
+  requires_system: scoring.works
+- id: spire
+  name: Шпиль Сна
+  cost: {alloy: 10, provisions: 10}
+  build_turns: 2
+  score: 3
+  max_per_owner: 1
+  allowed_types: [forge, agri]
+  requires_system: scoring.works

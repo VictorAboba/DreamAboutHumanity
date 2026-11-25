@@ -14,6 +14,8 @@ from dah.bots.base import Estimator, Order
 from dah.bots.view import RECRUIT_BUILDINGS, UNIT_COST_ALLOY, UNIT_UPKEEP_FOOD, Province, StateView, short_id
 
 Reserved = dict[str, dict[str, int]]   # province -> short unit id -> units that stay
+# stage 5: (source, target, free units of the source) -> may this army go there (dah.bots.finds: the Abandoned lands)
+ArmyOk = Callable[[Province, Province, dict[str, int]], bool]
 
 
 def free_units(province: Province, reserved: Reserved) -> dict[str, int]:
@@ -71,11 +73,15 @@ def best_attack(
     threshold: float,
     rng: random.Random,
     target_ok: Callable[[Province], bool] | None = None,
+    army_ok: ArmyOk | None = None,
+    bonus: Mapping[str, float] | None = None,
 ) -> Order | None:
     """Send every free unit of one own province at its best adjacent target if win_prob >= threshold.
 
-    `target_ok` filters the foreign or neutral targets (default: all of them).
+    `target_ok` filters the foreign or neutral targets (default: all of them); `army_ok` (stage 5) the (source,
+    target, army) triples; `bonus` adds to the estimate of a target as in `plan_moves`.
     """
+    bonus = bonus or {}
     candidates: list[tuple[float, Order]] = []
     for source in view.own_provinces():
         free = free_units(source, reserved)
@@ -84,7 +90,9 @@ def best_attack(
         for target in view.neighbors(source):
             if view.is_mine(target) or (target_ok is not None and not target_ok(target)):
                 continue
-            win = estimate(free, target.units or {}, target.type, target.fortified, hasty)
+            if army_ok is not None and not army_ok(source, target, free):
+                continue
+            win = estimate(free, target.units or {}, target.type, target.fortified, hasty) + bonus.get(target.id, 0.0)
             if win >= threshold:
                 units = {view.qualify(unit): n for unit, n in free.items()}
                 candidates.append((win, {"kind": "move", "from": source.id, "to": target.id, "units": units}))
@@ -118,13 +126,16 @@ def plan_moves(
     reserved: Reserved | None = None,
     target_ok: Callable[[Province], bool] | None = None,
     bonus: Mapping[str, float] | None = None,
+    army_ok: ArmyOk | None = None,
 ) -> list[Order]:
     """One move per own army: the biggest armies first, each at its best adjacent target (not yet targeted) with
     win_prob >= threshold; an interior army with no target marches one step towards the nearest foreign province
     (one of the nearest steps, by the bot's rng);
     a border army with no good target stays (and can fortify).
     `bonus` (stage 4: province id -> b, from dah.bots.score): such a target counts with win_prob + b, both for the
-    threshold and for the choice among targets (no bonus: the plain rule)."""
+    threshold and for the choice among targets (no bonus: the plain rule); a negative b asks for a surer fight.
+    `army_ok` (stage 5, dah.bots.finds): a target this army may not go to is skipped (an army too small for an
+    Abandoned province that may hold a find)."""
     bonus = bonus or {}
     reserved = reserved or {}
     distance = distance_to_foreign(view)
@@ -140,6 +151,8 @@ def plan_moves(
         candidates: list[tuple[float, str]] = []
         for target in view.neighbors(source):
             if view.is_mine(target) or target.id in targeted or (target_ok is not None and not target_ok(target)):
+                continue
+            if army_ok is not None and not army_ok(source, target, free):
                 continue
             win = estimate(free, target.units or {}, target.type, target.fortified, False) + bonus.get(target.id, 0.0)
             if win >= threshold:

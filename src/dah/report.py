@@ -38,7 +38,7 @@ def _seat_total() -> dict[str, Any]:
 
 
 def _stage3_seat() -> dict[str, Any]:
-    return {"shades_hired": 0, "shades_lost": 0, "missions": {}, "mission_ends": {}, "reports": 0, "intel_reads": 0,
+    return {"shades_hired": 0, "shades_free": 0, "shades_lost": 0, "missions": {}, "mission_ends": {}, "reports": 0, "intel_reads": 0,
             "caught_here": 0, "caught_here_attributed": 0, "sabotages": 0, "strikes_cancelled": 0, "feints": 0,
             "feints_exposed": 0, "missions_rejected": 0, "captures": {}, "dispositions": {}, "disposition_cost": {},
             "loot": {}, "revolts": 0, "claims": 0, "policy_unaffordable": 0}
@@ -53,7 +53,7 @@ def _stage3(report: dict[str, Any], ev: dict[str, Any]) -> None:
 
     kind = ev["type"]
     if kind == "shade_hired" and (t := seat(ev.get("seat"))):
-        t["shades_hired"] += 1
+        t["shades_free" if ev.get("free") else "shades_hired"] += 1     # free: held from the start (core 0.6.0)
     elif kind == "mission_started" and (t := seat(ev.get("seat"))):
         mid = str(ev.get("mission")).rsplit(":", 1)[-1]
         t["missions"][mid] = t["missions"].get(mid, 0) + 1
@@ -146,6 +146,9 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
     exposed), rejected missions, captures by mode, fates by disposition with their price and loot, revolts against
     the seat's occupations, claims it got, and policies it could not pay for. The rates of section 8 (accuracy,
     intel used, fooled by a feint) are 3b and stay offline.
+    Stage 5 (docs/ABANDONED_LANDS.md 14.2; only with Abandoned land): `discoveries` — the layout and per seat the finds
+    set off, the value they realized (P), the luck against the mean of the seats, choices, the ruins' Treasury, and
+    whether the luckiest seat won (see `_discoveries`).
     """
     report: dict[str, Any] = {"game_id": None, "scenario": None, "rules_chars": None, "seats": {}, "phases": [],
                               "turns": [], "totals": {}, "result": None, "setup": None}
@@ -354,6 +357,9 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
     scoring = _scoring(events, report)
     if scoring is not None:
         report["scoring"] = scoring
+    finds = _discoveries(events, report)
+    if finds is not None:
+        report["discoveries"] = finds
     in_game_s = round(over_ts - first_open_ts, 3) if over_ts is not None and first_open_ts is not None else None
     report["in_game_s"] = in_game_s
     for seat, totals in report["totals"].items():
@@ -382,7 +388,8 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
     return report
 
 
-SCORE_LABELS = {"territory": "зем", "science": "нау", "works": "стр", "war": "вой", "objectives": "цель"}
+SCORE_LABELS = {"territory": "зем", "science": "нау", "works": "стр", "war": "вой", "objectives": "цель",
+                "betrayal": "разрыв"}
 
 
 def _scoring(events: list[dict[str, Any]], report: dict[str, Any]) -> dict[str, Any] | None:
@@ -445,6 +452,138 @@ def _scoring(events: list[dict[str, Any]], report: dict[str, Any]) -> dict[str, 
             else None,
             "works": works, "fights": [fights[t] for t in sorted(fights)],
             "gift_share_of_score_spend": _gift_share(events, list(report["seats"]))}
+
+
+# Stage 5 (docs/ABANDONED_LANDS.md 10, 14.2): journal types counted into `report["discoveries"]`
+_FIND_EVENTS = frozenset({"discoveries_placed", "discoveries_unfair", "discovery_found", "discovery_chosen",
+                          "discovery_units", "guard_cleared", "lair_grew", "order_clipped"})
+
+
+def _find_seat() -> dict[str, Any]:
+    return {"finds": 0, "by_kind": {}, "value": 0.0, "find_value": 0.0, "choice_value": 0.0, "reward_value": 0.0,
+            "luck": None, "units_lost": 0, "units_gained": 0, "resources": {}, "artifacts": [], "choices": [],
+            "treasury": None, "lairs_cleared": 0, "guards_cleared": 0, "joint": 0, "orders_clipped": 0}
+
+
+def _discoveries(events: list[dict[str, Any]], report: dict[str, Any]) -> dict[str, Any] | None:
+    """Stage 5, journals with Abandoned land only: the layout (finds placed, accepted, spread), per seat the finds it set
+    off (by kind), what they realized in P (finds, mixed choices, rewards of the guards of finds; the ruins' Treasury
+    apart, since it is no luck), units lost and gained, artifacts, the choices made, the ruins it took; `luck` = the
+    seat's realized value minus the mean of the seats; `luckiest` and whether that seat won (the G3 metric of 14.3).
+    Report only: the game neither knows nor uses it."""
+    if not any(e.get("type") in _FIND_EVENTS for e in events):
+        return None
+    seats = {s: _find_seat() for s in report["seats"]}
+    placed = next((e for e in events if e.get("type") == "discoveries_placed"), {})
+    spawned: set[str] = set()      # provinces where a find put neutrals (their guard is the find's; else the ruins')
+    out: dict[str, Any] = {"placed": len(placed.get("finds") or {}), "accepted": placed.get("accepted"),
+                           "spread": placed.get("spread"), "abandoned": list(placed.get("abandoned") or []),
+                           "triggered": 0, "lairs_grew": 0, "seats": seats}
+
+    def add(acc: dict[str, int], amounts: dict[str, Any] | None) -> None:
+        for r, n in (amounts or {}).items():
+            acc[r] = acc.get(r, 0) + int(n)
+
+    for e in events:
+        kind = e.get("type")
+        if kind == "discovery_found":
+            out["triggered"] += 1
+            if (e.get("province_effects") or {}).get("neutrals"):
+                spawned.add(str(e.get("province")))
+            entrants = [s for s in e.get("entrants") or [] if s in seats]
+            for s in entrants:
+                t = seats[s]
+                share = (e.get("shares") or {}).get(s) or {}
+                v = float((e.get("value") or {}).get(s, 0.0))
+                t["finds"] += 1
+                fk = str(e.get("find_kind"))
+                t["by_kind"][fk] = t["by_kind"].get(fk, 0) + 1
+                t["find_value"] += v
+                t["joint"] += len(entrants) > 1
+                t["units_lost"] += sum((share.get("lost") or {}).values())
+                t["units_gained"] += sum((share.get("units") or {}).values())
+                add(t["resources"], share.get("resources"))
+                if share.get("artifact"):
+                    t["artifacts"].append(share["artifact"])
+        elif kind == "discovery_chosen" and e.get("seat") in seats:
+            t = seats[e["seat"]]
+            v = float(e.get("value") or 0.0)
+            t["choice_value"] += v
+            t["units_lost"] += sum((e.get("lost") or {}).values())
+            t["units_gained"] += sum((e.get("units") or {}).values())
+            add(t["resources"], e.get("resources"))
+            if e.get("artifact"):
+                t["artifacts"].append(e["artifact"])
+            t["choices"].append({"turn": e.get("turn"), "province": e.get("province"), "id": e.get("id"),
+                                 "choice": e.get("choice"), "by_default": bool(e.get("by_default")),
+                                 "outcome": e.get("outcome"), "value": v})
+        elif kind == "guard_cleared" and e.get("by") in seats:
+            t = seats[e["by"]]
+            v = float(e.get("value") or 0.0)
+            add(t["resources"], e.get("resources"))
+            t["units_gained"] += sum((e.get("units") or {}).values())
+            if e.get("province") not in spawned:
+                t["treasury"] = {"province": e.get("province"), "turn": e.get("turn"), "value": v}
+                continue
+            t["reward_value"] += v
+            t["lairs_cleared" if e.get("lair") else "guards_cleared"] += 1
+        elif kind == "lair_grew":
+            out["lairs_grew"] += 1
+        elif kind == "order_clipped" and e.get("seat") in seats:
+            seats[e["seat"]]["orders_clipped"] += 1
+    for t in seats.values():
+        t["value"] = round(t["find_value"] + t["choice_value"] + t["reward_value"], 2)
+        for key in ("find_value", "choice_value", "reward_value"):
+            t[key] = round(t[key], 2)
+    if seats:
+        mean = sum(t["value"] for t in seats.values()) / len(seats)
+        for t in seats.values():
+            t["luck"] = round(t["value"] - mean, 2)
+        top = max(t["value"] for t in seats.values())
+        best = [s for s, t in seats.items() if t["value"] == top]
+        out["luckiest"] = best[0] if len(best) == 1 and any(t["finds"] for t in seats.values()) else None
+        winners = (report.get("result") or {}).get("winners") or []
+        out["luckiest_won"] = (out["luckiest"] in winners) if out["luckiest"] and report.get("result") else None
+    return out
+
+
+_FIND_KIND_TEXT = {"boon": "плюшки", "hindrance": "помехи", "mixed": "смешанные"}
+
+
+def _discovery_lines(report: dict[str, Any], nick: dict[str, str]) -> list[str]:
+    d = report.get("discoveries")
+    if not d:
+        return []
+    fair = {True: "в бюджете честности", False: "вне бюджета (discoveries_unfair)"}.get(d.get("accepted"), "—")
+    lines = ["", f"НАХОДКИ (заброшенные: {', '.join(d['abandoned']) or '—'}; разложено {d['placed']}, {fair}, "
+                 f"разброс {d.get('spread')}; сработало {d['triggered']}; логово росло {d['lairs_grew']} раз):"]
+    for seat, t in d["seats"].items():
+        kinds = ", ".join(f"{_FIND_KIND_TEXT.get(k, k)} {n}" for k, n in sorted(t["by_kind"].items()))
+        choices = ", ".join(f"{c['id'].rsplit(':', 1)[-1] if c.get('id') else '?'}: {c['choice']}"
+                            + (" (по умолч.)" if c["by_default"] else "") + f" {c['value']:+g}" for c in t["choices"])
+        tre = t["treasury"]
+        parts = [f"находок {t['finds']}" + (f" ({kinds})" if kinds else ""),
+                 f"ценность {t['value']:+g} P (находки {t['find_value']:+g}, выбор {t['choice_value']:+g}, "
+                 f"награды {t['reward_value']:+g}), удача {t['luck']:+g} к среднему"]
+        if choices:
+            parts.append(f"выбор: {choices}")
+        if t["units_lost"] or t["units_gained"]:
+            parts.append(f"юнитов потеряно {t['units_lost']}, получено {t['units_gained']}")
+        if t["resources"]:
+            parts.append("ресурсы " + _amounts(t["resources"]))
+        if t["artifacts"]:
+            parts.append("артефакты " + ", ".join(_short(a) for a in t["artifacts"]))
+        if tre:
+            parts.append(f"Казна руин {tre['province']} на ходу {tre['turn']} ({tre['value']:+g} P)")
+        if t["lairs_cleared"] or t["guards_cleared"]:
+            parts.append(f"зачищено: логов {t['lairs_cleared']}, стражей находок {t['guards_cleared']}")
+        if t["joint"]:
+            parts.append(f"совместных входов {t['joint']}")
+        lines.append(f"{nick.get(seat, seat)}: " + "; ".join(parts))
+    if d.get("luckiest"):
+        won = {True: "победил", False: "не победил", None: "партия не окончена"}[d.get("luckiest_won")]
+        lines.append(f"удачливее всех: {nick.get(d['luckiest'], d['luckiest'])} ({won})")
+    return lines
 
 
 GIFT_WINDOW = 3     # turns: a gift counts towards the recipient's score spend of this turn and the next two
@@ -591,7 +730,8 @@ def _stage3_line(t: dict[str, Any]) -> str:
     def amounts(d: dict[str, Any]) -> str:
         return " ".join(f"{_short(r)} {n}" for r, n in sorted(d.items())) or "0"
 
-    return (f"Тени: нанято {t['shades_hired']}, потеряно {t['shades_lost']}; задания {counts(t['missions'])} "
+    free = f" (+{t['shades_free']} даром)" if t.get("shades_free") else ""
+    return (f"Тени: нанято {t['shades_hired']}{free}, потеряно {t['shades_lost']}; задания {counts(t['missions'])} "
             f"(итоги: {counts(t['mission_ends'])}); донесений {t['reports']}, прочтений {t['intel_reads']}; поймано у "
             f"него {t['caught_here']} (хозяин установлен {t['caught_here_attributed']}); саботажей {t['sabotages']}"
             f" (отменено {t['strikes_cancelled']}); ложных записей {t['feints']} (разоблачено чужими "
@@ -647,6 +787,7 @@ def render_report(report: dict[str, Any]) -> str:
         for seat, t in report["stage3"].items():
             lines.append(f"{seat} {nick.get(seat, seat)}: " + _stage3_line(t))
     lines += _score_lines(report, nick)
+    lines += _discovery_lines(report, nick)
     lines.append("")
     lines.append("ФАЗЫ (до первого вызова / первой принятой подачи / ready; вызовы; правки):")
     for ph in report["phases"]:

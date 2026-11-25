@@ -1,0 +1,3 @@
+- {id: militia, name: Ополчение, short: опол, attack: 2, defense: 2, cost: {alloy: 10}, upkeep: {provisions: 1}}
+- {id: assault, name: Штурмовики, short: штурм, attack: 3, defense: 3, cost: {alloy: 12}, upkeep: {provisions: 1}}
+- {id: walker, name: Бронеход, short: брон, attack: 5, defense: 5, cost: {alloy: 25}, upkeep: {provisions: 2}}

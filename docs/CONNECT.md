@@ -38,7 +38,7 @@ report_id?)`, `estimate_mission(mission, target, rounds?, shade?, assume_mirrors
 
 - `rules()` — краткое ядро правил (≤ 6000 символов) с оглавлением; `rules(topic="techs")` — раздел целиком, собранный
   из контента партии. Темы: `turn`, `setup`, `resources`, `provinces`, `units`, `abilities`, `buildings`, `orders`,
-  `p2`, `combat`, `victory`, `pacts`, `spying`, `conquest`, `fog`, `messages`, `techs`, `factions`, `artifacts` (есть
+  `p2`, `combat`, `victory`, `pacts`, `spying`, `conquest`, `discoveries`, `fog`, `messages`, `techs`, `factions`, `artifacts` (есть
   только те, что нужны партии); ID или название контента в `topic` даёт его описание.
 - Счёт (docs/SCORING.md): строка «Счёт:» в `get_state` — твой счёт хода с разбивкой (`зем`, `нау`, `стр`, `вой`), у
   соперников только нижняя граница «≥», твоя тайная цель и выполнена ли она сейчас (с фазой старта цель видна уже
@@ -51,7 +51,16 @@ report_id?)`, `estimate_mission(mission, target, rounds?, shade?, assume_mirrors
   `{"kind": "dispose", "province": "P07", "disposition": "subjugate"}` и `{"kind": "policy", "disposition":
   "subjugate"}` (Д и П2, 0 ОК). Разведсрез идёт на закрытии Д; в начале П2 — одна запись `[ИГРА] Разведсрез хода N`
   во входящих, строка `ДОНЕСЕНИЯ` в `get_state`, хвост «донесений: N» в `phase()` и пробуждении waker'а; тексты —
-  `get_intel`. Оккупации, притязания и политика — разделы `ОККУПАЦИЯ`, `ПРИТЯЗАНИЯ`, `ПОЛИТИКА` в `get_state`.
+  `get_intel`. Оккупации, притязания и политика — разделы `ОККУПАЦИЯ`, `ПРИТЯЗАНИЯ`, `ПОЛИТИКА` в `get_state`. В
+  `core` у каждого места с начала есть свободная Тень `s1` (строка `ТЕНИ` в `get_state`, пока она свободна); миссия
+  `secret` читает тайную цель соперника.
+- Заброшенные земли и находки (этап 5, [ABANDONED_LANDS.md](ABANDONED_LANDS.md)) — только если их включили сценарий
+  или хост (`dah game create --discoveries on`) и старт карты остался без игрока. Метки `[заброш.]`, `[руины]`,
+  `[стража]`, `[логово n/предел]` в `get_state`; вход любой армии в Заброшенную провинцию запускает её скрытую
+  находку, если она там есть (помеха может стереть мелкую армию; `validate_orders` предупреждает о таком ходе).
+  Смешанную находку решает приказ `{"kind": "discover", "province": "P16", "choice": "wake"}` по строке `НАХОДКА`
+  (Д или П2, 0 ОК; поправить — `amend_order(id, patch={"choice": "leave"})`), без него — вариант по умолчанию.
+  Пул находок — `rules(topic="discoveries")` и `describe(<находка>)`; нового инструмента нет.
 - Фаза старта `setup` (если она есть в партии) — до хода 1: `phase()` возвращает `phase: "setup"` и подсказку `hint`.
   `get_setup()` — все фракции с описаниями, твои предложенные артефакты (драфт) или пул и бюджет (очки), твой выбор;
   `choose_faction(prefs=["litany", "captains"])` — фракции по предпочтению; `choose_artifacts(ids=["ancient_blueprint"])`;

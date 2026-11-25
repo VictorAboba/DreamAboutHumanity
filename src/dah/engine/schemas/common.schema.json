@@ -110,6 +110,7 @@
       "enum": [
         "espionage",
         "conquest",
+        "discoveries",
         "scoring.territory",
         "scoring.science",
         "scoring.works",

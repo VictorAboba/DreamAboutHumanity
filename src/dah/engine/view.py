@@ -7,6 +7,7 @@ from typing import Any, Mapping, Sequence
 
 from . import conquest as cq
 from . import diplomacy as dip
+from . import discoveries as disc
 from . import registry
 from . import scoring as sc_
 from .content import Ruleset
@@ -48,14 +49,18 @@ def view_state(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders |
     income, upkeep = income_of(state, ruleset, seat, key), upkeep_of(state, ruleset, seat, key)
     provinces = []
     works_on = sc_.on(ruleset, "works")
-    statuses = cq.statuses_for(state) if ruleset.system("conquest") else {}
+    statuses = cq.statuses_for(state) if disc.statuses_active(ruleset) else {}
+    finds = disc.on(ruleset)
     for pid, p in sorted(state.provinces.items()):
         entry: dict[str, Any] = {"id": pid, "name": p.name, "type": p.type, "owner": p.owner,
                                  "neighbors": list(ruleset.map.adjacency[pid]), "visible": pid in seen}
-        if pid in statuses:
-            entry["status"] = statuses[pid]     # public: occupied {by, from, since}, ruined_until, ravaged_until
+        status = disc.public_status(p, statuses.get(pid), pid in seen)   # a find's marks only where seen
+        if status:
+            entry["status"] = status    # public: occupied {by, from, since}, ruined_until, ravaged_until
         if ruleset.system("conquest") and state.origins.get(pid):
             entry["origin"] = state.origins[pid]    # public: the seat that started with it (Возвращение)
+        if finds:
+            entry.update(disc.province_json(ruleset, state, seat, pid, pid in seen))   # stage 5: marks, own finds
         if pid in seen:
             entry.update(units=dict(p.units), buildings=list(p.buildings), fortified=p.fortified)
         if p.owner == seat:
@@ -129,6 +134,9 @@ def view_state(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders |
     }
     if ruleset.system("conquest"):
         out["claims"] = [dict(c) for c in state.claims]          # public (SPY_AND_CONQUEST.md 3.5)
+    if disc.on(ruleset):
+        out["abandoned"] = list(state.abandoned)                 # public (ABANDONED_LANDS.md 11)
+        out["discoveries_pending"] = disc.pending_json(ruleset, state, seat)
     return out
 
 
@@ -156,12 +164,17 @@ def _status_tags(state: GameState, seat: str, status: Mapping[str, Any] | None) 
         tags.append(f"[пепелище до х{status['ruined_until']}]")
     if status.get("ravaged_until"):
         tags.append("[разорена]")
-    return " " + " ".join(tags)
+    if status.get("income_mul") is not None:
+        tags.append(f"[доход ×{status['income_mul']:g}]")
+    return " " + " ".join(tags) if tags else ""
 
 
 def _province_line(ruleset: Ruleset, state: GameState, seat: str, entry: Mapping[str, Any]) -> str:
     head = (f"{entry['id']} {entry['name']} [{_owner_tag(state, seat, entry['owner'])}] {ruleset.short(entry['type'])}"
             f"{_status_tags(state, seat, entry.get('status'))}")
+    marks = disc.province_tags(ruleset, state, seat, entry["id"], entry["visible"])
+    if marks:
+        head += " " + " ".join(marks)
     if not entry["visible"]:
         parts = [f"{head} ?"]
     else:
@@ -239,7 +252,7 @@ def render_state_text(state: GameState, ruleset: Ruleset, seat: str, deadline_in
         lines.append(_result_line(state, seat))
     entries = view["provinces"]
     pacts = _pacts_line(state, seat, view)
-    conquest = _conquest_lines(state, ruleset, seat, view)
+    conquest = _conquest_lines(state, ruleset, seat, view) + disc.pending_lines(ruleset, state, seat)
     if since_turn is not None and since_state is not None:
         old = {e["id"]: e for e in view_state(since_state, ruleset, seat)["provinces"]}
         entries = [e for e in entries if e["visible"] and _changed(e, old[e["id"]])]
@@ -340,7 +353,7 @@ def _conquest_lines(state: GameState, ruleset: Ruleset, seat: str, view: Mapping
 
 
 def _changed(new: Mapping[str, Any], old: Mapping[str, Any]) -> bool:
-    keys = ("owner", "visible", "units", "buildings", "fortified", "building_now", "status")
+    keys = ("owner", "visible", "units", "buildings", "fortified", "building_now", "status", "guard", "discovery")
     return any(new.get(k) != old.get(k) for k in keys)
 
 
@@ -377,7 +390,7 @@ def _changes_line(state: GameState, ruleset: Ruleset, seat: str, since_turn: int
                                "retreat_lost", "order_rejected", "fortify_broken", "pact_bounce", "pact_joint",
                                "pact_broken", "pact_expired", "pact_ended", "pact_lapsed", "gift", "pact_signed",
                                "pact_renewed", "pact_leave", "tech_completed", "work_started", "work_completed",
-                               *CONQUEST_EVENT_TEXT):
+                               *CONQUEST_EVENT_TEXT, *disc.DISCOVERY_EVENT_TEXT):
                 starving |= e["kind"] == "starvation"
                 items.append(event_text(e, ruleset, state, seat))
     if not starving:
@@ -396,6 +409,8 @@ def event_text(e: Mapping[str, Any], ruleset: Ruleset, state: GameState, seat: s
         return _DIPLOMACY_TEXT[kind](e, ruleset, who)
     if kind in CONQUEST_EVENT_TEXT:
         return CONQUEST_EVENT_TEXT[kind](e, ruleset, who)
+    if kind in disc.DISCOVERY_EVENT_TEXT:
+        return disc.DISCOVERY_EVENT_TEXT[kind](e, ruleset, who)
     if kind in ESPIONAGE_EVENT_TEXT:
         return ESPIONAGE_EVENT_TEXT[kind](e, ruleset, lambda x: who(x) if x is None or x in state.players else str(x))
     if kind in ("battle", "edge_battle"):
@@ -595,7 +610,7 @@ def render_report_text(report: TurnReport, ruleset: Ruleset, state: GameState, s
     sc = report.scores_of()
     if seat in sc:
         parts = (report.score_parts or {}).get(seat) or {}
-        body = " ".join(f"{sc_.LABELS[k]} {parts[k]}" for k in sc_.SOURCES if k in parts)
+        body = " ".join(f"{sc_.LABELS[k]} {parts[k]}" for k in sc_.PART_ORDER if k in parts)
         lines.append(f"Твой счёт после хода: {sc[seat]}" + (f" [{body}]" if body else ""))
     if report.public.get("result"):
         lines.append(_result_line(state, seat))

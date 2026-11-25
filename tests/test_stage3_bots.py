@@ -345,10 +345,10 @@ def test_simulator_plays_recon_and_reports_stage3(capsys):
     off = build_ruleset(None, "core:slice3", systems={"espionage": False, "conquest": False})
     g_off = sim.play_game(off, kinds, "s3|0")
     assert g_off["recons"] == [] and not any(e["kind"] in ("disposition", "sabotage") for e in g_off["events"])
-    assert sim.switch_combos(rs, "both", None) == [{"espionage": True, "conquest": True},
-                                                   {"espionage": False, "conquest": True}]
+    assert sim.switch_combos(rs, "both", None) == [{"espionage": True, "conquest": True, "discoveries": True},
+                                                   {"espionage": False, "conquest": True, "discoveries": True}]
     assert sim.main(["--games", "1", "--config", "rush,builder,diplomat", "--espionage", "both", "--conquest",
                      "off", "--json"]) == 0
     data = json.loads(capsys.readouterr().out)
-    assert set(data) == {"espionage=on,conquest=off", "espionage=off,conquest=off"}
-    assert "stage3" in data["espionage=on,conquest=off"]["ALL"]
+    assert set(data) == {"espionage=on,conquest=off,discoveries=on", "espionage=off,conquest=off,discoveries=on"}
+    assert "stage3" in data["espionage=on,conquest=off,discoveries=on"]["ALL"]

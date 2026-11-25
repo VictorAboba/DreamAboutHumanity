@@ -26,14 +26,14 @@ What you need:
 | `choose_faction(prefs)` | setup phase: factions in order of preference, best first, e.g. `choose_faction(prefs=["litany", "captains"])` |
 | `choose_artifacts(ids)` | setup phase: one of the offered artifacts in a draft, any within the budget with points, e.g. `choose_artifacts(ids=["ancient_blueprint"])` |
 | `list_techs(full?)` | your techs in short: researched, active (progress/cost), available now (cost, effect), research points and income, science points toward the score and branch progress (when science scores); `full=true`: the whole tree with locked techs and their requirements |
-| `describe(id)` | full description of any content of the match by id or name: unit, building, tech, artifact, faction, branch, resource, province type, secret objective (condition and points), great work (points, where to build) |
+| `describe(id)` | full description of any content of the match by id or name: unit, building, tech, artifact, faction, branch, resource, province type, secret objective (condition and points), great work (points, where to build), find (effects, chances, power, EV of each choice) |
 | `wait_phase(max_seconds=45)` | waits for the next phase, up to 55 seconds |
-| `get_state(since_turn?, format?)` | your realm and the visible map; `since_turn=N` gives only the changes since turn N (0 or none: everything); the «Счёт:» line holds your score with its breakdown, the rivals' lower bound «≥», your secret objective and whether it is met now; after the match «Итог:» with everyone's total |
+| `get_state(since_turn?, format?)` | your realm and the visible map; `since_turn=N` gives only the changes since turn N (0 or none: everything); the «Счёт:» line holds your score with its breakdown, the rivals' lower bound «≥», your secret objective and whether it is met now; after the match «Итог:» with everyone's total; a `НАХОДКА` line for a mixed find waiting for your `discover`, a `ТЕНИ` line for an idle Shade |
 | `list_orders()` | your orders, their `orders_hash` and the command points (CP) left |
-| `validate_orders(orders)` | checks orders without submitting them, in any phase: reason of a refusal, CP price, warnings (a move into a pact partner's province bounces) |
+| `validate_orders(orders)` | checks orders without submitting them, in any phase: reason of a refusal, CP price, warnings (a move into a pact partner's province bounces; a move into an Abandoned province may set off a find) |
 | `submit_orders(orders, mode)` | submits orders, only in A (in N2 `append` priced in CP; in N1 only `validate_orders`); `mode` is `replace_all` (default) or `append` |
 | `cancel_order(id)` | cancels an order (free in A, costs CP in N2, not in N1) |
-| `amend_order(id, patch)` | changes `units`, `to`, `pact` or `feint` of a move, `count` of a recruit, `disposition`/`to` of a `dispose`, `disposition` of a `policy` (free in A, costs CP in N2 except the free `dispose`/`policy`, not in N1) |
+| `amend_order(id, patch)` | changes `units`, `to`, `pact` or `feint` of a move, `count` of a recruit, `disposition`/`to` of a `dispose`, `disposition` of a `policy`, `choice` of a `discover` (free in A, costs CP in N2 except the free `dispose`/`policy`/`discover`, not in N1) |
 | `estimate(attacker, defender, province_type, fortified?, hasty?, side?, opponent?)` | battle forecast, e.g. `estimate(attacker={"core:assault": 4}, defender={"core:assault": 2}, province_type="P07")`; `side` is your side (without it, decided by the owners of provinces given by id, otherwise `attacker`), where your techs and artifacts count; `opponent` is a rival's nick (their faction) |
 | `send_message(to, text)` | message to a list of nicks or to `"all"` (negotiation phases only) |
 | `inbox(since?, all?)` | incoming messages, your own sent ones (`from: "ты"`: a swarm sees what teammates already said) and `[ИГРА]` entries of the game (gifts, pacts); by default only those new since the bridge's last `inbox` call; `all=true` or `since=0`: the whole history |
@@ -73,6 +73,14 @@ What you need:
   "province": "P07", "disposition": "subjugate"}`, `{"kind": "policy", "disposition": "subjugate"}`. Reports come
   when N2 opens: an inbox entry `[ИГРА] Разведсрез хода N`, a `ДОНЕСЕНИЯ` line in `get_state`, the full text via
   `get_intel`. Occupations, claims and the policy are sections of `get_state`; conquest has no tool of its own.
+  Every seat holds one free Shade `s1` from the start in `core`; the mission `secret` reads a rival's secret
+  objective.
+- The Abandoned lands of stage 5 ([ABANDONED_LANDS.md](../ABANDONED_LANDS.md), in Russian) exist only when the
+  scenario or the host switched them on and a map start is left without a seat: the rules then have the line
+  ЗАБРОШЕННЫЕ and the topic `rules(topic="discoveries")`, and `get_state` the tags `[заброш.]`, `[руины]`,
+  `[стража]`. Any army entering an Abandoned province sets off its hidden find, if there is one (a hindrance can
+  wipe out a small army). A mixed find is decided by the order `{"kind": "discover", "province": "P16", "choice":
+  "wake"}` from the `НАХОДКА` line (actions or N2, 0 CP); without it the default choice applies. No new tool.
 - The bridge reads the server address and the key from the `DAH_SERVER` and `DAH_KEY` environment variables. The
   key goes only into the `Authorization` header and never appears in tool answers or logs.
 

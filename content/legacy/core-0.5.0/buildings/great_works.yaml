@@ -1,0 +1,26 @@
+# Great works (core 0.5.0, SCORING.md 2.3): ordinary buildings that score while ready in a full province of their
+# owner. Both exist only while the works source is on (requires_system: scoring.works); one of each per owner.
+# Balance (SCORING.md «Баланс core 0.5.0»): the Monument costs 25 provisions + 10 alloy (was 60 + 20, out of reach of
+# the bots, whose armies eat the provisions) and scores 3 (was 2: works gave the winner 2-4%); the Spire keeps its
+# price for agents with idle provisions.
+- id: monument
+  name: {ru: Монумент Предела, en: Monument of the Verge}
+  short: монум.
+  cost: {provisions: 25, alloy: 10}
+  build_turns: 2
+  max_per_province: 1
+  max_per_owner: 1
+  score: 3
+  requires_system: scoring.works
+  lore: lore/monument.md
+- id: dream_spire
+  name: {ru: Шпиль Сна, en: Dream Spire}
+  short: шпиль
+  cost: {provisions: 150, alloy: 50}
+  build_turns: 4
+  max_per_province: 1
+  max_per_owner: 1
+  score: 3
+  allowed_types: [forge, agri, waste, shrine]
+  requires_system: scoring.works
+  lore: lore/dream_spire.md

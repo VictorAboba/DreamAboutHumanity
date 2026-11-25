@@ -20,12 +20,15 @@ Stage 4 (docs/SCORING.md section 10, dah.bots.score): war scores by itself; whil
 province gets a small bonus over a neutral one. Its objective makes the provinces that advance it preferred targets
 (one unit stays in those held), puts its branch first in research, or (great_work) has it save for the Monument
 (recruits only what the net income leaves) and lay it.
+Stage 5 (docs/ABANDONED_LANDS.md 14.1, dah.bots.finds): it enters Abandoned land that may hold a find only with a real
+army (3 units or more); an empty such province gets a small bonus on turns 1-5; the ruins' guard and a find's
+neutrals need estimate >= 0.7 (a lair >= 0.85). Mixed finds: by its rank on the visible score.
 """
 
 from __future__ import annotations
 
 from dah.bots import conquest as cq
-from dah.bots import score, spy
+from dah.bots import finds, score, spy
 from dah.bots.base import Bot, Estimator, Order
 from dah.bots.tactics import (
     Reserved,
@@ -64,6 +67,10 @@ SABOTAGE_ROUNDS = 2
 FEINT_CHANCE = 0.3
 MONUMENT = "monument"   # stage 4: built only for a great_work objective
 WINDOW_WIN = 0.5  # a hasty attack into a struck province needs this estimate (the strike is not counted in it)
+# stage 5 (docs/ABANDONED_LANDS.md 14.1): a real army into Abandoned land that may hold a find; guards need a surer fight
+FIND_ARMY = 3
+GUARD_MARGIN = 0.1      # the ruins' guard and a find's neutrals: estimate >= 0.7
+LAIR_MARGIN = 0.25      # a lair that grows: >= 0.85
 
 __all__ = ["RushBot", "advance", "best_attack", "distance_to_foreign"]
 
@@ -83,7 +90,10 @@ class RushBot(Bot):
         keep = merge_reserved(garrison(capital_of(view), self.garrison), score.objective_garrison(view))
         if view.conquest:
             keep = merge_reserved(keep, cq.occupation_garrison(view))
-        moves = plan_moves(view, estimate, WIN_THRESHOLD, self.rng, keep, bonus=score.attack_bonus(view, war=True))
+        bonus = finds.merge_bonus(score.attack_bonus(view, war=True),
+                                  finds.attack_bonus(view, self.finds, GUARD_MARGIN, LAIR_MARGIN))
+        moves = plan_moves(view, estimate, WIN_THRESHOLD, self.rng, keep, bonus=bonus,
+                           army_ok=finds.army_ok(self.finds, FIND_ARMY))
         extra, food, alloy = self._stage3(view, moves, keep)
         plan = spy.food_view(view, food, alloy)
         works: list[Order] = []
@@ -188,7 +198,9 @@ class RushBot(Bot):
         return best[1] if best else None
 
     def _best_attack(self, view: StateView, reserved: Reserved, estimate: Estimator, hasty: bool) -> Order | None:
-        return best_attack(view, reserved, estimate, hasty, WIN_THRESHOLD, self.rng)
+        return best_attack(view, reserved, estimate, hasty, WIN_THRESHOLD, self.rng,
+                           army_ok=finds.army_ok(self.finds, FIND_ARMY),
+                           bonus=finds.attack_bonus(view, self.finds, GUARD_MARGIN, LAIR_MARGIN))
 
 
 def recruit_orders(view: StateView, alloy: int, food_turns: int, *, farm_first: bool,

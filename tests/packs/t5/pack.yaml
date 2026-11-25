@@ -1,0 +1,8 @@
+# Fixture pack for stage-5 tests (docs/ABANDONED_LANDS.md): the stage-4 content on a three-start map whose free
+# corner becomes Abandoned land, plus a small pool of finds of every kind.
+id: t5
+version: 0.1.0
+title: Тестовый пак этапа 5
+author: tests
+requires: []
+engine_api: "^1"

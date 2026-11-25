@@ -24,6 +24,7 @@ from test_review_stage2 import FakeClock, _play_out
 CORE = DEFAULT_PACKS_DIR / "core"
 CORE030 = LEGACY_PACKS_DIR / "core-0.3.0"
 CORE040 = LEGACY_PACKS_DIR / "core-0.4.0"   # frozen when core moved to 0.5.0 (m6 fixes: lasting fortification)
+CORE050 = LEGACY_PACKS_DIR / "core-0.5.0"   # frozen when core moved to 0.6.0 (m7 fixes, decision 26)
 OFF = {"espionage": False, "conquest": False}
 ALLOY, FOOD = "core:alloy", "core:provisions"
 SEATS = [{"seat": "A", "nick": "Нико", "kind": "agent"}, {"seat": "B", "nick": "Соло", "kind": "agent"}]
@@ -56,7 +57,8 @@ def key(rs, **kw):
 # ---------------------------------------------------------------- version, freeze, switches
 
 def test_version_and_clean_validation():
-    assert "version: 0.5.0" in (CORE / "pack.yaml").read_text(encoding="utf-8")
+    assert "version: 0.6.0" in (CORE / "pack.yaml").read_text(encoding="utf-8")
+    assert "version: 0.5.0" in (CORE050 / "pack.yaml").read_text(encoding="utf-8")
     assert "version: 0.4.0" in (CORE040 / "pack.yaml").read_text(encoding="utf-8")
     assert "version: 0.3.0" in (CORE030 / "pack.yaml").read_text(encoding="utf-8")
     assert validate_packs(default_pack_dirs()) == ([], [])
@@ -91,7 +93,7 @@ def test_core_050_is_core_040_with_a_lasting_fortification(scenario):
     the Growth's creed −30% instead of −50%, the Tithe Chalice +2 creed instead of +3); the scoring content and the
     score.* modifiers are hidden (test_content_core050.py)."""
     old = build_ruleset([str(CORE040)], scenario)
-    new = build_ruleset(None, scenario, scoring={"territory": 1})
+    new = build_ruleset([str(CORE050)], scenario, scoring={"territory": 1})
     assert old.stat("combat.fortify_persists") == 0 and new.stat("combat.fortify_persists") == 1
     a, b = old.to_dict(), new.to_dict()
     assert b["packs"] == {"core": "0.5.0"} and a["packs"] == {"core": "0.4.0"}
@@ -139,8 +141,9 @@ def test_a_core_040_game_replays_with_the_frozen_pack(tmp_path):
 def test_scenario_switches():
     raw = {s["id"]: s for s in yaml.safe_load((CORE / "scenarios" / "scenarios.yaml").read_text(encoding="utf-8"))}
     assert all("systems" in s for s in raw.values())                 # every scenario states its switches
-    for scenario in ("slice3", "slice2", "quad4"):
-        assert set(build_ruleset(None, scenario).scenario.systems) == {"espionage", "conquest"}
+    for scenario in ("slice3", "slice2", "quad4"):           # core 0.6.0: Abandoned lands in slice3 and quad4
+        expected = {"espionage", "conquest"} | ({"discoveries"} if scenario != "slice2" else set())
+        assert set(build_ruleset(None, scenario).scenario.systems) == expected
     assert raw["blitz_test"]["systems"] == {"espionage": False, "conquest": False}
     assert build_ruleset(None, "blitz_test").scenario.systems == ()
     spy = build_ruleset(None, "blitz_spy")
@@ -188,6 +191,7 @@ def test_a_core_030_game_replays_and_loads_with_the_frozen_pack(tmp_path):
 MISSIONS = {   # id: (behavior, target, D, rounds, S needed, once, per round, loud)
     "observe": ("observe_province", "province", 1, (1, 5), 1, {}, {FOOD: 1}, False),
     "ledger": ("read_ledger", "seat", 1, (1, 3), 1, {}, {FOOD: 1}, False),
+    "secret": ("read_objective", "seat", 1, (1, 3), 1, {}, {FOOD: 2}, False),      # core 0.6.0
     "read_orders": ("read_orders", "seat", 3, (1, 3), 2, {}, {FOOD: 2}, False),
     "sabotage": ("sabotage", "owned_province", 3, (1, 4), 2, {ALLOY: 8}, {FOOD: 1}, True),
 }
@@ -196,8 +200,10 @@ MISSIONS = {   # id: (behavior, target, D, rounds, S needed, once, per round, lo
 def test_espionage_config_and_missions(on, off):
     e = on.espionage
     assert (e.shade_name, e.shade_name_en) == ("Тень", "Shade")
-    assert e.shade_cost == {ALLOY: 25} and e.shade_upkeep == {FOOD: 1} and e.ward_cost == {ALLOY: 5}
-    assert esp.shade_cost(on, None) == {ALLOY: 25} and esp.shade_upkeep(on, None) == {FOOD: 1}
+    # core 0.6.0 (decision 26): 20 alloy (0.4.0 and 0.5.0: 25) and one free Shade per seat
+    assert e.shade_cost == {ALLOY: 20} and e.shade_upkeep == {FOOD: 1} and e.ward_cost == {ALLOY: 5}
+    assert esp.shade_cost(on, None) == {ALLOY: 20} and esp.shade_upkeep(on, None) == {FOOD: 1}
+    assert e.shade_free == 1 and on.stat("spy.shades_free") == 1
     assert set(on.missions) == {f"core:{m}" for m in MISSIONS}
     for mid, (behavior, target, d, rounds, s, once, per, loud) in MISSIONS.items():
         m = on.missions[f"core:{mid}"]
