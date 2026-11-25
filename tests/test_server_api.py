@@ -99,7 +99,7 @@ def test_fog_of_war(env):
     assert "units" in seen_b and "building_now" not in seen_b
     text = env.ok("A", "GET", "/v1/state")["text"]
     b_line = next(line for line in text.splitlines() if line.startswith(b_cap))
-    assert "? |" in b_line and "штурм" not in b_line and "казарма" not in b_line
+    assert ("? |" in b_line or "армия есть |" in b_line) and "штурм" not in b_line and "казарма" not in b_line
     orders_a = env.ok("A", "GET", "/v1/orders")
     assert orders_a["orders"] == []
     b_order = env.ok("B", "GET", "/v1/orders")["orders"][0]["id"]

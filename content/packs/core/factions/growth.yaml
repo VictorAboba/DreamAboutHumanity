@@ -2,18 +2,20 @@ id: growth
 name: {ru: Ненасытная Поросль, en: Ravenous Growth}
 description: >-
   Биорой. Ополчение без Сплава (4 Провианта), Провиант +15%, ветка «Война» дешевле на 30%, уникальный Пожиратель
-  (сильный, но ест 2 Провианта); при счёте войны — 1 очко за 10 цены убитых. Минус: Кредо −30%, технологии идут
-  медленно.
+  (сильный, но ест 2 Провианта); при счёте войны — до 4 очков с одной провинции (не 3). Минус: Кредо −30%,
+  технологии идут медленно.
 lore: lore/growth.md
 # Core 0.5.0 balance (SCORING.md «Баланс core 0.5.0»): science scores, and the creed −50% left the Growth at 9–11%
 # wins on quad4; the creed penalty is −30% and its war credit counts 1 point per 10 (dropped when war does not score).
+# Core 0.7.0 (decision 27): the kill credit is gone, so the war bonus moves to the scale per province: at most 4 points
+# from one province instead of 3 (SCORING.md «Баланс core 0.7.0»).
 bonuses:
   - {effect: modify, target: unit.militia.cost.alloy, op: set, value: 0}
   - {effect: modify, target: unit.militia.cost.provisions, op: add, value: 4}
   - {effect: modify, target: resource.provisions.income_mul, op: mul, value: 1.15}
   - {effect: modify, target: tech.branch.war.cost_mul, op: mul, value: 0.7}
   - {effect: modify, target: disposition.exterminate.loot_mul, op: mul, value: 1.5}   # conquest only
-  - {effect: modify, target: score.war.per_point, op: set, value: 10}                 # war scoring only
+  - {effect: modify, target: score.war.province_cap, op: set, value: 4}              # war scoring only
 penalties:
   - {effect: modify, target: resource.creed.income_mul, op: mul, value: 0.7}
   - {effect: modify, target: disposition.subjugate.cost_mul, op: mul, value: 1.2}     # conquest only

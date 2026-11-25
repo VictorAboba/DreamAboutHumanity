@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from . import registry
-from .content import Ruleset
+from .content import Ruleset, split_cost
 
 KINDS = ("unit", "building", "tech", "artifact", "faction", "branch", "resource", "province_type", "objective",
          "discovery")
@@ -53,6 +53,12 @@ _STAT_TEXT = {
     "score.war.cap_per_victim": "предел очков войны с одного соперника",
     "score.war.cap": "предел очков войны", "score.war.defense_pct": "доля очков войны в обороне, %",
     "score.betrayal.per_break": "штраф очков за нарушенный пакт",
+    # core 0.7.0 (decision 27)
+    "score.war.province_cap": "предел очков войны с одной провинции",
+    "score.war.hold_turns": "ходов удержания за +1 очко войны",
+    "score.war.province_total": "предел очков войны по провинциям всего",
+    "score.intel.per_success": "очки за успешное задание Тени", "score.intel.cap": "предел очков разведки",
+    "fog.army_presence": "видно наличие чужих армий вне обзора",
 }
 
 
@@ -209,6 +215,13 @@ def describe(ruleset: Ruleset, kind: str, fid: str) -> dict[str, Any]:
         lines.append(f"цена {_amounts(ruleset, out['cost'])}, строится {entity.build_turns} ход(а)"
                      + (f", доход +{_amounts(ruleset, entity.income)}" if entity.income else "")
                      + (", позволяет найм" if entity.recruit else ""))
+        if entity.payment == "parts":
+            # core 0.7.0 (decision 27): the shares of the base price (a faction's own price splits the same way)
+            n = ruleset.building_shares(fid)
+            shares = [split_cost(out["cost"], n, i) for i in range(n)]
+            out.update(payment="parts", shares=shares)
+            lines.append(f"оплата долями: {' / '.join(_amounts(ruleset, s) for s in shares)} — первая с приказом, "
+                         "следующие на шаге строек каждого хода; нет доли — стройка стоит, но не пропадает")
         if entity.score and ruleset.weight("works"):
             pts = int(ruleset.stat(f"building.{fid}.score"))
             out.update(score=pts, max_per_owner=entity.max_per_owner, allowed_types=list(entity.allowed_types))

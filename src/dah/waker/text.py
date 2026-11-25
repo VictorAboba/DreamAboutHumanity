@@ -77,8 +77,17 @@ def wake_text(phase_info: dict[str, Any], *, reminder: bool = False) -> str:
     head = ", ".join(parts) + (", " + " ".join(timing) if timing else "")
     prefix = "[DAH] Напоминание: фаза скоро закроется, ты ещё не нажал ready. " if reminder else "[DAH] "
     ready = f" Готово {phase_info['ready']}." if phase_info.get("ready") else ""
-    return f"{prefix}{head}.{ready} {_hint(phase, turn, phase_info.get('orders_hash'), phase_info.get('intel'))}"
+    return (f"{prefix}{head}.{ready} {_hint(phase, turn, phase_info.get('orders_hash'), phase_info.get('intel'))}"
+            + _idle_shades(phase, phase_info.get("idle_shades")))
 
+
+def _idle_shades(phase: str, n: Any) -> str:
+    """Core 0.7.0 (decision 27): one line about the seat's idle Shades in negotiation_1 and actions (phase info
+    `idle_shades`, the server counts the seat's own only)."""
+    if phase not in ("negotiation_1", "actions") or isinstance(n, bool) or not isinstance(n, int) or n <= 0:
+        return ""
+    shades = "свободная Тень" if n == 1 else "свободные Тени" if n < 5 else "свободных Теней"
+    return f" У тебя {n} {shades} — dah.list_spies(), dah.estimate_mission(); задание spy подаётся в ДЕЙСТВИЯХ."
 
 
 RESULT_REASONS = {"turn_limit": "лимит ходов", "last_standing": "остался последний"}

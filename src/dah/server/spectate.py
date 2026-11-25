@@ -41,7 +41,8 @@ spectator only the number of techs each seat has researched. Setup choices are n
 Stage 3 (docs/SPY_AND_CONQUEST.md section 8): with conquest on, every level sees the public marks of provinces
 (`status`: occupied {by, from, since}, ruined_until, ravaged_until), the claims and the public fates, revolts, claims
 and ruins in the feed; the full levels also see each seat's conquest policy and the fates with prices, loot and source.
-Espionage is private: the delayed spectator sees only «саботаж в P07» without nicks, never Shades, missions or captures;
+Espionage is private: the delayed spectator sees only «саботаж в P07» without nicks, never Shades, missions or captures
+(nor, core 0.7.0, the intel score of successful missions: it leaves its parts and totals until the game is over);
 the full levels see each seat's Shades (count, missions) and the turn's captures (`shade_captured` with the owner and
 whether the victim learned it) next to the sabotage with its author.
 
@@ -64,7 +65,7 @@ import re
 import time
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, Response
@@ -290,6 +291,30 @@ def meta(game: Game, access: str, level: str) -> dict[str, Any]:
             "works": sc_.on(rs, "works"), "objectives": sc_.on(rs, "objectives")}
 
 
+# Score sources hidden from the delayed spectator while the game runs (core 0.7.0): intel counts a seat's successful
+# Shade missions turn by turn, which would name the author of an anonymous «саботаж в P07» (SPY_AND_CONQUEST.md 8).
+# Dropping the part alone would not do (total minus the other parts gives it back), and folding it into science
+# would not either (the delayed level sees each seat's number of techs): it leaves the totals too.
+DELAYED_HIDDEN: tuple[str, ...] = ("intel",)
+
+
+def delayed_scores(scores_: Mapping[str, Any], parts: Mapping[str, Any] | None,
+                   level: str) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """(scores, {seat: {source: points}}) as `level` may see them: the delayed level gets DELAYED_HIDDEN sources out
+    of the parts and out of the totals; the full levels and the revealed one get them as they are."""
+    if level != DELAYED or not parts:
+        return dict(scores_), (dict(parts) if parts is not None else None)
+    out_scores, out_parts = dict(scores_), {}
+    for seat, row in parts.items():
+        row = dict(row or {})
+        for src in DELAYED_HIDDEN:
+            pts = row.pop(src, 0)
+            if pts and seat in out_scores:
+                out_scores[seat] = out_scores[seat] - pts
+        out_parts[seat] = row
+    return out_scores, out_parts
+
+
 def live(game: Game, cache: GameCache, access: str, level: str) -> dict[str, Any]:
     last = last_viewable(game, level)
     history = []
@@ -302,8 +327,9 @@ def live(game: Game, cache: GameCache, access: str, level: str) -> dict[str, Any
             sc = (rep or {}).get("scores") or (rep or {}).get("public", {}).get("scores", {})
         entry = {"turn": turn, "scores": sc}
         if not game.ruleset.default_scoring:
-            entry["by_source"] = ((cache.report(game, turn) or {}).get("score_parts") if turn else
-                                  cache.parts_at_start(game)) or {}
+            by_source = ((cache.report(game, turn) or {}).get("score_parts") if turn else
+                         cache.parts_at_start(game)) or {}
+            entry["scores"], entry["by_source"] = delayed_scores(sc or {}, by_source, level)
         history.append(entry)
     out: dict[str, Any] = {
         "game_id": game.config["game_id"], "turn": game.state.turn, "turn_limit": game.config["turn_limit"],
@@ -450,6 +476,7 @@ def snapshot(game: Game, cache: GameCache, turn: int, level: str) -> dict[str, A
     if parts is not None and state.phase == GAME_OVER and (state.result or {}).get("score_parts"):
         # the end: the final score by source, the revealed objectives included (SCORING.md 9)
         parts, sc = state.result["score_parts"], dict(state.result.get("scores") or sc)
+    sc, parts = delayed_scores(sc, parts, level)        # core 0.7.0: no intel for the delayed level
     conquest = rs.system("conquest")
     statuses = cq.statuses_for(state) if disc.statuses_active(rs) else {}
     finds = disc.on(rs)
@@ -479,7 +506,8 @@ def snapshot(game: Game, cache: GameCache, turn: int, level: str) -> dict[str, A
         if full:
             entry.update(units=dict(p.units), unit_total=p.unit_total(), buildings=list(p.buildings),
                          fortified=p.fortified,
-                         building_now=[{"building": b.building, "turns_left": b.turns_left, "seat": b.seat}
+                         building_now=[{"building": b.building, "turns_left": b.turns_left, "seat": b.seat,
+                                        **({"stalled": True} if b.stalled else {})}   # core 0.7.0: no share paid
                                        for b in state.pending_builds if b.province == pid])
         provinces.append(entry)
     players = []
@@ -503,6 +531,9 @@ def snapshot(game: Game, cache: GameCache, turn: int, level: str) -> dict[str, A
         if full:
             entry.update(resources=dict(p.resources), command_points=p.command_points,
                          units=sum(pr.unit_total() for pr in state.owned(seat)))
+            stalled = sum(1 for b in state.pending_builds if b.seat == seat and b.stalled)
+            if stalled:
+                entry["works_stalled"] = stalled    # core 0.7.0: builds paid in parts that stood without a share
             if rs.techs or rs.artifacts:
                 entry.update(techs=list(p.techs), artifacts=list(p.artifacts), research=dict(p.research),
                              researching=({"tech": p.researching, "progress": p.research.get(p.researching, 0),

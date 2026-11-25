@@ -13,7 +13,7 @@ from . import discoveries as disc
 from . import espionage as esp
 from . import scoring as sc_
 from .combat import Force, fight, pick_losses, round_half_up, strength
-from .content import Ruleset, StatKey
+from .content import Ruleset, StatKey, split_cost
 from .model import BREAK, GameState, Order, PendingBuild, Player, Province, SeatOrders
 from .orders import executable_orders, order_cost
 from .rng import stream
@@ -240,10 +240,12 @@ class _Resolution:
         # stage 4 (SCORING.md 2.3, 2.4): great works are public; fights between seats give war credit
         self.works = sc_.on(ruleset, "works")
         self.war = sc_.on(ruleset, "war")
+        # core 0.7.0 (decision 27): the war score per province (score.war.province_cap > 0) instead of the kill credit
+        self.war_provinces = self.war and sc_.war_by_province(ruleset)
 
     def credit(self, a: Force, b: Force, res: Any, defender: str | None, where: str, province: str | None) -> None:
         """War credit of one fight (SCORING.md 2.4): `war_credit` events seen by the two sides."""
-        if not self.war:
+        if not self.war or self.war_provinces:
             return
         for e in sc_.credit_war(self.s, self.rs, self.factions, a.owner, b.owner, res, defender, where):
             self.ev("war_credit", [e["killer"], e["victim"]], province, **e)
@@ -309,6 +311,10 @@ class _Resolution:
             for e in self.events:
                 if e["kind"] == "captured":
                     sc_.note_capture(s, e.get("to"), e["province"])
+        if self.war_provinces:
+            # 4c (core 0.7.0): war points of captures from living rivals and of provinces held since
+            for e in sc_.credit_provinces(s, self.rs, self.turn, owners_before, alive, self.events):
+                self.ev("war_points", [e["seat"]], **e)
         self.economy(alive)
         if self.persists:                         # starvation may have emptied a fortified province
             for prov in s.provinces.values():
@@ -450,8 +456,12 @@ class _Resolution:
                     self.ev("recruited", [seat], o.province, unit=o.unit, count=o.count)
                 elif o.kind == "build":
                     turns = self.rs.buildings[o.building].build_turns
-                    self.s.pending_builds.append(PendingBuild(seat, o.province, o.building, turns))
-                    self.ev("build_started", [seat], o.province, building=o.building, turns=turns)
+                    shares = self.rs.building_shares(o.building)
+                    # core 0.7.0 (`payment: parts`): the order paid the first share; the whole price is fixed now
+                    price = dict(self.rs.building_cost(o.building, self.factions[seat])) if shares > 1 else {}
+                    self.s.pending_builds.append(PendingBuild(seat, o.province, o.building, turns, price))
+                    self.ev("build_started", [seat], o.province, building=o.building, turns=turns,
+                            **({"shares": shares, "paid": dict(cost)} if shares > 1 else {}))
                     if self.works and self.rs.buildings[o.building].score:
                         # a great work is public from its start (SCORING.md 2.3): the others get time to answer
                         self.ev("work_started", [seat], o.province, seat=seat, building=o.building,
@@ -736,8 +746,15 @@ class _Resolution:
 
     # 6. construction
     def builds(self) -> None:
+        """Every build in progress advances a turn. A build paid in parts (core 0.7.0, decision 27) first pays its next
+        share from the owner's stock, after this turn's income and upkeep (the share of the order's own turn was paid
+        with the order); a share the stock does not cover in full is not taken at all: the build stalls (no progress
+        this turn, `build_stalled` to the owner with what is missing) and stays, to go on once a later turn pays."""
         still = []
         for b in self.s.pending_builds:
+            if b.cost and not self.pay_share(b):
+                still.append(b)
+                continue
             b.turns_left -= 1
             if b.turns_left > 0:
                 still.append(b)
@@ -749,6 +766,30 @@ class _Resolution:
                 self.ev("work_completed", [b.seat], b.province, seat=b.seat, building=b.building,
                         ready_turn=self.turn)
         self.s.pending_builds = still
+
+    def pay_share(self, b: PendingBuild) -> bool:
+        """The share due at this build step of a build paid in parts: True when paid (or already paid with the order
+        this turn); False when the owner's stock falls short (nothing is taken, the build is stalled)."""
+        bdef = self.rs.buildings.get(b.building)
+        shares = bdef.build_turns if bdef is not None else 1
+        index = shares - b.turns_left          # shares paid so far = turns of progress so far
+        if index <= 0 or index >= shares:
+            b.stalled = False
+            return True
+        due = split_cost(b.cost, shares, index)
+        stock = self.s.players[b.seat].resources
+        missing = {r: n - stock.get(r, 0) for r, n in sorted(due.items()) if stock.get(r, 0) < n}
+        if missing:
+            b.stalled = True
+            self.ev("build_stalled", [b.seat], b.province, seat=b.seat, building=b.building, due=due,
+                    missing=missing, share=index + 1, shares=shares, turns_left=b.turns_left)
+            return False
+        for r, n in due.items():
+            stock[r] -= n
+        b.stalled = False
+        self.ev("build_paid", [b.seat], b.province, seat=b.seat, building=b.building, paid=due, share=index + 1,
+                shares=shares)
+        return True
 
     # 7. elimination and victory
     def eliminate(self, alive: list[str]) -> list[str]:

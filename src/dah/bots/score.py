@@ -28,6 +28,7 @@ from dah.bots.view import (
     FOOD_RESOURCE,
     GREAT_WORKS,
     UNIT_UPKEEP_FOOD,
+    WORKS_IN_PARTS,
     Province,
     StateView,
     short_id,
@@ -71,13 +72,14 @@ def lay_works(view: StateView, works: list[tuple[str, bool]], food_turns: int) -
     from dah.bots.spy import food_view
     out: list[Order] = []
     busy: set[str] = set()
+    view = food_view(view, *shares_due(view))     # core 0.7.0: the next shares of works in progress stay aside
     for work, capital in works:
         order = work_order(view, work, view.free_food(), view.resource(BUILD_RESOURCE), food_turns, capital=capital,
                            busy=busy)
         if order is not None:
             out.append(order)
             busy.add(str(order["province"]))
-            food, alloy = work_cost(work)
+            food, alloy = share(work, 0) if work in WORKS_IN_PARTS else work_cost(work)
             view = food_view(view, food, alloy)
     return out, view
 
@@ -85,18 +87,57 @@ def lay_works(view: StateView, works: list[tuple[str, bool]], food_turns: int) -
 def work_order(view: StateView, work: str, food: int, alloy: int, food_turns: int, *,
                capital: bool = True, busy: set[str] | frozenset[str] = frozenset()) -> Order | None:
     """A build order for the great work `work`, or None: works are off, the seat has one, it cannot be ready by the
-    end, or the provisions (`food` free, keeping `food_turns` turns of upkeep) or `alloy` do not cover it."""
+    end, or the provisions (`food` free, keeping `food_turns` turns of upkeep) or `alloy` do not cover it. A work paid
+    in parts (core 0.7.0) needs only its first share now, and the later shares covered by the rest of the stock plus
+    the net income of the turns they fall in (`payable_in_parts`)."""
     if not view.scoring("works") or work not in GREAT_WORKS or has_work(view, work):
         return None
     turns = GREAT_WORKS[work][0]
     if view.turn_limit and view.turns_left() < turns:
         return None
-    if food - BUILDING_COST_FOOD.get(work, 0) < food_need(view, food_turns) or alloy < BUILDING_COST_ALLOY[work]:
+    if work in WORKS_IN_PARTS:
+        if not payable_in_parts(view, work, food - food_need(view, food_turns), alloy):
+            return None
+    elif food - BUILDING_COST_FOOD.get(work, 0) < food_need(view, food_turns) or alloy < BUILDING_COST_ALLOY[work]:
         return None
     site = work_site(view, work, capital=capital, busy=busy)
     if site is None:
         return None
     return {"kind": "build", "province": site.id, "building": view.qualify(work)}
+
+
+def share(work: str, index: int) -> tuple[int, int]:
+    """(provisions, alloy) of share `index` of a work paid in parts: an even split over its build turns, the remainder
+    on the first share (engine/content.split_cost)."""
+    turns = GREAT_WORKS[work][0]
+    food, alloy = work_cost(work)
+    first = index == 0
+    return food // turns + (food % turns if first else 0), alloy // turns + (alloy % turns if first else 0)
+
+
+def payable_in_parts(view: StateView, work: str, food: int, alloy: int) -> bool:
+    """The first share is free now and each later share (paid at the build step of the turns after) is covered by
+    what is left plus the net income of the turns up to it, so the work never stalls (a bot that counted on stalls
+    started works it then starved: the simulator's monuments 81 started / 58 done); `food` is the provisions free
+    beyond the upkeep reserve."""
+    net = view.net_income or {}
+    net_food, net_alloy = max(0, net.get(FOOD_RESOURCE, 0)), max(0, net.get(BUILD_RESOURCE, 0))
+    for k in range(GREAT_WORKS[work][0]):
+        f, a = share(work, k)
+        food += net_food if k else 0
+        alloy += net_alloy if k else 0
+        if food < f or alloy < a:
+            return False
+        food, alloy = food - f, alloy - a
+    return True
+
+
+def shares_due(view: StateView) -> tuple[int, int]:
+    """(provisions, alloy) of the next shares of the own builds paid in parts: kept aside, so the build step can pay
+    them and the work does not stall."""
+    food = sum(int(p.share_due.get(FOOD_RESOURCE, 0)) for p in view.own_provinces())
+    alloy = sum(int(p.share_due.get(BUILD_RESOURCE, 0)) for p in view.own_provinces())
+    return food, alloy
 
 
 def food_need(view: StateView, food_turns: int) -> int:
@@ -117,7 +158,14 @@ def saving_rate(view: StateView, work: str, food_turns: int) -> int | None:
     if not view.scoring("works") or work not in GREAT_WORKS or has_work(view, work) or not view.turn_limit:
         return None
     turns_to_order = view.turns_left() - GREAT_WORKS[work][0]   # turns after this one while it can still be ordered
-    need = BUILDING_COST_FOOD.get(work, 0) + food_need(view, food_turns) - view.resource(FOOD_RESOURCE)
+    if work in WORKS_IN_PARTS:
+        # core 0.7.0: paid in parts, the stock needs only what makes every share payable from the stock and the net
+        # income (alloy aside, as for a work paid in full)
+        free = view.resource(FOOD_RESOURCE) - food_need(view, food_turns)
+        need = next((x for x in range(BUILDING_COST_FOOD.get(work, 0) + 1)
+                     if payable_in_parts(view, work, free + x, 10 ** 6)), BUILDING_COST_FOOD.get(work, 0))
+    else:
+        need = BUILDING_COST_FOOD.get(work, 0) + food_need(view, food_turns) - view.resource(FOOD_RESOURCE)
     if turns_to_order < 1 or need <= 0:
         return None
     rate = -(-need // turns_to_order)
@@ -175,16 +223,32 @@ def attack_bonus(view: StateView, war: bool = False) -> dict[str, float]:
     objective; with `war` (and the source on, the cap not reached) WAR_BONUS for every province of another seat."""
     out: dict[str, float] = {}
     objectives = [o for o in view.open_objectives() if o.get("kind") in HOLD_KINDS]
-    war_on = war and view.scoring("war") and int((view.war or {}).get("cap_left", 1)) > 0
+    left = (view.war or {}).get("cap_left", 1)
+    war_on = war and view.scoring("war") and (left is None or int(left) > 0)
     for pid, p in sorted(view.provinces.items()):
         if view.is_mine(p):
             continue
         bonus = OBJECTIVE_BONUS if any(advances(view, o, p) for o in objectives) else 0.0
-        if war_on and p.owner is not None and not view.is_partner(p.owner):
+        if war_on and p.owner is not None and not view.is_partner(p.owner) and war_pays(view, pid):
             bonus += WAR_BONUS
         if bonus:
             out[pid] = bonus
     return out
+
+
+def war_pays(view: StateView, pid: str) -> bool:
+    """Core 0.7.0 (war per province): taking `pid` still pays (its points below the cap per province); the kill credit
+    of older games: always."""
+    war = view.war or {}
+    cap = war.get("per_province")
+    if not cap:
+        return True
+    return int((war.get("provinces") or {}).get(pid, 0)) < int(cap)
+
+
+def intel_pays(view: StateView) -> bool:
+    """Core 0.7.0 (the source `intel`): a successful mission against a rival still scores."""
+    return view.scoring("intel") and int((view.intel or {}).get("left", 0)) > 0
 
 
 def objective_garrison(view: StateView) -> Reserved:

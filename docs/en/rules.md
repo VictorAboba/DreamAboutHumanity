@@ -5,7 +5,7 @@
 These are the rules as the engine implements them: the vertical slice plus stage 2 (techs, the setup phase,
 factions and artifacts). The exact contracts are in the [slice specification](../SLICE.md) and the
 [stage-2 specification](../TECH_AND_SETUP.md) (both in Russian); the [full concept](../CONCEPT.md) (in Russian)
-describes the game the slice grows towards. Numbers below are the defaults of the `core` pack, version 0.6.0 (espionage and conquest of stage 3a, the scoring of stage 4; both on by default in `slice3`, `slice2` and `quad4`; the Abandoned lands of stage 5 are described [below](#abandoned-lands-and-finds-stage-5)); a
+describes the game the slice grows towards. Numbers below are the defaults of the `core` pack, version 0.7.0 (espionage and conquest of stage 3a, the scoring of stage 4 with the decision-27 changes: great works paid in parts, intel points, war per province, army fog; both on by default in `slice3`, `slice2` and `quad4`; the Abandoned lands of stage 5 are described [below](#abandoned-lands-and-finds-stage-5)); a
 scenario or a pack can change them ([Content packs](modding.md)). The tables of units, buildings, techs, factions and
 artifacts are a snapshot: the match's own numbers are always in `rules(topic)` and `describe(id)` (see the end of
 this page).
@@ -161,8 +161,8 @@ unit. (A match on core 0.2.0, which has no techs, keeps one edge per move.)
 | `citadel` | Цитадель | 40 alloy | 2 turns | province defense +0.3; needs Fortification |
 | `warehouse` | Склад | 20 alloy | 1 turn | +2 provisions; recruiting here 20% cheaper; needs Supply Routes |
 | `hq` | Штаб | 35 alloy | 2 turns | allows recruiting; province defense +0.1; +25% back on N2 cancels; needs Staff Litanies |
-| `monument` | Монумент Предела | 25 provisions + 10 alloy | 2 turns | great work: +3 points; one per seat |
-| `dream_spire` | Шпиль Сна | 100 provisions + 60 alloy | 4 turns | great work: +7 points; one per seat; not in a capital (forge, agri, waste, shrine) |
+| `monument` | Монумент Предела | 25 provisions + 10 alloy (in parts: 13+5, 12+5) | 2 turns | great work: +3 points; one per seat |
+| `dream_spire` | Шпиль Сна | 100 provisions + 60 alloy (in parts: 4 × 25+15) | 4 turns | great work: +7 points; one per seat; not in a capital (forge, agri, waste, shrine) |
 
 A province holds at most one building of each kind. Recruiting is possible only in a province with barracks (or a
 headquarters). The warehouse discount is counted per unit and rounded in the seat's favour (the unit price is rounded
@@ -174,6 +174,14 @@ Great works (core 0.5.0) exist only where the score counts the works source (see
 and completion are public. `max_per_owner` counts ready and pending buildings in all own provinces (a second one is
 refused with `ALREADY_BUILT` «у тебя уже есть 1 из 1»; a captured one may be kept), and `allowed_types` lists the
 province types the building may be built in (otherwise `NOT_AVAILABLE`).
+
+**Paid in parts** (`payment: parts`, core 0.7.0, decision 27; both great works). The price is split into `build_turns`
+equal shares per resource, the remainder on the first. The order pays and checks only the first share; each later
+share is charged by the turn's build step (after income and upkeep). If a whole share cannot be paid, nothing is
+charged and the work stands still that turn (event `build_stalled` with what is missing, «СТОИТ: нет доли k/n» in
+`get_state`); it goes on once a share is paid. An own build in `get_state` shows `share`, `next_share` and
+`stalled`. Shares paid are lost with the province, as before. Only the owner sees a stall, so the public «начал
+великую стройку» of a work paid in parts gives its turn as «не раньше хода N» (not before turn N).
 
 ## Orders
 
@@ -387,6 +395,9 @@ army of each and fights in P07; a hidden army (`?` in the state) has to be guess
 
 - A seat sees its own provinces and their neighbours in full: owner, units, buildings, fortification.
 - Of every other province it sees the name, type and owner (the political map is public); units are shown as `?`.
+  Army fog (`fog.army_presence`, core 0.7.0 with espionage): beyond sight another seat's province shows only
+  «армия есть» / «армии нет» (`army` in JSON), never the size; a Shade's Observe reveals it. Allies do not share
+  sight.
 - Other seats' resources, orders and messages are never visible.
 - Other seats' techs, research and artifacts are hidden until `game_over`; only the number of techs each seat has
   learned is public (techs given by artifacts are not counted, so the number does not give the artifact away).
@@ -431,7 +442,7 @@ line. `format=json` gives the same view as JSON.
 
 - The match ends when one living seat is left (it wins) or after the last turn. After the last turn the living
   seats with the highest final score win; a draw is possible.
-- **Core 0.5.0 scenarios `slice3`, `slice2`, `quad4` (and `blitz_score`)** add up five sources, each with weight 1
+- **Core 0.5.0 scenarios `slice3`, `slice2`, `quad4` (and `blitz_score`)** add up the sources, each with weight 1
   (the authoritative spec is [SCORING.md](../SCORING.md), in Russian):
   - **land**: 1 per own full province, +3 per capital of the map (any: own, captured, of the Wastelands);
     Occupied and Ashen provinces give 0;
@@ -441,8 +452,12 @@ line. `format=json` gives the same view as JSON.
     Dream Spire (`dream_spire`, 100 provisions + 60 alloy, 4 turns, +7, not in a capital); one of each per seat;
     they score while ready in an own full province and pass with the province; their start and completion are
     public;
-  - **war**: the price of the other seats' units killed in battle (half when defending), 1 point per 15 (the
-    Growth: per 10), at most 3 from one rival and 5 in all; neutrals, starvation, revolts and retreat losses give nothing;
+  - **war** (core 0.7.0, decision 27): +1 per province taken from a living rival (occupied or razed counts, a raid
+    that gives it back or a release does not) and +1 per 2 full turns it is held; at most 3 from one province (the
+    Growth: 4) and 8 in all (at that cap a capture or a hold gives no point and no notice); points stay after the province is lost; neutral and Abandoned land give 0. Before 0.7.0:
+    the price of killed units, 1 point per 15 (the Growth: per 10), at most 3 from one rival and 5 in all;
+  - **intel** (`intel`, only with espionage — with espionage off its weight is 0, 0.7.0): +1 per successful Shade mission against a living rival (once per
+    Shade, target and mission a turn), at most 3 a game; `estimate_mission` says whether a success would score;
   - **secret objective**: one per seat, dealt at the start (hold two forges, six provinces, a province of another
     seat's start, a ready great work; on `mirror2`/`mirror3` also two agri worlds, four War or three Industry techs,
     on `mirror4` two shrines; with three seats or more a rival's capital, or take the named rival's capital); points
@@ -461,7 +476,8 @@ line. `format=json` gives the same view as JSON.
   hidden. The turn score is land, science, works and war; the objective is added only to the final total. On an
   equal total every seat that has it wins; an eliminated seat's objective is revealed but does not count.
 - **Where to look:** the «Счёт:» line of `get_state` (≤ 300 characters: you with the breakdown, rivals as «≥», your
-  objective and whether it is met now); in JSON `you.score`, `you.score_parts`, `you.war {points, cap_left}`,
+  objective and whether it is met now); in JSON `you.score`, `you.score_parts`, `you.war {points, cap_left}` (0.7.0 also `per_province`,
+  `hold_turns`, `provinces`), `you.intel {points, left}`,
   `you.objectives` (with a setup phase the objective is already in `get_setup`), and per player `score`,
   `score_exact` and `score_known` (`null`: unknown). Science points and branch progress are in `list_techs`; pool
   objectives and great works in `describe`; the turn report (`history`) shows only your own score. After the match
@@ -508,7 +524,8 @@ before. The numbers below are the defaults; a game's exact numbers are in `rules
 - A Shade is a record of the seat, not a unit. Hiring, `{"kind": "hire_shade"}`, is actions only, only with one's own
   full starting capital, one per turn, up to `spy.shades_max` (2); price and upkeep come from the pack (20 alloy,
   1 provision per turn). Every seat holds one Shade (`s1`) from the start for free (`spy.shades_free`, within the
-  limit); while it is idle, `get_state` shows a `ТЕНИ:` line in N1 and actions.
+  limit); while it is idle, `get_state` shows a `ТЕНИ:` line in N1 and actions, and `phase()` gives `idle_shades`
+  and a reminder line (the turn-start wake repeats it).
 - Core missions: Observe (`observe`), Ledger (`ledger`), Secret Objective (`secret`: the seat's objective exactly —
   condition, points, met now; only with secret objectives; D1, 1–3 rounds, 2 provisions a round), Read Orders
   (`read_orders`), Sabotage (`sabotage`).
@@ -608,7 +625,7 @@ and `describe(<find>)`.
 | `core:blitz_score` | `mirror3` | 6 | 3 factions, artifact draft (3 offered) | 5s / 5s / 5s / 5s | on / on |
 | `core:blitz_finds` | `mirror3` | 6 | 3 factions, artifact draft (3 offered) | 5s / 5s / 5s / 5s | on / on |
 
-Scoring: `slice3`, `slice2`, `quad4` and `blitz_score` count all five sources with weight 1 and deal one secret
+Scoring: `slice3`, `slice2`, `quad4` and `blitz_score` count all six sources with weight 1 (`intel` since 0.7.0) and deal one secret
 objective; `blitz_test` and `blitz_spy` count land only. Great works are in `buildings/great_works.yaml`, objectives in
 `objectives/objectives.yaml`.
 

@@ -30,6 +30,7 @@ from test_review_stage2 import FakeClock, _play_out
 
 CORE = DEFAULT_PACKS_DIR / "core"
 CORE050 = LEGACY_PACKS_DIR / "core-0.5.0"
+CORE060 = LEGACY_PACKS_DIR / "core-0.6.0"     # core 0.7.0 froze it: the 0.6.0 checks below run on the copy
 # ruleset hashes of the frozen core 0.5.0 (measurement m7 was played on quad4 130d2c216ccf)
 CORE050_HASHES = {"slice3": "1981b24e644c", "slice2": "365beb9cdffd", "quad4": "130d2c216ccf",
                   "blitz_test": "b91b21d41575", "blitz_spy": "08172b58472b", "blitz_score": "917db77d9643"}
@@ -44,7 +45,7 @@ def _seats(n: int) -> list[dict]:
 # ---------------------------------------------------------------- freeze
 
 def test_core_050_is_frozen_with_its_hashes():
-    assert "version: 0.6.0" in (CORE / "pack.yaml").read_text(encoding="utf-8")
+    assert "version: 0.7.0" in (CORE / "pack.yaml").read_text(encoding="utf-8")
     head = (CORE050 / "pack.yaml").read_text(encoding="utf-8")
     assert "version: 0.5.0" in head and "Frozen copy of core 0.5.0" in head and "Do not edit" in head
     for sid, prefix in CORE050_HASHES.items():
@@ -60,7 +61,7 @@ def test_with_the_new_systems_off_only_the_version_changes(sid):
     """Espionage, conquest and the scoring off: 0.6.0 builds exactly the rules of 0.5.0 (only `packs` differs)."""
     off = {"espionage": False, "conquest": False, "discoveries": False}
     a = build_ruleset([str(CORE050)], sid, off, scoring={"territory": 1}).to_dict()
-    b = build_ruleset(None, sid, off, scoring={"territory": 1}).to_dict()
+    b = build_ruleset([str(CORE060)], sid, off, scoring={"territory": 1}).to_dict()
     assert (a.pop("packs"), b.pop("packs")) == ({"core": "0.5.0"}, {"core": "0.6.0"})
     assert a == b
 

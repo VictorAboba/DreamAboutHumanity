@@ -16,6 +16,7 @@ import random
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Mapping
 
+from dah.bots import score as bs
 from dah.bots import view as bv
 from dah.bots.tactics import Reserved, free_units
 from dah.bots.view import BUILD_RESOURCE, FOOD_RESOURCE, MISSIONS, Province, StateView, short_id
@@ -189,6 +190,16 @@ def spy_order(view: StateView, shade: str, mission: str, target: str, rounds: in
     if a > alloy or f > food:
         return None
     return {"kind": "spy", "shade": shade, "mission": mission, "target": target, "rounds": rounds}, a, f
+
+
+def rival_target(view: StateView) -> str | None:
+    """Core 0.7.0 (the source `intel`): the strongest neighbour, else any living rival (highest public score), while a
+    success still scores; without intel points just the strongest neighbour."""
+    near = strongest_neighbour(view)
+    if near is not None or not bs.intel_pays(view):
+        return near
+    others = [s for s in view.players if s not in view.me]
+    return min(others, key=lambda s: (-view.scores.get(s, 0), s)) if others else None
 
 
 def strongest_neighbour(view: StateView, among: Callable[[str], bool] | None = None) -> str | None:

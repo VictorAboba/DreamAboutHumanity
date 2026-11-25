@@ -175,3 +175,16 @@ def test_goal_text_follows_the_scoring(tmp_path):
     assert "наука + великие стройки" in line and "земля" not in line and "тайная" not in line
     plain = make_config(game_id="p", scenario="tri_plain", seats=SEATS, seed=1, pack_dirs=PACKS)
     assert "1 за провинцию, +3 за каждую столицу" in goal_text(plain, "A")
+
+
+def test_goal_text_names_intel_only_with_espionage():
+    """m9 readiness: the goal must say that spying scores (m8 agents skipped spying because it gave no points)."""
+    real = [str(Path(__file__).resolve().parents[1] / "content" / "packs" / "core")]
+    seats = [{"seat": s, "nick": n, "kind": "agent"} for s, n in (("A", "Альфа"), ("B", "Бета"), ("C", "Гамма"))]
+    on = make_config(game_id="i", scenario="core:quad4", seats=seats, seed=1, pack_dirs=real)
+    line = next(x for x in goal_text(on, "A").splitlines() if x.startswith("Цель игры"))
+    assert "война + разведка (успешные задания Тени) + твоя тайная цель" in line
+    off = make_config(game_id="o", scenario="core:quad4", seats=seats, seed=1, pack_dirs=real,
+                      systems={"espionage": False})
+    line = next(x for x in goal_text(off, "A").splitlines() if x.startswith("Цель игры"))
+    assert "разведка" not in line and "война + твоя тайная цель" in line

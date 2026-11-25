@@ -104,7 +104,7 @@ def objectives_patch(pack: Path, items: list[dict[str, Any]]) -> None:
 def test_no_scoring_key_keeps_hashes_state_and_scores(tmp_path):
     plain = ruleset("tri_plain")
     assert plain.default_scoring and plain.scenario.scoring == {"territory": 1, "science": 0, "works": 0, "war": 0,
-                                                               "objectives": 0}
+                                                               "intel": 0, "objectives": 0}
     data = plain.to_dict()
     assert "scoring" not in data["scenario"] and "objectives" not in data["scenario"] and "objectives" not in data
     assert "t4:monument" not in plain.buildings and not plain.objectives      # requires_system scoring.works
@@ -145,7 +145,7 @@ def test_default_result_keeps_three_keys():
 
 def test_scoring_weights_and_host_override():
     rs = ruleset("tri_study")
-    assert rs.scenario.scoring == {"territory": 0, "science": 1, "works": 1, "war": 0, "objectives": 0}
+    assert rs.scenario.scoring == {"territory": 0, "science": 1, "works": 1, "war": 0, "intel": 0, "objectives": 0}
     assert rs.to_dict()["scenario"]["scoring"]["science"] == 1
     over = ruleset("tri_plain", scoring={"territory": 1, "war": 2})
     assert over.weight("war") == 2 and over.weight("science") == 0 and not over.default_scoring
@@ -697,7 +697,7 @@ def _ready_all(game: Game) -> None:
 def test_config_flags_go_into_config_and_replay(tmp_path):
     cfg = make_config(game_id="fl", scenario="tri_plain", seats=SEATS, seed=3, pack_dirs=PACKS,
                       scoring={"territory": 1, "war": 1, "works": 1, "objectives": 1}, objectives=1)
-    assert cfg["scoring"] == {"territory": 1, "science": 0, "works": 1, "war": 1, "objectives": 1}
+    assert cfg["scoring"] == {"territory": 1, "science": 0, "works": 1, "war": 1, "intel": 0, "objectives": 1}
     assert cfg["objectives"] == 1
     gdir, _ = init_game_dir(tmp_path, cfg)
     game = Game.create(gdir, Clock())

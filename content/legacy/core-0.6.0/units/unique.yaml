@@ -1,0 +1,52 @@
+# One unique unit per faction of CONCEPT.md (the neutral covenant has none).
+- id: throne_warden
+  name: {ru: Страж Престола, en: Throne Warden}
+  short: страж
+  attack: 2
+  defense: 4
+  cost: {alloy: 14}
+  upkeep: {provisions: 1}
+  abilities: [{id: garrison, defense: 1}]
+  factions: [litany]
+  lore: Закованные в ржавые ризы стражи не покидают своих стен и не отдают их.
+- id: faceless
+  name: {ru: Безликие, en: The Faceless}
+  short: безлик
+  attack: 3
+  defense: 3
+  cost: {alloy: 13}
+  upkeep: {provisions: 1}
+  abilities: [ignore_fortify, {id: fast, range: 2}]
+  factions: [synclite]
+  lore: Их не видят на стенах, пока стены не открыты изнутри.
+- id: ash_cantor
+  name: {ru: Певчие Пепла, en: Ash Cantors}
+  short: певчие
+  attack: 3
+  defense: 3
+  cost: {alloy: 12}
+  upkeep: {provisions: 1}
+  counters: [armor]
+  abilities: [{id: siege, cap: 1.0}]
+  factions: [ash_choir]
+  lore: Их хорал размягчает камень и волю.
+- id: devourer
+  name: {ru: Пожиратель, en: Devourer}
+  short: пожир
+  attack: 4
+  defense: 2
+  cost: {alloy: 10}
+  upkeep: {provisions: 2}
+  factions: [growth]
+  lore: Ест всё, что не успело убежать, и всегда голоден.
+- id: rift_corsair
+  name: {ru: Корсары Разлома, en: Rift Corsairs}
+  short: корсар
+  attack: 3
+  defense: 3
+  cost: {alloy: 12}
+  upkeep: {provisions: 1}
+  counters: [artillery]
+  abilities: [{id: fast, range: 2}]
+  factions: [captains]
+  lore: Ходят Тропами, которых нет на картах, и берут то, что плохо лежит.

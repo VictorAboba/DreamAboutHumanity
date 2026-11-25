@@ -78,6 +78,7 @@ SECRET_ROUNDS = 2      # core 0.6.0: the secret objective mission (one report is
 P2_FORTIFY_CP = 1   # registry: a fortify given in negotiation_2
 P2_RECALL_CP = 1    # registry default of p2.cost.recall
 MONUMENT = "monument"   # stage 4 (docs/SCORING.md 10)
+SPIRE = "dream_spire"   # core 0.7.0: paid in parts, within reach of the diplomat's income
 FIND_ARMY = 4           # stage 5: an army into Abandoned land that may hold a find (dah.bots.finds)
 GUARD_MARGIN = 0.1      # the ruins' guard, a find's neutrals: estimate >= 0.75
 LAIR_MARGIN = 0.25      # a lair: >= 0.9
@@ -122,7 +123,9 @@ class DiplomatBot(Bot):
         extra, food_held, alloy_held = self._stage3(view)
         full = view
         view = spy.food_view(view, food_held, alloy_held)
-        works, view = score.lay_works(view, [(MONUMENT, True)], FOOD_TURNS)
+        # core 0.7.0: the Spire too (not in the capital) once the Monument stands, when its shares fit the income
+        spire = [(SPIRE, False)] if score.has_work(view, MONUMENT) else []
+        works, view = score.lay_works(view, [(MONUMENT, True), *spire], FOOD_TURNS)
         # after its building turns it saves for the Monument: the stock is kept, recruits eat what income leaves
         early = view.turn <= self.build_until and not score.wants_work(view)   # its objective: save at once
         saving = None if works or early else score.saving_rate(view, MONUMENT, FOOD_TURNS)
@@ -194,7 +197,7 @@ class DiplomatBot(Bot):
                 alloy -= spy.shade_cost()
             else:
                 alloy -= spy.shade_savings(view, self.memory, from_turn=SHADE_FROM_TURN, alloy=alloy)
-            target = spy.strongest_neighbour(view, view.is_partner) or spy.strongest_neighbour(view)
+            target = spy.strongest_neighbour(view, view.is_partner) or spy.rival_target(view)
             busy = {str((sh.get("mission") or {}).get("target")) for sh in spy.active_shades(view)}
             idle = spy.idle_shades(view)
             if idle and target is not None and target not in busy and spy.can_start(view):

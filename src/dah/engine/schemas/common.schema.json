@@ -115,6 +115,7 @@
         "scoring.science",
         "scoring.works",
         "scoring.war",
+        "scoring.intel",
         "scoring.objectives"
       ]
     }

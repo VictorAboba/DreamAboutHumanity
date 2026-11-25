@@ -69,6 +69,19 @@ def seat_seed(game_id: str, seat: str) -> int:
     return int.from_bytes(hashlib.sha256(f"{game_id}|{seat}|bot".encode()).digest()[:8], "big")
 
 
+def seat_eliminated(status: dict[str, Any]) -> bool:
+    """phase() of a seat that is out of the game (`alive: false` / `eliminated`; the game itself goes on)."""
+    return status.get("alive") is False or bool(status.get("eliminated"))
+
+
+def _seat_out(api: Api) -> bool:
+    """After a PHASE_LOCKED: is it because the seat is out (one phase() call; any failure counts as no)?"""
+    try:
+        return seat_eliminated(api.phase())
+    except (httpx.HTTPError, ApiError, KeyError, TypeError, ValueError, AttributeError):
+        return False
+
+
 class Bot:
     """Decision hooks are pure functions of a StateView; `run` drives them against the server."""
 
@@ -169,6 +182,10 @@ class Bot:
                     status = api.phase()
                 if status.get("game_over") or status.get("phase") == "game_over":
                     return
+                if seat_eliminated(status):
+                    # the seat is out of the game (smoke8: its bot kept playing into PHASE_LOCKED): stop quietly
+                    log.info("bot %s (%s): seat eliminated, the bot stops", self.seat, self.name)
+                    return
                 seq = int(status.get("phase_seq", 0))
                 if status.get("phase") in PLAYABLE_PHASES and not status.get("you_ready"):
                     if seq != acted_seq:
@@ -178,8 +195,13 @@ class Bot:
                 acted_seq = seq
                 status = api.wait_phase(after_seq=seq, max_seconds=WAIT_SECONDS)
             except (httpx.HTTPError, ApiError) as exc:
-                log.warning("bot %s (%s): %s", self.seat, self.name, exc)
                 status = None
+                if getattr(exc, "code", None) == "PHASE_LOCKED" and _seat_out(api):
+                    # the seat was eliminated while the bot played (smoke8: «PHASE_LOCKED: место выбыло из игры»):
+                    # no error line, the bot stops
+                    log.info("bot %s (%s): seat eliminated, the bot stops", self.seat, self.name)
+                    return
+                log.warning("bot %s (%s): %s", self.seat, self.name, exc)
                 stop_event.wait(RETRY_SECONDS)
             except (KeyError, TypeError, ValueError):  # unexpected payload shape: keep the seat alive
                 log.exception("bot %s (%s): cannot handle server response", self.seat, self.name)

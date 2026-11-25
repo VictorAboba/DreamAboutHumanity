@@ -20,6 +20,12 @@
 # early leader took the ruins first and the snowball grew), the Treasury +45 alloy, +25 provisions, +20 creed (was
 # 30/15/15: a later prize, more often for a trailing seat); `souls: halve` (income x0.5 for good, no Ravage) won the
 # A/B/C measurement (ravage | halve | ashes): even on G1 and G2, best against the scout sweep.
+# Core 0.7.0 (decision 27, measurement m8): the war score is a scale per province (score.war.province_cap 3: +1 for a
+# province taken from a living rival, +1 per two full turns held, at most 3 per province; the kill credit's
+# score.war.per_point is gone); successful spy missions score (`intel`, +1 each, at most 3 a game); beyond sight a
+# rival's province shows only whether an army stands there (fog.army_presence) in the espionage scenarios.
+# Balance core 0.7.0 (SCORING.md): at most 8 war points in all (score.war.province_total; uncapped, the simulator's
+# rush bot took 15 a game and won 47% of quad4 seats).
 - id: slice3
   name: Срез на троих
   map: mirror3
@@ -33,7 +39,7 @@
     max_chars: 800
   diplomacy_limits: {gifts_per_phase: 3, pact_proposals_per_phase: 3}
   systems: {espionage: true, conquest: true, discoveries: true}
-  scoring: {territory: 1, science: 1, works: 1, war: 1, objectives: 1}
+  scoring: {territory: 1, science: 1, works: 1, war: 1, intel: 1, objectives: 1}
   objectives: {dealt: 1}
   discoveries:
     souls: halve
@@ -47,8 +53,10 @@
   overrides:
     - {type: modify, target: combat.fortify_bonus, op: set, value: 0.15}
     - {type: modify, target: combat.fortify_persists, op: set, value: 1}
+    - {type: modify, target: fog.army_presence, op: set, value: 1}
     - {type: modify, target: score.science.tier2, op: set, value: 1}
-    - {type: modify, target: score.war.per_point, op: set, value: 15}
+    - {type: modify, target: score.war.province_cap, op: set, value: 3}
+    - {type: modify, target: score.war.province_total, op: set, value: 8}
     - {type: modify, target: score.betrayal.per_break, op: set, value: 3}
 - id: slice2
   name: Дуэль
@@ -58,13 +66,15 @@
   phase_limits: {setup: 5m, negotiation_1: 12m, actions: 5m, negotiation_2: 5m}
   setup: {artifacts: draft, artifact_offer: 3, artifact_points: 3}
   systems: {espionage: true, conquest: true}
-  scoring: {territory: 1, science: 1, works: 1, war: 1, objectives: 1}
+  scoring: {territory: 1, science: 1, works: 1, war: 1, intel: 1, objectives: 1}
   objectives: {dealt: 1}
   overrides:
     - {type: modify, target: combat.fortify_bonus, op: set, value: 0.15}
     - {type: modify, target: combat.fortify_persists, op: set, value: 1}
+    - {type: modify, target: fog.army_presence, op: set, value: 1}
     - {type: modify, target: score.science.tier2, op: set, value: 1}
-    - {type: modify, target: score.war.per_point, op: set, value: 15}
+    - {type: modify, target: score.war.province_cap, op: set, value: 3}
+    - {type: modify, target: score.war.province_total, op: set, value: 8}
     - {type: modify, target: score.betrayal.per_break, op: set, value: 3}
 - id: quad4
   name: Четверо у Предела
@@ -79,7 +89,7 @@
     max_chars: 800
   diplomacy_limits: {gifts_per_phase: 3, pact_proposals_per_phase: 3}
   systems: {espionage: true, conquest: true, discoveries: true}
-  scoring: {territory: 1, science: 1, works: 1, war: 1, objectives: 1}
+  scoring: {territory: 1, science: 1, works: 1, war: 1, intel: 1, objectives: 1}
   objectives: {dealt: 1}
   discoveries:
     souls: halve
@@ -93,8 +103,10 @@
   overrides:
     - {type: modify, target: combat.fortify_bonus, op: set, value: 0.15}
     - {type: modify, target: combat.fortify_persists, op: set, value: 1}
+    - {type: modify, target: fog.army_presence, op: set, value: 1}
     - {type: modify, target: score.science.tier2, op: set, value: 1}
-    - {type: modify, target: score.war.per_point, op: set, value: 15}
+    - {type: modify, target: score.war.province_cap, op: set, value: 3}
+    - {type: modify, target: score.war.province_total, op: set, value: 8}
     - {type: modify, target: score.betrayal.per_break, op: set, value: 3}
 - id: blitz_test
   name: Блиц для тестов
@@ -118,6 +130,7 @@
   overrides:
     - {type: modify, target: combat.fortify_bonus, op: set, value: 0.15}
     - {type: modify, target: combat.fortify_persists, op: set, value: 1}
+    - {type: modify, target: fog.army_presence, op: set, value: 1}
 - id: blitz_score
   name: Блиц со счётом
   map: mirror3
@@ -126,13 +139,15 @@
   phase_limits: {setup: 5s, negotiation_1: 5s, actions: 5s, negotiation_2: 5s}
   setup: {artifacts: draft, artifact_offer: 3, artifact_points: 3}
   systems: {espionage: true, conquest: true}
-  scoring: {territory: 1, science: 1, works: 1, war: 1, objectives: 1}
+  scoring: {territory: 1, science: 1, works: 1, war: 1, intel: 1, objectives: 1}
   objectives: {dealt: 1}
   overrides:
     - {type: modify, target: combat.fortify_bonus, op: set, value: 0.15}
     - {type: modify, target: combat.fortify_persists, op: set, value: 1}
+    - {type: modify, target: fog.army_presence, op: set, value: 1}
     - {type: modify, target: score.science.tier2, op: set, value: 1}
-    - {type: modify, target: score.war.per_point, op: set, value: 15}
+    - {type: modify, target: score.war.province_cap, op: set, value: 3}
+    - {type: modify, target: score.war.province_total, op: set, value: 8}
     - {type: modify, target: score.betrayal.per_break, op: set, value: 3}
 - id: blitz_finds
   name: Блиц на руинах
@@ -142,7 +157,7 @@
   phase_limits: {setup: 5s, negotiation_1: 5s, actions: 5s, negotiation_2: 5s}
   setup: {artifacts: draft, artifact_offer: 3, artifact_points: 3}
   systems: {espionage: true, conquest: true, discoveries: true}
-  scoring: {territory: 1, science: 1, works: 1, war: 1, objectives: 1}
+  scoring: {territory: 1, science: 1, works: 1, war: 1, intel: 1, objectives: 1}
   objectives: {dealt: 1}
   discoveries:
     souls: halve
@@ -156,6 +171,8 @@
   overrides:
     - {type: modify, target: combat.fortify_bonus, op: set, value: 0.15}
     - {type: modify, target: combat.fortify_persists, op: set, value: 1}
+    - {type: modify, target: fog.army_presence, op: set, value: 1}
     - {type: modify, target: score.science.tier2, op: set, value: 1}
-    - {type: modify, target: score.war.per_point, op: set, value: 15}
+    - {type: modify, target: score.war.province_cap, op: set, value: 3}
+    - {type: modify, target: score.war.province_total, op: set, value: 8}
     - {type: modify, target: score.betrayal.per_break, op: set, value: 3}

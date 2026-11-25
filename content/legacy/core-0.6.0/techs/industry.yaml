@@ -1,0 +1,34 @@
+- id: deep_drilling
+  name: {ru: Глубинное бурение, en: Deep Drilling}
+  branch: industry
+  tier: 1
+  cost: 10
+  effects:
+    - {effect: modify, target: resource.alloy.income_mul, op: mul, value: 1.15}
+- id: agro_vats
+  name: {ru: Агрочаны, en: Agro Vats}
+  branch: industry
+  tier: 1
+  cost: 10
+  effects:
+    - {effect: modify, target: resource.provisions.income_mul, op: mul, value: 1.2}
+- id: mason_guilds
+  name: {ru: Гильдии каменщиков, en: Mason Guilds}
+  branch: industry
+  tier: 1
+  cost: 10
+  effects:
+    - {effect: modify, target: building.mine.cost.alloy, op: mul, value: 0.75}
+    - {effect: modify, target: building.farm.cost.alloy, op: mul, value: 0.75}
+    - {effect: modify, target: building.temple.cost.alloy, op: mul, value: 0.75}
+    - {effect: modify, target: building.warehouse.cost.alloy, op: mul, value: 0.75}
+- id: hive_works
+  name: {ru: Мануфактуры улья, en: Hive Works}
+  branch: industry
+  tier: 2
+  cost: 22
+  requires_tier: {tier: 1, count: 2}
+  effects:
+    - {effect: income, resource: alloy, amount: 3}
+    - {effect: income, resource: provisions, amount: 2}
+  lore: lore/hive_works.md

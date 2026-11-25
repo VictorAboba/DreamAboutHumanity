@@ -493,6 +493,11 @@ def recon(state: GameState, books_d: Mapping[str, SeatOrders | Mapping[str, Any]
                         key=lambda it: uid(it[0], it[1]["id"]))
         for seat, shade in active:
             _round(s, snap, rs, seed, rep, books, seat, shade)
+        # core 0.7.0 (decision 27): points for successful missions against living rivals (scoring source `intel`)
+        from .scoring import credit_intel
+        points = credit_intel(s, rs, rep["rounds"], rs.missions)
+        if points:
+            rep["intel_points"] = points
     s.phase = P2
     rep["hash"] = sha256_json({k: v for k, v in rep.items() if k != "hash"})
     return s, rep
@@ -830,8 +835,10 @@ def estimate_mission(state: GameState, rs: Ruleset, seat: str, mission_ref: Any,
         prov = state.provinces[place]
         if prov.buildings and place in seen:
             C += int(province_stat(state, rs, place, "province.mirrors", None))
-        army = prov.unit_total() > 0 if place in seen else True
-        if place not in seen:
+        # core 0.7.0 army fog (fog.army_presence): whether another seat's army stands there is known beyond sight too
+        presence = bool(rs.stat("fog.army_presence")) and prov.owner != seat
+        army = prov.unit_total() > 0 if place in seen or presence else True
+        if place not in seen and not presence:
             notes.append("армия на месте не видна: считается, что есть")
         if army:
             C += _int(rs, "spy.detect.army", None)
@@ -854,11 +861,38 @@ def estimate_mission(state: GameState, rs: Ruleset, seat: str, mission_ref: Any,
     what = "удар" if mission.loud else "донесение"
     text = (f"{mission.name} → {place or tgt}, S{S} против C_лок {C}, D{D}, V{V}: раунды (успех/поимка %): "
             f"{rounds_txt}; дожить {round(survive * 100)}%, ≥1 {what} {round(any_hit * 100)}%")
+    points = intel_payoff(state, rs, seat, mission, tgt, place)
+    if points is not None:
+        text += (f"; успех: +{points[0]} очк. разведки (осталось {points[1]})" if points[0]
+                 else f"; очков разведки не даст ({points[2]})")
     if notes:
         text += " (" + "; ".join(notes) + ")"
-    return {"mission": mid, "target": tgt, "place": place, "rounds": n, "S": S, "C_loc": C, "D": D, "V": V,
-            "per_round": [{"success": o, "detect": d} for o, d in per], "survive": round(survive, 4),
-            "any": round(any_hit, 4), "text": text[:ESTIMATE_CHARS]}
+    out = {"mission": mid, "target": tgt, "place": place, "rounds": n, "S": S, "C_loc": C, "D": D, "V": V,
+           "per_round": [{"success": o, "detect": d} for o, d in per], "survive": round(survive, 4),
+           "any": round(any_hit, 4), "text": text[:ESTIMATE_CHARS]}
+    if points is not None:
+        out["intel_points"] = points[0]
+    return out
+
+
+def intel_payoff(state: GameState, rs: Ruleset, seat: str, mission: MissionDef, target: str,
+                 place: str | None) -> tuple[int, int, str] | None:
+    """Core 0.7.0 (decision 27): what a success of this mission adds to the scoring source `intel`: (points, points
+    left, why none); None while the source is off. Only a living rival seat (the target seat, or the owner of the
+    target province) counts (scoring.credit_intel)."""
+    from . import scoring as sc_
+    if not sc_.on(rs, "intel"):
+        return None
+    key = stat_key(state, rs, seat)
+    left = sc_.intel_left(state, rs, seat, key)
+    rival = target if mission.target == "seat" else (state.provinces[place].owner if place in state.provinces
+                                                       else None)
+    player = state.players.get(rival) if rival is not None else None
+    if player is None or rival == seat or not player.alive:
+        return 0, left, "цель — не соперник"
+    if left <= 0:
+        return 0, 0, "предел очков разведки набран"
+    return min(left, int(rs.stat("score.intel.per_success", key))), left, ""
 
 
 # ---------------------------------------------------------------- texts (Russian, compact)
@@ -1073,13 +1107,32 @@ def state_line(rep: Mapping[str, Any] | None, rs: Ruleset, state: GameState, sea
     for c in (rep.get("captures") or {}).get(seat, []):
         items.append(f"ПОЙМАНА У ТЕБЯ: {c['province']} ({_mission_name(rs, c['mission'])} "
                      f"{target_label(rs, state, c['target'], seat)})")
+    gained = intel_gained(rep, seat)
+    if gained:
+        items.append(f"разведка +{gained} очк.")
     return "ДОНЕСЕНИЯ: " + " · ".join(items) if items else None
+
+
+def intel_gained(rep: Mapping[str, Any] | None, seat: str) -> int:
+    """Core 0.7.0: the intel points the seat got in this recon step."""
+    return sum(int(p["points"]) for p in (rep or {}).get("intel_points") or [] if p["seat"] == seat)
+
+
+def idle_shades(state: GameState, seat: str) -> list[str]:
+    """Ids of the seat's own idle Shades."""
+    player = state.players.get(seat)
+    return [sh["id"] for sh in (player.shades if player else []) if sh.get("status") == IDLE]
+
+
+def idle_reminder(n: int) -> str:
+    """Core 0.7.0 (decision 27): the one-line reminder of phase() and the turn-start wake (phase info `idle_shades`)."""
+    return (f"У тебя {n} свободн{'ая Тень' if n == 1 else 'ые Тени' if n < 5 else 'ых Теней'} — задание spy в Д "
+            "(list_spies, estimate_mission)")
 
 
 def idle_line(state: GameState, seat: str) -> str | None:
     """get_state in П1 and Д (core 0.6.0, m7: agents left their Shades unused): the seat's idle Shades, if any."""
-    player = state.players.get(seat)
-    idle = [sh["id"] for sh in (player.shades if player else []) if sh.get("status") == IDLE]
+    idle = idle_shades(state, seat)
     if not idle:
         return None
     return f"ТЕНИ: свободн{'а' if len(idle) == 1 else 'ы'} {', '.join(idle)} — задание spy в Д; миссии: list_spies"
@@ -1105,6 +1158,9 @@ def notice_text(rep: Mapping[str, Any], seat: str) -> str | None:
         parts.append(f"поймано у тебя: {caught_here}")
     if rejected:
         parts.append(f"отклонено приказов шпионажа: {rejected}")
+    gained = intel_gained(rep, seat)
+    if gained:
+        parts.append(f"разведка +{gained} очк.")
     return f"Разведсрез хода {rep['turn']}: {'; '.join(parts)} — get_intel / list_spies"
 
 

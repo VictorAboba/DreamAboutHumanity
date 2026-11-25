@@ -52,7 +52,10 @@ builder as the `scout` bot (one unit into every Abandoned province) on the same 
 row against the builder, which also counts the extra Militia, is tracked). Step 5 (balance core 0.6.0) added the whole
 worth of an entry by army size (the find, the seat's later choice and guard reward there, minus every unit it lost to
 the find's neutrals), 1-2 unit entries by find, great works by work and the pact breakers (share, win share, penalty,
-wins the penalty cost).
+wins the penalty cost). Core 0.7.0 (decision 27) adds the `core 0.7.0` line (JSON `scoring.core070`): the Spire
+(started / completed, turns), stalled works, seat-to-seat captures, `war_points` captures / recaptures / holds, provinces
+taken >= 3 times (ping-pong), pairs at the per-province cap, war per seat and seats at the total cap, the intel points
+per seat, Shade missions per game and the winner's points by source.
 """
 
 from __future__ import annotations
@@ -394,7 +397,10 @@ def play_game(rs: Ruleset, kinds: dict[str, str], seed: str, setup: dict[str, An
             # the seats hold at the end (points: 1, a capital's ruins +3 unless in Ashes)
             "layout": layout, "position": position, "free_starts": free_starts, "n_starts": len(starts),
             "abandoned": abandoned, "abandoned_points": _abandoned_points(rs, m.state, abandoned),
-            "placed": len((layout or {}).get("finds") or {})}
+            "placed": len((layout or {}).get("finds") or {}),
+            # core 0.7.0 (decision 27): the total war cap each seat plays under (0 = none)
+            "war_total_cap": {s: int(rs.stat("score.war.province_total", stat_key(m.state, rs, s)))
+                              for s in m.state.players}}
 
 
 def _abandoned_points(rs: Ruleset, state: GameState, abandoned: list[str]) -> dict[str, int]:
@@ -765,10 +771,113 @@ class ScoreTally:
         self.war_defense = 0
         self.pairs = 0
         self.feeding = 0
+        # core 0.7.0 (decision 27): works paid in parts, war per province, intel
+        self.spire_turns: list[list[int]] = [[], []]                    # turns the Spire was started / completed
+        self.spire_by: dict[str, list[int]] = defaultdict(lambda: [0, 0])  # bot type -> Spires started / completed
+        self.stalls = [0, 0, 0]          # stalled turns, works stalled at least once, of those completed
+        self.war_ev: Counter[str] = Counter()       # war_points events: capture, hold, recapture (a capture again)
+        self.pingpong = [0, 0]           # provinces taken between seats >= 3 times in a game, pairs at their cap
+        self.war_seat: dict[str, list[int]] = defaultdict(list)          # bot type -> war points per seat
+        self.war_at_total = [0, 0]       # seats at the total war cap, seats under one
+        self.intel_dist: Counter[int] = Counter()   # intel points per seat
+        self.missions_started = 0
+        self.seat_captures = 0          # provinces taken from a seat by a seat (any rules)
+        self.winner_points: dict[str, list[int]] = defaultdict(list)    # source -> the winner's points
+
+    def add_070(self, g: dict[str, Any]) -> None:
+        """Core 0.7.0 figures of one game: the Spire, stalled works, war points per province, intel, missions."""
+        kinds, parts = g["kinds"], g.get("score_parts") or {}
+        stalled: set[tuple[Any, str]] = set()
+        captures: Counter[str] = Counter()
+        done: set[tuple[Any, str]] = set()
+        for e in g["events"]:
+            kind = e["kind"]
+            if kind in ("work_started", "work_completed") and short(str(e.get("building"))) == "dream_spire":
+                i = int(kind == "work_completed")
+                self.spire_turns[i].append(e["turn"])
+                self.spire_by[kinds.get(e.get("seat"), "?")][i] += 1
+            if kind == "work_completed":
+                done.add((e.get("seat"), e["province"]))
+            elif kind == "build_stalled":
+                self.stalls[0] += 1
+                stalled.add((e.get("seat"), e["province"]))
+            elif kind == "war_points":
+                self.war_ev[e["reason"]] += 1
+                if e["reason"] == "capture" and e.get("total", 1) > 1:
+                    self.war_ev["recapture"] += 1
+                if e.get("total") == e.get("cap"):
+                    self.pingpong[1] += 1
+            elif kind == "captured" and e.get("from") in kinds and e.get("to") in kinds:
+                captures[e["province"]] += 1
+        self.stalls[1] += len(stalled)
+        self.stalls[2] += sum(1 for k in stalled if k in done)
+        self.pingpong[0] += sum(1 for n in captures.values() if n >= 3)
+        self.seat_captures += sum(captures.values())
+        caps = g.get("war_total_cap") or {}
+        for seat, kind in kinds.items():
+            p = parts.get(seat) or {}
+            if "war" in p:
+                self.war_seat[kind].append(p["war"])
+                if caps.get(seat):
+                    self.war_at_total[1] += 1
+                    self.war_at_total[0] += p["war"] >= caps[seat]
+            if "intel" in p:
+                self.intel_dist[p["intel"]] += 1
+        self.missions_started += sum(len(r.get("started") or []) for r in g.get("recons") or [])
+        for seat in g.get("winners") or []:
+            for src, n in (parts.get(seat) or {}).items():
+                self.winner_points[src].append(n)
+
+    def summary_070(self) -> dict[str, Any]:
+        g = max(1, self.games)
+
+        def mean(v: list[int]) -> float | None:
+            return statistics.mean(v) if v else None
+
+        n_intel = sum(self.intel_dist.values())
+        return {"spire": {"started_per_game": len(self.spire_turns[0]) / g,
+                          "completed_per_game": len(self.spire_turns[1]) / g,
+                          "start_turn": mean(self.spire_turns[0]), "done_turn": mean(self.spire_turns[1]),
+                          "by_type": {k: v for k, v in sorted(self.spire_by.items())}},
+                "stalls": {"stalled_turns_per_game": self.stalls[0] / g, "works_stalled": self.stalls[1],
+                           "works_stalled_then_completed": self.stalls[2]},
+                "war": {"seat_captures_per_game": self.seat_captures / g,
+                        "captures_per_game": self.war_ev["capture"] / g,
+                        "recaptures_per_game": self.war_ev["recapture"] / g, "holds_per_game": self.war_ev["hold"] / g,
+                        "pingpong_provinces_per_game": self.pingpong[0] / g,
+                        "pairs_at_province_cap_per_game": self.pingpong[1] / g,
+                        "per_seat_by_type": {k: mean(v) for k, v in sorted(self.war_seat.items())},
+                        "at_total_cap_share": self.war_at_total[0] / self.war_at_total[1]
+                        if self.war_at_total[1] else None},
+                "intel": {"dist": {str(k): v for k, v in sorted(self.intel_dist.items())},
+                          "mean": sum(k * v for k, v in self.intel_dist.items()) / n_intel if n_intel else None},
+                "missions_per_game": self.missions_started / g,
+                "winner_points": {k: mean(v) for k, v in sorted(self.winner_points.items())}}
+
+    def report_070(self) -> str:
+        sm = self.summary_070()
+        sp, st, w, it = sm["spire"], sm["stalls"], sm["war"], sm["intel"]
+
+        def f(x: float | None) -> str:
+            return "-" if x is None else f"{x:.1f}"
+
+        wt = ", ".join(f"{k} {f(v)}" for k, v in w["per_seat_by_type"].items()) or "-"
+        cap = w["at_total_cap_share"]
+        return (f"  core 0.7.0: Spire {sp['started_per_game']:.2f}/{sp['completed_per_game']:.2f} per game started/"
+                f"completed (turn {f(sp['start_turn'])}/{f(sp['done_turn'])}); stalled turns "
+                f"{st['stalled_turns_per_game']:.2f}/game, works stalled {st['works_stalled']} (completed "
+                f"{st['works_stalled_then_completed']}); seat-to-seat captures {w['seat_captures_per_game']:.2f}/game; "
+                f"war events/game capture {w['captures_per_game']:.2f} "
+                f"(recapture {w['recaptures_per_game']:.2f}) hold {w['holds_per_game']:.2f}, ping-pong provinces "
+                f"{w['pingpong_provinces_per_game']:.2f}, pairs at the province cap "
+                f"{w['pairs_at_province_cap_per_game']:.2f}; war/seat {wt}; at the total cap "
+                f"{f(None if cap is None else 100 * cap)}%; intel/seat {f(it['mean'])} {it['dist']}; missions "
+                f"{sm['missions_per_game']:.1f}/game")
 
     def add(self, g: dict[str, Any]) -> None:
         self.games += 1
         self.scored = self.scored or bool(g.get("scored"))
+        self.add_070(g)
         kinds = g["kinds"]
         parts = g.get("score_parts") or {}
         for seat, kind in kinds.items():
@@ -884,6 +993,7 @@ class ScoreTally:
                          "breaker_win_share": self.betrayal[1] / self.betrayal[0] if self.betrayal[0] else None,
                          "penalty_mean": self.betrayal[2] / self.betrayal[0] if self.betrayal[0] else None,
                          "wins_lost": self.betrayal[3]},
+            "core070": self.summary_070(),
         }
 
     def report(self) -> list[str]:
@@ -915,6 +1025,7 @@ class ScoreTally:
                 out.append(f"  pact breakers {bt['breakers']} of {bt['seats']} seats ({100 * bt['breaker_share']:.1f}%):"
                            f" win share {100 * bt['breaker_win_share']:.1f}%, penalty {bt['penalty_mean']:.2f},"
                            f" wins the penalty cost {bt['wins_lost']}")
+            out.append(self.report_070())
         idle = ", ".join(f"{r} {v:.0f}" for r, v in sm["idle_median_turn8"].items() if v is not None)
         nc = sm["no_centre_win_share"]
         out.append(f"  idle at turn {IDLE_TURN} (median/seat): {idle or '-'}; battles/turn {sm['battles_per_turn']:.2f}; "
@@ -1612,6 +1723,12 @@ def sync_bot_numbers(rs: Ruleset) -> list[str]:
             if bv.BUILDING_COST_FOOD.get(sid, 0) != cost:
                 changed.append(f"{sid} provisions {bv.BUILDING_COST_FOOD.get(sid, 0)} -> {cost}")
             bv.BUILDING_COST_FOOD[sid] = cost
+        # core 0.7.0: the works paid in parts (synced in place: dah.bots.score holds the same set)
+        parts = {short(f) for f, bd in rs.buildings.items() if bd.score and bd.payment == "parts"}
+        if parts != bv.WORKS_IN_PARTS:
+            changed.append(f"works in parts {sorted(bv.WORKS_IN_PARTS)} -> {sorted(parts)}")
+            bv.WORKS_IN_PARTS.clear()
+            bv.WORKS_IN_PARTS.update(parts)
     # stage 3: Shade, missions, fates and conquest values (only while the system is on)
     if rs.espionage is not None:
         cost = rs.espionage.shade_cost.get(build, 0)

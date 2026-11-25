@@ -189,6 +189,12 @@
           "minimum": 0,
           "maximum": 5
         },
+        "intel": {
+          "description": "core 0.7.0 (decision 27): points for successful spy missions",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
+        },
         "objectives": {
           "type": "integer",
           "minimum": 0,

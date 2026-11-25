@@ -388,8 +388,8 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
     return report
 
 
-SCORE_LABELS = {"territory": "зем", "science": "нау", "works": "стр", "war": "вой", "objectives": "цель",
-                "betrayal": "разрыв"}
+SCORE_LABELS = {"territory": "зем", "science": "нау", "works": "стр", "war": "вой", "intel": "разв",
+                "objectives": "цель", "betrayal": "разрыв"}
 
 
 def _scoring(events: list[dict[str, Any]], report: dict[str, Any]) -> dict[str, Any] | None:
@@ -422,7 +422,11 @@ def _scoring(events: list[dict[str, Any]], report: dict[str, Any]) -> dict[str, 
                                     if k in revealed.get((seat, o.get("id")), {})}} for o in t["objectives"]]
     pairs: dict[tuple[str, str], dict[str, Any]] = {}
     fights: dict[int, dict[str, Any]] = {}
-    works: dict[str, dict[str, int]] = {s: {"started": 0, "completed": 0, "lost": 0} for s in report["seats"]}
+    works: dict[str, dict[str, int]] = {s: {"started": 0, "completed": 0, "lost": 0, "stalled": 0}
+                                        for s in report["seats"]}
+    # core 0.7.0 (decision 27): war points per province {seat: {province: points}} and intel points per seat
+    war_provinces: dict[str, dict[str, int]] = {}
+    intel: dict[str, int] = {}
     done: dict[str, str] = {}        # province -> seat whose completed work stands there
     for e in events:
         kind = e.get("type")
@@ -440,6 +444,13 @@ def _scoring(events: list[dict[str, Any]], report: dict[str, Any]) -> dict[str, 
                 f["attacked"][e["killer"]] = f["attacked"].get(e["killer"], 0) + 1
         elif kind == "work_started" and e.get("seat") in works:
             works[e["seat"]]["started"] += 1
+        elif kind == "build_stalled" and e.get("seat") in works:
+            works[e["seat"]]["stalled"] += 1          # turns a build paid in parts stood without its share
+        elif kind == "war_points" and e.get("seat"):
+            row = war_provinces.setdefault(e["seat"], {})
+            row[e["province"]] = row.get(e["province"], 0) + int(e.get("points", 0))
+        elif kind == "intel_point" and e.get("seat"):
+            intel[e["seat"]] = intel.get(e["seat"], 0) + int(e.get("points", 0))
         elif kind == "work_completed" and e.get("seat") in works:
             works[e["seat"]]["completed"] += 1
             done[e["province"]] = e["seat"]
@@ -451,6 +462,7 @@ def _scoring(events: list[dict[str, Any]], report: dict[str, Any]) -> dict[str, 
             "defense_share": round(sum(r["defense_value"] for r in pairs.values()) / total_war, 3) if total_war
             else None,
             "works": works, "fights": [fights[t] for t in sorted(fights)],
+            "war_provinces": war_provinces, "intel_points": intel,
             "gift_share_of_score_spend": _gift_share(events, list(report["seats"]))}
 
 
@@ -637,9 +649,17 @@ def _score_lines(report: dict[str, Any], nick: dict[str, str]) -> list[str]:
     if sc.get("defense_share") is not None:
         lines.append(f"доля обороны в очках войны: {round(100 * sc['defense_share'])}%")
     works = "; ".join(f"{nick.get(s, s)} {w['started']}/{w['completed']}/{w['lost']}"
+                      + (f", стояли {w['stalled']} х." if w.get("stalled") else "")
                       for s, w in sc["works"].items() if any(w.values()))
     if works:
         lines.append(f"великие стройки (начато/достроено/потеряно): {works}")
+    wp = "; ".join(f"{nick.get(s, s)} " + ", ".join(f"{p} {n}" for p, n in sorted(rows.items()))
+                   for s, rows in sorted((sc.get("war_provinces") or {}).items()))
+    if wp:
+        lines.append(f"война по провинциям (очки): {wp}")
+    ip = "; ".join(f"{nick.get(s, s)} {n}" for s, n in sorted((sc.get("intel_points") or {}).items()) if n)
+    if ip:
+        lines.append(f"разведка (очки за успешные задания): {ip}")
     gifts = "; ".join(f"{nick.get(s, s)} {round(100 * v)}%" for s, v in (sc.get("gift_share_of_score_spend") or {}).items()
                       if v)
     if gifts:

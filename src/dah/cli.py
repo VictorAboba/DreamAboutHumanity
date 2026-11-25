@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from dah.engine import ContentError, default_pack_dirs, validate_packs
+from dah.engine import ContentError, default_pack_dirs, registry, validate_packs
 from dah.game import PLAYABLE_PHASES, Game, GameError, make_config, replay, set_dreamteam_session
 from dah.journal import read_events
 from dah.report import build_report, render_report
@@ -84,12 +84,17 @@ def _stage3_goal_lines(config: dict[str, Any]) -> list[str]:
 
 
 SCORE_NAMES = {"territory": "земля", "science": "наука", "works": "великие стройки", "war": "война",
-               "objectives": "твоя тайная цель"}
+               "intel": "разведка (успешные задания Тени)", "objectives": "твоя тайная цель"}
+# a source counted only while its system is on: the ruleset drops its weight to 0 when the system is off, while
+# config.json keeps the scenario's weight
+_SOURCE_SYSTEMS = registry.SCORE_SOURCE_SYSTEMS
 
 
 def _victory_goal_line(config: dict[str, Any]) -> str:
     """How the game is won (SCORING.md 8): the default line, or the sources this game's scoring counts."""
-    weights = config.get("scoring") or {}
+    systems = config.get("systems") or {}
+    weights = {k: v for k, v in (config.get("scoring") or {}).items()
+               if k not in _SOURCE_SYSTEMS or systems.get(_SOURCE_SYSTEMS[k])}
     if not weights or {k: v for k, v in weights.items() if v} == {"territory": 1}:
         return ("Цель игры: к концу партии набрать больше всех очков (1 за провинцию, +3 за каждую столицу) "
                 "или остаться последним живым. Чужой счёт ты видишь только как «≥» (по видимым провинциям).")

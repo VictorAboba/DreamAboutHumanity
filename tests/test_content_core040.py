@@ -57,7 +57,7 @@ def key(rs, **kw):
 # ---------------------------------------------------------------- version, freeze, switches
 
 def test_version_and_clean_validation():
-    assert "version: 0.6.0" in (CORE / "pack.yaml").read_text(encoding="utf-8")
+    assert "version: 0.7.0" in (CORE / "pack.yaml").read_text(encoding="utf-8")
     assert "version: 0.5.0" in (CORE050 / "pack.yaml").read_text(encoding="utf-8")
     assert "version: 0.4.0" in (CORE040 / "pack.yaml").read_text(encoding="utf-8")
     assert "version: 0.3.0" in (CORE030 / "pack.yaml").read_text(encoding="utf-8")
@@ -352,7 +352,7 @@ def test_rules_texts_follow_the_switches(on, off):
 
 @pytest.mark.parametrize("scenario,seats,artifacts", [
     ("core:slice3", 3, None), ("core:quad4", 4, None), ("core:slice2", 2, None), ("core:blitz_spy", 3, None),
-    ("core:quad4", 4, "draft"), ("core:quad4", 4, "points")])
+    ("core:quad4", 4, "draft"), ("core:quad4", 4, "points"), ("core:quad4", 3, "draft"), ("core:quad4", 2, "draft")])
 def test_game_rules_core_is_never_cut(tmp_path, scenario, seats, artifacts):
     """The real rules() of a game (with its setup and СООБЩЕНИЯ) fits 6000 without the last-resort cut, with every
     system on and every section present."""

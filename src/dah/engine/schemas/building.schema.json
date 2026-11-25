@@ -66,6 +66,10 @@
       "minimum": 1,
       "maximum": 10
     },
+    "payment": {
+      "description": "core 0.7.0 (decision 27): full (default) - the whole price with the order; parts - the price in build_turns shares (remainder on the first), one share a turn; an unpaid share stalls the build",
+      "enum": ["full", "parts"]
+    },
     "allowed_types": {
       "description": "build orders only in provinces of these types (absent: any)",
       "type": "array",

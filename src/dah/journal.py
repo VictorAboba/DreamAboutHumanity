@@ -30,13 +30,17 @@ EVENT_TYPES = frozenset({
     # stage 5 (ABANDONED_LANDS.md 10, 16): the layout (admin-only until game_over), finds and choices (to their seats)
     "discoveries_placed", "discoveries_unfair", "fair_mirror_skipped", "discovery_found", "discovery_chosen",
     "discovery_units", "discovery_pending", "order_clipped", "guard_cleared", "lair_grew",
+    # core 0.7.0 (decision 27, to their seat): war points per province, intel points, the shares of works paid in parts
+    "war_points", "intel_point", "build_paid", "build_stalled",
 })
 
 # Visibility of scoring events in a non-admin view of the journal (view_events)
 _SEAT_PRIVATE = {"objectives_dealt": ("seat",), "war_credit": ("killer", "victim"),
                  # stage 5: a find to its entrants, a choice and its consequences to the holder
                  "discovery_found": ("seats",), "discovery_chosen": ("seat",), "discovery_units": ("seat",),
-                 "discovery_pending": ("seat",), "order_clipped": ("seat",)}
+                 "discovery_pending": ("seat",), "order_clipped": ("seat",),
+                 # core 0.7.0
+                 "war_points": ("seat",), "intel_point": ("seat",), "build_paid": ("seat",), "build_stalled": ("seat",)}
 # the layout of finds: nobody but the admin until game_over
 _ADMIN_ONLY = frozenset({"discoveries_placed", "discoveries_unfair", "fair_mirror_skipped"})
 

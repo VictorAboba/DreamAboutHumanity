@@ -147,6 +147,9 @@ class BuildingDef:
     score: int = 0
     max_per_owner: int | None = None
     allowed_types: tuple[str, ...] = ()
+    # core 0.7.0 (decision 27), hashed only when not "full": "parts" = the price is paid in build_turns shares
+    # (split_cost), the first with the order, each next one at a later turn's build step; unpaid, the build stalls
+    payment: str = "full"
 
 
 @dataclass(frozen=True)
@@ -536,6 +539,15 @@ class Ruleset:
     def building_cost(self, building: str, faction: str | None = None) -> dict[str, int]:
         return self._amounts(f"building.{building}.cost", faction)
 
+    def building_shares(self, building: str) -> int:
+        """How many shares the building's price is paid in: build_turns with `payment: parts`, else 1."""
+        b = self.buildings[building]
+        return b.build_turns if b.payment == "parts" else 1
+
+    def building_order_cost(self, building: str, faction: Any = None) -> dict[str, int]:
+        """What a build order holds and pays: the whole price, or its first share (`payment: parts`)."""
+        return split_cost(self.building_cost(building, faction), self.building_shares(building), 0)
+
     def resolve(self, kind: str, ref: str) -> str | None:
         """Full id for a short or full reference to a unit/building/resource/province_type/faction."""
         table: Mapping[str, Any] = getattr(self, {"unit": "units", "building": "buildings",
@@ -607,6 +619,12 @@ class Ruleset:
             for k in ("score", "max_per_owner", "allowed_types"):
                 if entry.get(k) in (0, None, (), []):
                     entry.pop(k, None)
+            if entry.get("payment") == "full":
+                entry.pop("payment", None)
+        # core 0.7.0: a score source newer than the scoring of older packs is hashed only while it has a weight
+        for src in registry.NEW_SCORE_SOURCES:
+            if (data["scenario"].get("scoring") or {}).get(src) == 0:
+                data["scenario"]["scoring"].pop(src)
         if not self.system("conquest"):
             for entry in data["province_types"].values():
                 entry.pop("conquest_value", None)
@@ -626,6 +644,18 @@ class Ruleset:
                         continue
                     entry.pop(k)
         return data
+
+
+def split_cost(cost: Mapping[str, int], shares: int, index: int) -> dict[str, int]:
+    """Share `index` (0-based) of a price paid in `shares` parts (core 0.7.0, decision 27): per resource n // shares,
+    the remainder on the first share; resources with nothing in this share are left out."""
+    shares = max(1, int(shares))
+    out = {}
+    for r, n in cost.items():
+        part = n // shares + (n % shares if index == 0 else 0)
+        if part:
+            out[r] = part
+    return out
 
 
 def _weights(given: Mapping[str, int]) -> dict[str, int]:
@@ -1024,7 +1054,8 @@ class _Builder:
                                    tuple(m for m in mods if m["scope"] == "owner"), self.lore(raw),
                                    score, d.get("max_per_owner"),
                                    tuple(sorted(self.refs(raw, "province_type", d.get("allowed_types", []),
-                                                          ["allowed_types"]))))
+                                                          ["allowed_types"]))),
+                                   d.get("payment", "full"))
         return out
 
     def objectives(self) -> dict[str, ObjectiveDef]:
@@ -1615,7 +1646,7 @@ def _ruleset(b: _Builder, parts: dict[str, Any], packs: dict[str, str], scenario
     if "espionage" in on and not parts.get("missions"):
         raise ContentError([Issue(raw.file, _json_path(raw.path, ["systems", "espionage"]),
                                   "espionage is on but the packs define no missions (espionage/*.yaml)")])
-    scenario = _scoring_scenario(raw, scenario, scoring, objectives)
+    scenario = _scoring_scenario(raw, scenario, scoring, objectives, on)
     if discoveries:
         # the host's knobs (dah game create --discovery-extra, the simulator's --discovery-knob) over the scenario's
         given = {**_given_discoveries(raw), **dict(discoveries)}
@@ -1677,9 +1708,11 @@ def _ruleset(b: _Builder, parts: dict[str, Any], packs: dict[str, str], scenario
 
 
 def _scoring_scenario(raw: _Raw, scenario: ScenarioDef, scoring: Mapping[str, Any] | None,
-                      objectives: int | None) -> ScenarioDef:
+                      objectives: int | None, systems_on: Iterable[str] = ()) -> ScenarioDef:
     """The scenario's weights and objectives deal with the host's overrides (dah game create --scoring, --objectives),
-    checked (SCORING.md 1.2): weights 0..5, some source but objectives on, objectives on -> dealt >= 1, offer = dealt."""
+    checked (SCORING.md 1.2): weights 0..5, some source but objectives on, objectives on -> dealt >= 1, offer = dealt.
+    A source whose system (registry.SCORE_SOURCE_SYSTEMS) is not in `systems_on` gets weight 0 (core 0.7.0: intel
+    without espionage)."""
     weights = dict(scenario.scoring)
     if scoring is not None:
         unknown = [k for k in scoring if k not in registry.SCORE_SOURCES]
@@ -1692,6 +1725,9 @@ def _scoring_scenario(raw: _Raw, scenario: ScenarioDef, scoring: Mapping[str, An
         if isinstance(w, bool) or not isinstance(w, int) or not 0 <= w <= registry.SCORE_WEIGHT_MAX:
             raise ContentError([Issue(raw.file, where, f"weight of {src!r} must be an integer "
                                                        f"0..{registry.SCORE_WEIGHT_MAX}, got {w!r}")])
+    on = set(systems_on)
+    weights = {src: 0 if src in registry.SCORE_SOURCE_SYSTEMS and registry.SCORE_SOURCE_SYSTEMS[src] not in on
+               else w for src, w in weights.items()}
     if not any(w for src, w in weights.items() if src != "objectives"):
         raise ContentError([Issue(raw.file, where, "scoring: some source other than objectives needs weight > 0")])
     deal = dict(scenario.objectives)

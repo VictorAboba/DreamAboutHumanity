@@ -4,7 +4,9 @@ Sources (registry.SCORE_SOURCES, weights in `Ruleset.scenario.scoring`, 0 = off)
     territory   snapshot   full own provinces: score.territory.province, +score.territory.capital on map capitals
     science     snapshot   techs researched by order (score.science.tier<N>) + score.science.branch per complete branch
     works       snapshot   ready buildings with building.<id>.score in full own provinces
-    war         tally      Player.tally.war_value {victim: value}, capped per victim and in total
+    war         tally      Player.tally.war_value {victim: value}, capped per victim and in total; core 0.7.0
+                           (score.war.province_cap > 0): Player.tally.war_provinces {province: {points, since}}
+    intel       tally      core 0.7.0: Player.tally.intel, successful spy missions counted (score.intel.*)
     objectives  at the end the seat's secret objectives that are met (Player.objectives)
 
 `score_parts` holds *weighted* points per source (they sum to the score); a source with weight 0 is not in it. Core
@@ -30,17 +32,17 @@ if TYPE_CHECKING:       # pragma: no cover
 
 SOURCES = registry.SCORE_SOURCES
 TURN_SOURCES = registry.TURN_SOURCES
-LABELS = {"territory": "зем", "science": "нау", "works": "стр", "war": "вой", "objectives": "цель",
+LABELS = {"territory": "зем", "science": "нау", "works": "стр", "war": "вой", "intel": "разв", "objectives": "цель",
           "betrayal": "разрыв"}
-NAMES = {"territory": "земля", "science": "наука", "works": "стройки", "war": "война", "objectives": "тайная цель",
-         "betrayal": "разрыв пакта"}
+NAMES = {"territory": "земля", "science": "наука", "works": "стройки", "war": "война", "intel": "разведка",
+         "objectives": "тайная цель", "betrayal": "разрыв пакта"}
 BETRAYAL = "betrayal"           # the penalty line of the parts (not a weighted source)
 PART_ORDER = (*registry.SCORE_SOURCES, BETRAYAL)      # the order breakdowns are shown in
 SCORE_LINE_LIMIT = 300
 
 # Report events: public (everyone sees them, SCORING.md 2.3) and private to their sides (2.4)
 PUBLIC_KINDS = frozenset({"work_started", "work_completed"})
-PRIVATE_KINDS = frozenset({"war_credit"})
+PRIVATE_KINDS = frozenset({"war_credit", "war_points", "build_stalled", "build_paid"})
 
 
 # ---------------------------------------------------------------- weights
@@ -140,23 +142,164 @@ def works(state: GameState, rs: Ruleset, seat: str, key: StatKey = ...) -> int:
     return sum(p for _, _, p in works_held(state, rs, seat, key))
 
 
+def war_by_province(rs: Ruleset) -> bool:
+    """Core 0.7.0 (decision 27): the war score is the scale per province (score.war.province_cap > 0 for the scenario's
+    base stats), not the price of killed units."""
+    return _stat(rs, "score.war.province_cap", None) > 0
+
+
+def war_provinces(state: GameState, seat: str) -> dict[str, dict[str, Any]]:
+    """Player.tally.war_provinces {province: {points, since}} (`since`: the turn of the capture while the seat has held
+    the province ever since, else None)."""
+    return state.players[seat].tally.get("war_provinces") or {}
+
+
 def war(state: GameState, rs: Ruleset, seat: str, key: StatKey = ...) -> int:
-    """min(cap, Σ_victim min(cap_per_victim, war_value[victim] // per_point))."""
+    """Kill credit: min(cap, Σ_victim min(cap_per_victim, war_value[victim] // per_point)). Per province (core 0.7.0):
+    Σ of the points credited per province, at most score.war.province_total when that is > 0."""
     if key is ...:
         key = stat_key(state, rs, seat)
+    if war_by_province(rs):
+        total = sum(int(e.get("points", 0)) for e in war_provinces(state, seat).values())
+        cap = _stat(rs, "score.war.province_total", key)
+        return min(cap, total) if cap > 0 else total
     per = max(1, _stat(rs, "score.war.per_point", key))
     each = _stat(rs, "score.war.cap_per_victim", key)
     values = (state.players[seat].tally.get("war_value") or {}).values()
     return min(_stat(rs, "score.war.cap", key), sum(min(each, int(v) // per) for v in values))
 
 
-def war_cap_left(state: GameState, rs: Ruleset, seat: str, key: StatKey = ...) -> int:
+def war_cap_left(state: GameState, rs: Ruleset, seat: str, key: StatKey = ...) -> int | None:
+    """War points the seat may still get; None per province without a total cap (each province has its own)."""
     if key is ...:
         key = stat_key(state, rs, seat)
+    if war_by_province(rs):
+        cap = _stat(rs, "score.war.province_total", key)
+        return max(0, cap - war(state, rs, seat, key)) if cap > 0 else None
     return max(0, _stat(rs, "score.war.cap", key) - war(state, rs, seat, key))
 
 
-_POINTS = {"territory": territory, "science": science, "works": works, "war": war}
+def war_view(state: GameState, rs: Ruleset, seat: str, key: StatKey = ...) -> dict[str, Any]:
+    """you.war of get_state: points and cap_left; per province (core 0.7.0) also the cap per province, the turns per
+    holding point and the credited provinces {province: points}."""
+    if key is ...:
+        key = stat_key(state, rs, seat)
+    out: dict[str, Any] = {"points": war(state, rs, seat, key), "cap_left": war_cap_left(state, rs, seat, key)}
+    if war_by_province(rs):
+        out["per_province"] = _stat(rs, "score.war.province_cap", key)
+        out["hold_turns"] = _stat(rs, "score.war.hold_turns", key)
+        out["provinces"] = {pid: int(e.get("points", 0)) for pid, e in sorted(war_provinces(state, seat).items())}
+    return out
+
+
+def _war_room(state: GameState, rs: Ruleset, seat: str, key: StatKey) -> bool:
+    """Below the total war cap (score.war.province_total; 0 = none): another credited point still counts."""
+    cap = _stat(rs, "score.war.province_total", key)
+    return cap <= 0 or war(state, rs, seat, key) < cap
+
+
+def credit_provinces(state: GameState, rs: Ruleset, turn: int, owners_before: Mapping[str, str | None],
+                     alive: Sequence[str], events: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """War points of one resolution under the province scale (core 0.7.0, decision 27), after the battles and the fates
+    of captures; adds to Player.tally.war_provinces and returns the `war_points` event data.
+
+    Holding first: a province the seat has held since its capture gives +1 at every score.war.hold_turns full turns
+    after it (the turn of the capture counts as 0); a province lost meanwhile stops counting (`since` None), its points
+    stay. Then captures: a province a living rival seat (alive at the start of this resolution, not the taker) owned
+    at the start of this resolution and the taker holds after the fates (occupied or ruined counts; a raid that gives
+    it back or a release does not) gives +1. Every (seat, province) earns at most score.war.province_cap over the game,
+    so a province taken back and forth stops paying, and nothing is credited (no point, no event) once the seat holds
+    score.war.province_total in all (war() would clip it anyway; an event would promise a point that never counts).
+    Neutral and Abandoned land gives no war points."""
+    out: list[dict[str, Any]] = []
+    for seat in sorted(state.players):
+        entries = state.players[seat].tally.get("war_provinces") or {}
+        for pid in sorted(entries):
+            e = entries[pid]
+            if e.get("since") is None:
+                continue
+            if state.provinces[pid].owner != seat:
+                e["since"] = None
+                continue
+            key = stat_key(state, rs, seat)
+            cap, every = _stat(rs, "score.war.province_cap", key), max(1, _stat(rs, "score.war.hold_turns", key))
+            held = turn - int(e["since"])
+            if held > 0 and held % every == 0 and int(e["points"]) < cap and _war_room(state, rs, seat, key):
+                e["points"] = int(e["points"]) + 1
+                out.append({"seat": seat, "province": pid, "points": 1, "reason": "hold", "total": e["points"],
+                            "cap": cap, "held": held})
+    for ev in events:
+        if ev.get("kind") != "captured":
+            continue
+        pid, taker, loser = ev["province"], ev.get("to"), ev.get("from")
+        if (taker not in state.players or loser not in state.players or taker == loser or loser not in alive
+                or owners_before.get(pid) != loser or state.provinces[pid].owner != taker):
+            continue
+        key = stat_key(state, rs, taker)
+        cap = _stat(rs, "score.war.province_cap", key)
+        entries = state.players[taker].tally.setdefault("war_provinces", {})
+        e = entries.setdefault(pid, {"points": 0, "since": None})
+        if e.get("since") == turn:
+            continue                    # one capture per province a turn
+        e["since"] = turn                 # held from now on even at a cap: the hold and recapture rules stay
+        if int(e["points"]) < cap and _war_room(state, rs, taker, key):
+            e["points"] = int(e["points"]) + 1
+            out.append({"seat": taker, "province": pid, "points": 1, "reason": "capture", "total": e["points"],
+                        "cap": cap, "victim": loser})
+        state.players[taker].tally["war_provinces"] = dict(sorted(entries.items()))
+    return out
+
+
+def intel(state: GameState, rs: Ruleset, seat: str, key: StatKey = ...) -> int:
+    """Core 0.7.0 (decision 27): score.intel.per_success per counted successful spy mission (Player.tally.intel), at
+    most score.intel.cap."""
+    if key is ...:
+        key = stat_key(state, rs, seat)
+    n = int(state.players[seat].tally.get("intel") or 0)
+    return min(_stat(rs, "score.intel.cap", key), n * _stat(rs, "score.intel.per_success", key))
+
+
+def intel_left(state: GameState, rs: Ruleset, seat: str, key: StatKey = ...) -> int:
+    """Intel points the seat may still get (0 while the source is off)."""
+    if not on(rs, "intel"):
+        return 0
+    if key is ...:
+        key = stat_key(state, rs, seat)
+    return max(0, _stat(rs, "score.intel.cap", key) - intel(state, rs, seat, key))
+
+
+def credit_intel(state: GameState, rs: Ruleset, rounds: Sequence[Mapping[str, Any]],
+                 missions: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The recon step's intel points (core 0.7.0, decision 27): a successful round (a report or a strike, any mission
+    kind) against a living rival seat (the target seat, or the owner of the target province) counts once per (spy,
+    target seat, mission kind) a turn, while the spy's points are below score.intel.cap. Adds to Player.tally.intel and
+    returns [{seat, target, mission, points, total}]."""
+    if not on(rs, "intel"):
+        return []
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for r in rounds:
+        if not r.get("success"):
+            continue
+        seat, mission = r["seat"], r["mission"]
+        m = missions.get(mission)
+        target = r["target"] if m is not None and m.target == "seat" else r.get("victim")
+        rival = state.players.get(target) if isinstance(target, str) else None
+        if rival is None or target == seat or not rival.alive or (seat, target, mission) in seen:
+            continue
+        seen.add((seat, target, mission))
+        key = stat_key(state, rs, seat)
+        per = _stat(rs, "score.intel.per_success", key)
+        if per <= 0 or intel(state, rs, seat, key) >= _stat(rs, "score.intel.cap", key):
+            continue
+        tally = state.players[seat].tally
+        tally["intel"] = int(tally.get("intel") or 0) + 1
+        out.append({"seat": seat, "target": target, "mission": mission, "points": per,
+                    "total": intel(state, rs, seat, key)})
+    return out
+
+
+_POINTS = {"territory": territory, "science": science, "works": works, "war": war, "intel": intel}
 
 
 def raw_points(state: GameState, rs: Ruleset, seat: str) -> dict[str, int]:

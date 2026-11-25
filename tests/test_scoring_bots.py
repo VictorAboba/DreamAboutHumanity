@@ -82,7 +82,8 @@ def test_parse_state_reads_the_own_score_objectives_and_war():
     assert view.scoring("territory") and view.scoring("works") and view.scoring("war")
     assert not view.scoring("objectives")       # the objective is not a turn source: it is in view.objectives
     assert len(view.objectives) == 1 and view.objectives[0]["kind"] and "params" in view.objectives[0]
-    assert view.war == {"points": 0, "cap_left": 5}
+    # core 0.7.0: the war scale per province (at most 8 in all)
+    assert view.war == {"points": 0, "cap_left": 8, "per_province": 3, "hold_turns": 2, "provinces": {}}
     plain = build_ruleset(None, "core:blitz_test")
     st = new_game_state(plain, seats, 3)
     view = parse_state({"state": view_state(st, plain, "A", None)}, {"A", "NA"})
@@ -151,8 +152,10 @@ def test_work_order_picks_the_most_protected_allowed_site():
     assert order == {"kind": "build", "province": "P02", "building": "monument"}     # interior, no foreign neighbour
     spire = bs.work_order(view, "dream_spire", 200, 60, 3, capital=False)
     assert spire is not None and spire["province"] in ("P02", "P03")
-    assert bs.work_order(view, "monument", 24, 60, 3) is None          # provisions short (25)
-    assert bs.work_order(view, "monument", 120, 9, 3) is None          # alloy short (10)
+    # core 0.7.0: paid in parts (13+5 now, 12+5 at the next build step from the rest and the net income +4/+10)
+    assert bs.work_order(view, "monument", 24, 60, 3) is not None      # 24 - 13 + 4 covers the second share
+    assert bs.work_order(view, "monument", 13, 60, 3) is None          # the second share would stall
+    assert bs.work_order(view, "monument", 120, 4, 3) is None          # alloy short of the first share (5)
     late = parse_state(scored_state(turn=10), ME)
     assert bs.work_order(late, "monument", 120, 60, 3) is None         # could not be ready by the end
     off = parse_state(scored_state(parts={"territory": 7}), ME)
@@ -163,10 +166,12 @@ def test_work_order_picks_the_most_protected_allowed_site():
 
 
 def test_saving_rate_spreads_the_price_over_the_turns_left():
-    view = parse_state(scored_state(turn=3, provisions=20, net_food=5), ME)
-    assert bs.saving_rate(view, "monument", 3) == 1            # 5 more over turns 4..9
+    # core 0.7.0, paid in parts: the stock must cover the first share (13) and, with the net income, the second (12)
+    view = parse_state(scored_state(turn=3, provisions=5, net_food=5), ME)
+    assert bs.saving_rate(view, "monument", 3) == 3            # 15 more over turns 4..9
     poor = parse_state(scored_state(turn=3, provisions=0, net_food=5), ME)
-    assert bs.saving_rate(poor, "monument", 3) == 5            # 25 over turns 4..9
+    assert bs.saving_rate(poor, "monument", 3) == 4            # 20 over turns 4..9
+    assert bs.saving_rate(parse_state(scored_state(turn=3, provisions=20, net_food=5), ME), "monument", 3) is None
     assert bs.saving_rate(parse_state(scored_state(turn=9, provisions=20), ME), "monument", 3) is None   # too late
     assert bs.saving_rate(parse_state(scored_state(provisions=80), ME), "monument", 3) is None   # affordable now
     assert bs.saving_rate(parse_state(scored_state(provisions=20, parts={"territory": 7}), ME), "monument", 3) is None
@@ -186,7 +191,8 @@ def test_builder_lays_the_monument_and_diplomat_too_rush_only_for_its_objective(
 
 
 def test_a_saving_builder_recruits_only_what_income_leaves():
-    view = parse_state(scored_state(turn=3, provisions=20, net_food=9, alloy=200), ME)
+    view = parse_state(scored_state(turn=3, provisions=5, net_food=9, alloy=200), ME)
+    assert bs.saving_rate(view, "monument", 3) == 2
     orders = BuilderBot("A", 1).action_orders(view, estimate_all(0.0))
     recruits = sum(o["count"] for o in orders if o["kind"] == "recruit")
     assert recruits <= 9 - bs.saving_rate(view, "monument", 3)

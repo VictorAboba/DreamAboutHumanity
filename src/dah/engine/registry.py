@@ -185,8 +185,14 @@ STATS = STATS + STAGE3_STATS
 
 # Stage 4 (docs/SCORING.md 1, 3): sources of victory points in a fixed order. A source with weight 0 is off like a
 # switchable system: its "system" is `scoring.<src>` (requires_system, stats), so its content and stats leave no trace.
-SCORE_SOURCES: tuple[str, ...] = ("territory", "science", "works", "war", "objectives")
-TURN_SOURCES: tuple[str, ...] = SCORE_SOURCES[:4]          # the turn score; objectives count only in the final total
+# Core 0.7.0 (decision 27): `intel`, points for successful spy missions (counted in the recon step); a ruleset that does
+# not weigh it (all older packs) hashes and scores as before (content.Ruleset.to_dict drops its zero weight).
+SCORE_SOURCES: tuple[str, ...] = ("territory", "science", "works", "war", "intel", "objectives")
+TURN_SOURCES: tuple[str, ...] = SCORE_SOURCES[:-1]         # the turn score; objectives count only in the final total
+NEW_SCORE_SOURCES: tuple[str, ...] = ("intel",)            # hashed only with a weight > 0
+# A score source that only a switchable system can feed: with that system off the source's weight is 0 (and so its
+# stats, rules lines, view fields and hash entry go), whatever the scenario or the host's --scoring says.
+SCORE_SOURCE_SYSTEMS: dict[str, str] = {"intel": "espionage"}
 DEFAULT_SCORING: dict[str, int] = {"territory": 1}          # no `scoring` key: territory only, as before stage 4
 SCORE_WEIGHT_MAX = 5
 SCORING_SYSTEMS: tuple[str, ...] = tuple(f"scoring.{src}" for src in SCORE_SOURCES)
@@ -224,11 +230,30 @@ SCORING_STATS: tuple[StatSpec, ...] = (
     _s4("score.war.cap_per_victim", 0, 20, 3, "war"),
     _s4("score.war.cap", 0, 20, 5, "war"),
     _s4("score.war.defense_pct", 0, 100, 50, "war"),
+    # core 0.7.0 (decision 27): the war score is a scale per province instead of the price of killed units. While
+    # score.war.province_cap > 0: taking a province a living rival seat owned at the start of the turn gives 1 point,
+    # holding it +1 per score.war.hold_turns full turns, at most province_cap per (seat, province) over the game, and
+    # at most score.war.province_total in all (0 = no total cap); no war_credit then. 0 (the default, older packs):
+    # the kill credit of core 0.5.0-0.6.0 with the stats above.
+    _s4("score.war.province_cap", 0, 10, 0, "war"),
+    _s4("score.war.hold_turns", 1, 10, 2, "war"),
+    _s4("score.war.province_total", 0, 50, 0, "war"),
+    # core 0.7.0 (decision 27): points per successful spy mission against a living rival seat (each target and
+    # mission kind once a turn), at most score.intel.cap over the game
+    _s4("score.intel.per_success", 0, 5, 1, "intel"),
+    _s4("score.intel.cap", 0, 20, 3, "intel"),
     # core 0.6.0 (decision 26): points a seat loses per pact it broke (a penalty line `betrayal` of the turn score
     # under a non-default scoring); 0 (the default) = no penalty, so older packs score as before
     StatSpec("score.betrayal.per_break", int, 0, 10, 0, seeded=False, system=SCORING_ANY),
 )
 STATS = STATS + SCORING_STATS
+
+# Core 0.7.0 (decision 27): army fog. 1 = a province of another seat outside the viewer's sight (own provinces and
+# their neighbours: resolve.visible_provinces) shows whether an army stands there (`army`, «армия есть»), never its
+# size; 0 (the default, older packs) = such a province shows nothing («?»). Sizes are seen only within sight (or by a
+# spy's report), as before. Never seeded: stats tables (hashes) of older packs stay. A stat of the espionage system
+# (the fog is the other side of a Shade's observation): with espionage off its scenario line drops and leaves no trace.
+STATS = STATS + (_s3("fog.army_presence", int, 0, 1, 0, _E),)
 
 _ID = r"[a-z0-9_]+:[a-z0-9_]+"
 

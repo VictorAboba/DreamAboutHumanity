@@ -137,7 +137,7 @@ def test_no_core_bonus_text_shows_a_raw_score_path():
             d = describe(rs, kind, fid)
             assert "score." not in d["text"] and not any("score." in b for b in d.get("bonuses") or []), fid
     growth = describe(rs, "faction", "core:growth")
-    assert any("очко войны" in b and "= 10" in b for b in growth["bonuses"])
+    assert any("очков войны с одной провинции" in b and "= 4" in b for b in growth["bonuses"])   # core 0.7.0
 
 
 # ---------------------------------------------------------------- LIVE-4 own claims first
@@ -321,7 +321,7 @@ def test_blitz_score_end_to_end(tmp_path):
         if turn == 2:
             # a spy's ledger reads b's exact score by source, without the objective
             facts, truth = esp._ledger(game.state, rs, game.state.turn, "a", "b", SeatOrders(), 0.3)
-            assert set(truth["score_parts"]) == {"territory", "science", "works", "war"}
+            assert set(truth["score_parts"]) == {"territory", "science", "works", "war", "intel"}   # core 0.7.0
             assert truth["score_parts"] == sc.score_parts(game.state, rs)["b"]
             assert facts["score_parts"] == truth["score_parts"]
             others = [p for p in game.state_json("a")["players"] if p["seat"] != "a"]
@@ -331,8 +331,8 @@ def test_blitz_score_end_to_end(tmp_path):
         _ready_all(game)
     events = read_events(gdir.journal_path)
     types = [e["type"] for e in events]
-    assert "work_started" in types and "work_completed" in types and "war_credit" in types
-    assert any(e["type"] == "war_credit" and {e["killer"], e["victim"]} == {"a", "b"} for e in events)
+    # core 0.7.0 (decision 27): war scores per province taken from a rival, killed units give nothing
+    assert "work_started" in types and "work_completed" in types and "war_credit" not in types
     assert types.count("objectives_revealed") == 3
     over = next(e for e in events if e["type"] == "game_over")
     assert {"score_parts", "objectives", "winners_open"} <= set(over)

@@ -26,6 +26,7 @@ from dah.engine import (DeadlineInfo, GameState, Ruleset, SeatOrders, SetupChoic
 from dah.engine import diplomacy as dip
 from dah.engine import discoveries as disc
 from dah.engine import espionage as esp
+from dah.engine.view import army_presence
 from dah.engine import scoring as sc_
 from dah.engine.content import ContentError, legacy_pack_sets
 from dah.engine.catalog import KIND_LABELS
@@ -49,6 +50,7 @@ Clock = Callable[[], float]
 log = logging.getLogger("dah.game")
 
 PLAYABLE_PHASES = ("negotiation_1", "actions", "negotiation_2")
+SPEND_PHASES = ("setup", *PLAYABLE_PHASES)     # phases a spend figure may be for (setup: before turn 1, turn=1)
 NEGOTIATION_PHASES = ("negotiation_1", "negotiation_2")
 P2 = "negotiation_2"
 GAME_OVER = "game_over"
@@ -128,7 +130,8 @@ CONQUEST_JOURNAL = ("disposition", "policy_set", "policy_unaffordable", "dispose
                     "claim_created", "claim_ended", "ruin_ended")
 # Espionage events of a resolution written to the journal in full (SPY_AND_CONQUEST.md 8)
 ESPIONAGE_JOURNAL = ("mission_started", "mission_end", "sabotage", "strike_cancelled")
-SCORING_JOURNAL = ("war_credit", "work_started", "work_completed")     # stage 4 (SCORING.md 9)
+# stage 4 (SCORING.md 9); core 0.7.0: war points per province, builds paid in parts (shares, stalls)
+SCORING_JOURNAL = ("war_credit", "work_started", "work_completed", "war_points", "build_stalled", "build_paid")
 # stage 5 (ABANDONED_LANDS.md 10): finds, choices, rewards, lairs in their full form (admin and offline metrics)
 DISCOVERY_JOURNAL = tuple(sorted(disc.JOURNAL_KINDS))
 SYSTEM_SENDER = "ИГРА"   # inbox entries written by the game itself (gifts, pacts): not player text, not wrapped
@@ -629,6 +632,8 @@ class Game:
               target=c["target"], province=c["province"], attributed=c["attributed"], turn=turn)
         for e in rep["ended"]:
             j("mission_end", turn=turn, **e)
+        for p in rep.get("intel_points") or []:      # core 0.7.0: the scoring source `intel`
+            j("intel_point", turn=turn, **p)
 
     def recon_report(self, turn: int | None = None) -> dict[str, Any] | None:
         """The saved recon step of a turn (default: the current one, once actions closed)."""
@@ -710,9 +715,13 @@ class Game:
             elif e["kind"] in SCORING_JOURNAL:
                 data = {k: v for k, v in e.items() if k not in ("kind", "seats")}
                 if e["kind"] == "work_started" and e.get("building") in self.ruleset.buildings:
-                    # the price the seat paid, journal only (the public event carries none)
-                    data["cost"] = dict(self.ruleset.building_cost(e["building"],
-                                                                   stat_key(self.state, self.ruleset, e["seat"])))
+                    # the price the seat paid, journal only (the public event carries none); paid in parts (core
+                    # 0.7.0) also the shares and the first one, paid now
+                    key = stat_key(self.state, self.ruleset, e["seat"])
+                    data["cost"] = dict(self.ruleset.building_cost(e["building"], key))
+                    if self.ruleset.building_shares(e["building"]) > 1:
+                        data["shares"] = self.ruleset.building_shares(e["building"])
+                        data["paid"] = dict(self.ruleset.building_order_cost(e["building"], key))
                 self.journal.append(e["kind"], turn=turn, **data)
         # `scores` (and `score_parts` with a non-default scoring) are private per seat (SCORING.md 9): the journal is the
         # admin's; journal.view_events gives each seat its own entry
@@ -858,6 +867,9 @@ class Game:
         intel = self._intel_counts(seat)
         if intel is not None:
             info["intel"] = intel       # the wake tail «донесений: N; поймано у тебя: M» (SPY_AND_CONQUEST.md 6.3)
+        idle = self._idle_shades(seat)
+        if idle:
+            info["idle_shades"] = idle  # core 0.7.0 (decision 27): the turn-start reminder of an idle Shade
         if host:
             info.update(self.player_presence(seat))
         info["text"] = self._phase_text(info)
@@ -873,6 +885,14 @@ class Game:
             return None
         return {"reports": len((rep.get("reports") or {}).get(seat, [])),
                 "caught": len((rep.get("captures") or {}).get(seat, []))}
+
+    def _idle_shades(self, seat: str) -> int:
+        """Core 0.7.0 (decision 27, m8: free Shades sat idle all game): the seat's own idle Shades in negotiation_1 and
+        actions of an espionage game (0 otherwise); never another seat's."""
+        if (self.phase not in ("negotiation_1", "actions") or self.game_over or not self.ruleset.system("espionage")
+                or not self.state.players[seat].alive):
+            return 0
+        return len(esp.idle_shades(self.state, seat))
 
     def _allowed(self, seat_alive: bool) -> list[str]:
         tools = list(ALLOWED.get(self.phase, READ_TOOLS) if seat_alive else READ_TOOLS)
@@ -897,6 +917,8 @@ class Game:
         parts.append(f"готово {info['ready']}" + (", ты готов" if info["you_ready"] else ", ты не готов"))
         if info.get("intel"):
             parts.append(intel_tail(info["intel"]))
+        if info.get("idle_shades"):
+            parts.append(esp.idle_reminder(info["idle_shades"]))
         if info.get("hint"):
             parts.append(info["hint"])
         return " | ".join(parts)
@@ -952,8 +974,8 @@ class Game:
             per = f", ≤{p['per_recipient']} одному адресату" if p.get("per_recipient") else ""
             parts.append(f"{label}: ≤{p.get('private', 0)} личных{per}, ≤{p.get('public', 0)} публичных")
         return (f"СООБЩЕНИЯ: только в фазах переговоров; to — список ников или \"all\"; "
-                f"{'; '.join(parts)}; ≤{lim.get('max_chars', 800)} символов. Личное сообщение нескольким адресатам "
-                "считается по одному на каждого.")
+                f"{'; '.join(parts)}; ≤{lim.get('max_chars', 800)} символов. Личное нескольким адресатам "
+                "считается каждому.")
 
     def state_text(self, seat: str, since_turn: int | None = None) -> str:
         info = None
@@ -1232,8 +1254,14 @@ class Game:
         """The army in a province the seat can see (its own and their neighbours), for `attacker="P05"` (the
         common m5 form). Hidden armies are refused with what to pass instead."""
         if seat is None or pid not in visible_provinces(self.state, self.ruleset, seat):
-            raise self._estimate_error("INVALID", f"{side}={pid!r}: войска в {pid} скрыты туманом войны — укажи "
-                                                  "предполагаемый состав объектом {юнит: число}")
+            # core 0.7.0 army fog: beyond sight only the presence of another seat's army is known, never its size
+            prov = self.state.provinces[pid]
+            seen = (army_presence(self.ruleset) and seat is not None and prov.owner not in (None, seat))
+            what = (f"армия в {pid} {'есть' if prov.unit_total() else 'нет'}, её размер скрыт туманом войны"
+                    if seen else f"войска в {pid} скрыты туманом войны")
+            spy = " (размер узнаёт Тень: наблюдение)" if self.ruleset.system("espionage") else ""
+            raise self._estimate_error("INVALID", f"{side}={pid!r}: {what} — укажи предполагаемый состав объектом "
+                                                  f"{{юнит: число}}{spy}")
         units = {u: n for u, n in self.state.provinces[pid].units.items() if n > 0}
         if not units and side == "attacker":
             raise self._estimate_error("INVALID", f"{side}={pid!r}: в {pid} нет войск — укажи состав объектом "
@@ -2154,9 +2182,10 @@ class Game:
                 raise GameError("INVALID", f"turn — номер хода 1..{self.state.turn} или не задан")
             for_turn, for_phase = turn if turn is not None else self.state.turn, AFTER_GAME_OVER
         elif (isinstance(turn, bool) or not isinstance(turn, int) or not 1 <= turn <= self.state.turn
-              or phase not in PLAYABLE_PHASES):
+              or phase not in SPEND_PHASES or (phase == SETUP and turn != 1)):
+            # the setup phase is before turn 1 and is reported as turn 1 (the waker's key of a closed setup phase)
             raise GameError("INVALID", f"turn — номер хода 1..{self.state.turn}, phase — одна из "
-                                       f"{', '.join(PLAYABLE_PHASES)}")
+                                       f"{', '.join(SPEND_PHASES)} ({SETUP} — с turn=1)")
         else:
             for_turn, for_phase = turn, phase
         fields: dict[str, Any] = {"seat": seat, "spent_usd": float(spent_usd), "source": source,

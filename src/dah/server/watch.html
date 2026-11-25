@@ -457,7 +457,7 @@ h4 { margin: 12px 0 6px; font-size: 14px; }
       row("Войска", unitsText(sp.units) + (sp.fortified ? " (укреплена)" : ""));
       row("Здания", (sp.buildings || []).map(function (b) { return nameOf("building_names", b); }).join(", ") || "нет");
       if (sp.building_now && sp.building_now.length) row("Строится", sp.building_now.map(function (b) {
-        return nameOf("building_names", b.building) + " (" + b.turns_left + ")"; }).join(", "));
+        return nameOf("building_names", b.building) + " (" + b.turns_left + (b.stalled ? ", стоит: нет доли" : "") + ")"; }).join(", "));
     } else {
       row("Войска", "скрыты до конца партии");
       if (sp.great_works && sp.great_works.length) row("Великие стройки", sp.great_works.map(function (g) {
@@ -528,10 +528,10 @@ h4 { margin: 12px 0 6px; font-size: 14px; }
       var tb = el("table");
       var resIds = Object.keys(s.resource_names || {});
       tb.appendChild(el("tr", {}, [el("th", {text: "Игрок"})].concat(resIds.map(function (r) { return el("th", {text: s.resource_names[r]}); }))
-        .concat([el("th", {text: "Войска"}), el("th", {text: "Провинции"})])));
+        .concat([el("th", {text: "Войска"}), el("th", {text: "Провинции"}), el("th", {text: "Стройки стоят"})])));
       s.players.forEach(function (p) {
         tb.appendChild(el("tr", {}, [el("td", {text: p.nick})].concat(resIds.map(function (r) { return el("td", {text: String((p.resources || {})[r] || 0)}); }))
-          .concat([el("td", {text: String(p.units)}), el("td", {text: String(p.provinces)})])));
+          .concat([el("td", {text: String(p.units)}), el("td", {text: String(p.provinces)}), el("td", {text: String(p.works_stalled || 0)})])));
       });
       box.appendChild(el("div", {cls: "tablebox"}, [tb]));
     }
@@ -612,12 +612,12 @@ h4 { margin: 12px 0 6px; font-size: 14px; }
     box.appendChild(el("div", {cls: "tablebox"}, [tb]));
     var bySource = hist.some(function (h) { return h.by_source && Object.keys(h.by_source).length; });
     box.appendChild(el("p", {cls: "note", text: bySource
-      ? "Счёт хода по источникам: зем — земля, нау — наука, стр — великие стройки, вой — война. Тайные цели добавляются к итогу в конце партии."
+      ? "Счёт хода по источникам: зем — земля, нау — наука, стр — великие стройки, вой — война (за провинции, взятые у соперника), разв — успешные задания Теней" + (l.level === "delayed" ? " (зрителю с задержкой не видны до конца партии, в счёте их нет)" : "") + ". Тайные цели добавляются к итогу в конце партии."
       : "Очки: 1 за провинцию, +3 за каждую столицу."}));
     renderFinal(box, l, seats);
   }
-  var SCORE_LABELS = {territory: "зем", science: "нау", works: "стр", war: "вой", betrayal: "разрыв"};
-  var FINAL_LABELS = {territory: "зем", science: "нау", works: "стр", war: "вой", objectives: "цель", betrayal: "разрыв"};
+  var SCORE_LABELS = {territory: "зем", science: "нау", works: "стр", war: "вой", intel: "разв", betrayal: "разрыв"};
+  var FINAL_LABELS = {territory: "зем", science: "нау", works: "стр", war: "вой", intel: "разв", objectives: "цель", betrayal: "разрыв"};
   // the end of a scored game: the final score by source and every seat's objective (revealed to all); while the game
   // runs only the full level (admin) gets the objectives with their progress, the delayed spectator sees «?»
   function renderFinal(box, l, seats) {

@@ -510,7 +510,8 @@ def order_cost(ruleset: Ruleset, faction: StatKey, order: Order, state: GameStat
         return Counter({r: n * order.count for r, n in unit.items() if n * order.count > 0})
     if order.kind == "build":
         assert order.building is not None
-        return Counter(ruleset.building_cost(order.building, faction))
+        # core 0.7.0 (`payment: parts`): the order holds and pays only the first share (decision 27)
+        return Counter(ruleset.building_order_cost(order.building, faction))
     if order.kind == "dispose":
         return Counter(dispose_cost(ruleset, faction, order))
     if order.kind in ("hire_shade", "spy"):

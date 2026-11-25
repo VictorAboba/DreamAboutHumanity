@@ -93,6 +93,14 @@ class PendingBuild:
     province: str
     building: str
     turns_left: int
+    # core 0.7.0 (decision 27, `payment: parts`): the whole price fixed at the order (its shares come from it) and
+    # whether the last build step found the share unpaid; both left out of state_hash while empty, so builds paid in
+    # full hash as before
+    cost: dict[str, int] = field(default_factory=dict)
+    stalled: bool = False
+
+
+PENDING_BUILD_NEW_FIELDS = ("cost", "stalled")
 
 
 @dataclass
@@ -152,6 +160,10 @@ def state_hash(state: GameState) -> str:
         for key in PLAYER_STAGE2_FIELDS + PLAYER_STAGE3_FIELDS + PLAYER_SCORE_FIELDS:
             if not player.get(key):
                 player.pop(key, None)
+    for build in data["pending_builds"]:
+        for key in PENDING_BUILD_NEW_FIELDS:
+            if not build.get(key):
+                build.pop(key, None)
     for prov in data["provinces"].values():
         for key in PROVINCE_STAGE3_FIELDS:
             if not prov.get(key):

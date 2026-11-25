@@ -20,6 +20,7 @@ from .content import DEFAULT_SETUP_LIMIT, Ruleset
 from .orders import CP_CANCEL, CP_FORTIFY, CP_REDUCE
 
 RULES_LIMIT = 6000
+VICTORY_CORE_LIMIT = 150        # SCORING.md 8: the victory line of the core
 _UNSET: Any = object()
 
 # topic -> (title word of its section, Russian label for the table of contents)
@@ -241,6 +242,7 @@ def _type_names(rs: Ruleset, types: Sequence[str]) -> str:
 def _building_line(rs: Ruleset, b: str, full: bool) -> str:
     d = rs.buildings[b]
     line = (f"- {_short(b)} «{d.name}»: {_amounts(rs, rs.building_cost(b))}, {d.build_turns} ход(а)"
+            + (", долями по ходам" if d.payment == "parts" else "")
             + (f", доход +{_amounts(rs, d.income)}" if d.income else "") + (", позволяет найм" if d.recruit else ""))
     if d.score and sc_.on(rs, "works"):
         # a great work (SCORING.md 2.3): its points in the core line, where and how many in the topic
@@ -272,9 +274,18 @@ def _buildings(rs: Ruleset) -> Section:
         # a great work shows its points even in the short form (core 0.6.0, m7: the Spire went unnoticed)
         return f" +{int(rs.stat(f'building.{b}.score'))} очк." if works and d.score else ""
 
+    # core 0.7.0 (decision 27): the buildings paid in parts, in one short clause
+    parts = ", ".join(_short(b) for b, d in rs.buildings.items() if d.payment == "parts")
     short = ("ЗДАНИЯ (одно каждого вида на провинцию; найм — где казарма): "
              + ", ".join(f"{_short(b)} «{d.name}»{points(b, d)}" for b, d in rs.buildings.items())
-             + " — цены и эффекты: rules(topic=\"buildings\").")
+             + " — цены и эффекты: rules(topic=\"buildings\")."
+             + (f" Долями по ходам: {parts} (нет доли — стоит)." if parts else ""))
+    if parts:
+        detail += ("\nДолями: цена делится на ходы стройки (остаток — в первую долю); первая доля — с приказом build "
+                   "(validate проверяет только её), следующие — на шаге строек каждого следующего расчёта, после "
+                   "дохода и содержания. Не хватает на долю — ничего не списано, стройка стоит этот ход (в get_state "
+                   "«СТОИТ», в отчёте — чего не хватает) и продолжится, когда доля найдётся. Захват провинции "
+                   "уничтожает стройку, внесённые доли пропадают.")
     return Section("buildings", core, detail if detail != core else "", short)
 
 
@@ -389,8 +400,13 @@ def _victory(rs: Ruleset) -> Section:
         # core 0.6.0 (decision 26): the pact-break penalty instead of the pointer to get_state (the Счёт line there
         # shows the own objective anyway), so the section stays within 150 characters
         own = f", разрыв пакта −{int(rs.stat('score.betrayal.per_break'))}"
-    core = (f"ПОБЕДА: последний живой, иначе после {t} хода — больший итог: {'+'.join(names)}{own}. Ничья возможна. "
+    core = (f"ПОБЕДА: последний живой, иначе больший итог после {t} хода: {'+'.join(names)}{own}. Ничья возможна. "
             "rules('victory')")
+    if len(core) > VICTORY_CORE_LIMIT:
+        # core 0.7.0: one more source (разведка) in the same 150 characters: the secret objective is «цель» here
+        names = [n.replace(sc_.NAMES["objectives"], "цель") for n in names]
+        core = (f"ПОБЕДА: последний живой или больший итог после {t} хода: {'+'.join(names)}{own}. Ничья возможна. "
+                "rules('victory')")
     return Section("victory", core, _victory_detail(rs, core))
 
 
@@ -417,13 +433,29 @@ def _victory_detail(rs: Ruleset, core: str) -> str:
             limit = f", не больше {d.max_per_owner}" if d.max_per_owner else ""
             items.append(f"{_short(b)} «{d.name}» +{int(st(f'building.{b}.score'))}: {_amounts(rs, rs.building_cost(b))},"
                          f" {d.build_turns} х.{where}{limit}")
+        parts = " Цена — долями по ходам стройки (rules(topic=\"buildings\"))." if any(
+            d.payment == "parts" for _, d in great) else ""
         lines.append("- Стройки: очки готовой великой стройки, пока она в твоей полноценной провинции; захват "
-                     "передаёт её с провинцией. Начало и готовность видят все. " + ("; ".join(items) or "нет строек") + ".")
-    if sc_.on(rs, "war"):
+                     "передаёт её с провинцией. Начало и готовность видят все. " + ("; ".join(items) or "нет строек")
+                     + "." + parts)
+    if sc_.on(rs, "war") and sc_.war_by_province(rs):
+        total = int(st("score.war.province_total"))
+        lines.append(f"- Война (шкала за провинцию): взял провинцию, которой в начале хода владел живой соперник, — "
+                     f"+1; держишь её — ещё +1 за каждые {int(st('score.war.hold_turns'))} полных хода после захвата; "
+                     f"не больше {int(st('score.war.province_cap'))} с одной провинции за партию"
+                     + (f" и {total} всего" if total else "")
+                     + ". Набранное остаётся и после потери провинции; отбитая обратно провинция сверх предела не "
+                       "платит. Нейтральная и Заброшенная земля, Разграбить с возвратом и Освободить — 0; оккупация "
+                       "и пепелище считаются взятием (очков земли не дают). Убитые юниты очков не дают.")
+    elif sc_.on(rs, "war"):
         lines.append(f"- Война: цена убитых юнитов других игроков (по фракции хозяина), в обороне — "
                      f"{int(st('score.war.defense_pct'))}%; 1 очко за {int(st('score.war.per_point'))}, не больше "
                      f"{int(st('score.war.cap_per_victim'))} с одного соперника и {int(st('score.war.cap'))} всего. "
                      "Нейтралы, голод, бунт, гибель при отступлении — 0.")
+    if sc_.on(rs, "intel"):
+        lines.append(f"- Разведка: +{int(st('score.intel.per_success'))} за успешное задание Тени (донесение или удар, "
+                     f"любая миссия) против живого соперника, не больше {int(st('score.intel.cap'))} за партию; одна "
+                     "и та же цель и миссия — раз за ход. Сколько даст успех — estimate_mission.")
     if sc_.betrayal_on(rs):
         lines.append(f"- Разрыв пакта: −{int(st('score.betrayal.per_break'))} к счёту за каждый пакт, который ты "
                      "нарушил (move с \"pact\":\"break\"), и на последнем ходу тоже; выход leave_pact — без штрафа. "
@@ -442,12 +474,15 @@ def _victory_detail(rs: Ruleset, core: str) -> str:
     ledger = next((m.name for m in rs.missions.values() if m.behavior == "read_ledger"), None)
     secret = next((m.name for m in rs.missions.values() if m.behavior == esp.READ_OBJECTIVE), None)
     lines.append("Видимость: свой счёт — полностью; чужой — нижняя граница «≥»: земля по провинциям, которые ты видишь, "
-                 "стройки — по публичным событиям, наука и война — «?». "
+                 "стройки — по публичным событиям, наука, война" + (" и разведка" if sc_.on(rs, "intel") else "")
+                 + " — «?». "
                  + (f"Точную разбивку (без цели) даёт шпион: миссия «{ledger}». " if ledger else "")
                  + (f"Чужую тайную цель — миссия «{secret}». " if secret else "")
                  + "После партии раскрыто всё: итог, разбивка, цели.")
     lines.append("Где смотреть: строка «Счёт:» в get_state (ты — разбивка, соперники — «≥»), you.score_parts"
-                 + (", you.war (очки и остаток предела)" if sc_.on(rs, "war") else "")
+                 + (", you.war (очки и остаток предела" + (", очки по провинциям)" if sc_.war_by_province(rs) else ")")
+                    if sc_.on(rs, "war") else "")
+                 + (", you.intel" if sc_.on(rs, "intel") else "")
                  + ("; очки науки и ветки — list_techs" if sc_.on(rs, "science") and rs.techs else "")
                  + "; после партии итог — phase() и «Итог:» в get_state.")
     return "\n".join(lines)
@@ -470,7 +505,8 @@ def _pacts(rs: Ruleset) -> Section:
         "Пакт в расчёте: армии сторон не сражаются. Встречные ходы по ребру — обе армии остаются дома; ход в "
         "провинцию союзника — войска возвращаются, откуда шли; оба входят в одну провинцию — друг с другом не бьются, "
         "с третьей стороной бьются по очереди (сильнейший первым); провинцию берёт победивший защитника (без "
-        "защитника — сильнейший), остальные после боёв идут домой (дом пал — в свою соседнюю провинцию). Move с "
+        "защитника — сильнейший, при равной силе — жребий партии), остальные после боёв идут домой (дом пал — в свою "
+        "соседнюю провинцию); выбор смешанной находки — за взявшим. Move с "
         '"pact":"break" нацелен на владельца цели (ничейной — на союзников, идущих туда же): если это союзник, пакт '
         "нарушен — этот ход бьётся как без пакта, а прочие встречи двоих в этом расчёте защищены (ходы жертвы к "
         "нарушителю возвращаются); затем пакт разорван, и все узнают, кто нарушил.")
@@ -592,10 +628,15 @@ def _spying(rs: Ruleset) -> Section | None:
             f"с правдой внутри. В книге бывают ложные записи (move…feint:true: войска дома, {feint_cp} ОК). "
             + (f"Чужую тайную цель даёт миссия {_short(secret.id)}. " if secret else "")
             + 'list_spies, estimate_mission, rules(topic="spying").')
+    # core 0.7.0 (decision 27): a success scores (the source `intel`)
+    pays = (f"Успех задания: +{int(st('score.intel.per_success'))} очко (≤{int(st('score.intel.cap'))}). "
+            if sc_.on(rs, "intel") else "")
+    core = core.replace("list_spies, estimate_mission", pays + "list_spies, estimate_mission") if pays else core
     short = ("ШПИОНАЖ: " + (f"Тени даром с начала: {free}; " if free else "") + "hire_shade, "
              "spy{shade,mission,target,rounds}"
              + (f" ({_short(secret.id)} — чужая тайная цель)" if secret else "")
-             + '; донесения в П2 — get_intel; бывают ложные записи (move feint:true). Подробно: rules(topic="spying").')
+             + "; донесения в П2 — get_intel; бывают ложные записи (move feint:true). " + pays
+             + 'Подробно: rules(topic="spying").')
     lines = [core.replace(', rules(topic="spying").', "."), "Миссии:"]
     for mid, m in sorted(rs.missions.items()):
         price = []
@@ -651,11 +692,13 @@ def _spying(rs: Ruleset) -> Section | None:
 
 
 def _fog(rs: Ruleset) -> Section:
-    text = ("ВИДИМОСТЬ: свои провинции и соседние — полностью; остальные — владелец и тип, войска «?». Чужие ресурсы и "
+    # core 0.7.0 army fog (decision 27): beyond sight only whether a rival's army stands there
+    rest = "владелец, тип и есть ли армия (без размера)" if rs.stat("fog.army_presence") else "владелец и тип, войска «?»"
+    text = (f"ВИДИМОСТЬ: свои провинции и соседние — полностью; остальные — {rest}. Чужие ресурсы и "
             "приказы не видны никогда" + (" (кроме донесений Теней)." if rs.system("espionage") else "."))
     if rs.techs or rs.artifacts:
         text += " Чужие технологии и артефакты скрыты до конца партии" + \
-            (" (видно лишь число технологий)." if rs.techs else ".")
+            (" (видно их число)." if rs.techs else ".")
     # the core names the tool only (its arguments are in the tool's schema and the topic): room for core 0.6.0
     core = text + " Прогноз боя — estimate."
     text += " estimate(attacker, defender, province_type, fortified, hasty) — прогноз боя."
@@ -703,12 +746,13 @@ def discoveries_section(rs: Ruleset) -> Section:
     lines = [
         "ЗАБРОШЕННЫЕ ЗЕМЛИ: старты без игрока — нейтральные [заброш.], их столица — [руины] под стражей "
         f"({guard}, стоит на месте); кто уничтожит стражу и возьмёт руины, получит {reward}. Души снижены: "
-        f"{_souls_text(cfg)}. Взятие бесплатно, очки как за обычную землю (руины — как столица). Угол достаётся "
-        "тем, кто ближе; компенсаций нет.",
+        f"{_souls_text(cfg)}. Взятие бесплатно, очки как за обычную землю (руины — как столица); "
+        "компенсаций нет.",
         f"{_where_text(cfg)} Срабатывают один раз при входе "
         "ЛЮБОЙ армии, до боёв (не Тени). Вошли вместе: помехи — каждой армии полностью, плюшки — долями по цене "
-        "армий; юниты — после боёв. Помехи серьёзные: мелкую армию могут стереть, разведка одиночками не "
-        "окупается. Награда нейтралов — тому, кто их уничтожит и возьмёт провинцию.",
+        "армий; юниты — после боёв. Помехи серьёзные: мелкую армию сотрут. Награда нейтралов — тому, кто их "
+        "уничтожит и возьмёт провинцию. Союзники вошли вместе — берёт победивший стражу (без неё сильнейший, "
+        "равны — жребий), прочие — домой.",
         "Смешанная открывается вошедшим; кто держит провинцию после боёв, видит строку НАХОДКА и в следующем ходу "
         'решает приказом {"kind":"discover","province":"P16","choice":"<вариант>"} (Д или П2, бесплатно), иначе — '
         "вариант по умолчанию. Исход — до движения; приказы, которым не хватит юнитов, обрезаются.",
@@ -845,7 +889,7 @@ def _contents(secs: Sequence[Section]) -> str:
     keys = [s.key for s in secs if s.key in TOPICS]
     example = "techs" if "techs" in keys else "pacts"
     return (f"ОГЛАВЛЕНИЕ: подробно — rules(topic=\"{example}\") и т.п.; темы: {', '.join(keys)}. "
-            "describe(\"id или название\") — любой юнит, здание, технология, артефакт, фракция.")
+            "describe(\"id или название\") — о любом юните, здании, технологии и т.д.")
 
 
 # Shrink order when over the limit: details one can look up first, the unit list (needed every turn) late, the order

@@ -9,11 +9,15 @@
 # Balance core 0.6.0 (SCORING.md «Баланс core 0.6.0»): 100 provisions + 60 alloy (was 150 + 50): no m7 agent ever held
 # 150 provisions (end stocks 15-119, alloy 8-243), so part of the price moves to the alloy agents leave idle; 23
 # resources a point against the Monument's 12 (was 29). Bots build it at no price (they save only for the Monument).
+# Core 0.7.0 (decision 27, measurement m8: an agent saved for the Spire from turn 5, was 4 alloy short on turn 9 and gave
+# it up): both works are paid in parts (`payment: parts`): a share per build turn, the first with the order, the next
+# ones at the build step of later turns; without the share the work stalls and waits. Price, time and points unchanged.
 - id: monument
   name: {ru: Монумент Предела, en: Monument of the Verge}
   short: монум.
   cost: {provisions: 25, alloy: 10}
   build_turns: 2
+  payment: parts
   max_per_province: 1
   max_per_owner: 1
   score: 3
@@ -24,6 +28,7 @@
   short: шпиль
   cost: {provisions: 100, alloy: 60}
   build_turns: 4
+  payment: parts
   max_per_province: 1
   max_per_owner: 1
   score: 7

@@ -48,7 +48,7 @@ def _seats(n: int) -> list[dict]:
 
 
 def test_pack_version_and_validation():
-    assert "version: 0.6.0" in (Path(default_pack_dirs()[0]) / "pack.yaml").read_text(encoding="utf-8")
+    assert "version: 0.7.0" in (Path(default_pack_dirs()[0]) / "pack.yaml").read_text(encoding="utf-8")
     assert "version: 0.5.0" in (LEGACY_PACKS_DIR / "core-0.5.0" / "pack.yaml").read_text(encoding="utf-8")
     assert validate_packs(default_pack_dirs()) == ([], [])
     for sid in SCORED + PLAIN:
@@ -62,13 +62,12 @@ def test_scored_scenarios_weigh_every_source_once_and_deal_one_objective(sid):
     assert rs.scenario.objectives["dealt"] == rs.scenario.objectives["offer"] == 1
     assert all(rs.system(f"scoring.{src}") for src in SCORE_SOURCES)
     assert rs.stat("combat.fortify_persists") == 1 and rs.system("espionage") and rs.system("conquest")
-    # the first numbers of SCORING.md 3, with the 0.5.0 balance: a tier-2 tech scores 1, 1 war point per 15
+    # the first numbers of SCORING.md 3, with the 0.5.0 balance: a tier-2 tech scores 1; core 0.7.0 (decision 27):
+    # the war scale per province (cap 3, +1 per 2 turns held, 8 in all) and intel (+1 a success, at most 3)
     assert [rs.stat(s) for s in ("score.territory.province", "score.territory.capital", "score.science.tier1",
-                                 "score.science.tier2", "score.science.branch", "score.war.per_point",
-                                 "score.war.cap_per_victim", "score.war.cap", "score.war.defense_pct")] == \
-        [1, 3, 1, 1, 1, 15, 3, 5, 50]
-    if "core:growth" in rs.scenario.factions:     # the Growth's war credit: 1 point per 10
-        assert rs.stat("score.war.per_point", "core:growth") == 10
+                                 "score.science.tier2", "score.science.branch", "score.war.province_cap",
+                                 "score.war.hold_turns", "score.war.province_total", "score.intel.per_success",
+                                 "score.intel.cap")] == [1, 3, 1, 1, 1, 3, 2, 8, 1, 3]
 
 
 @pytest.mark.parametrize("sid", PLAIN)
@@ -193,7 +192,8 @@ def test_rules_core_fits_and_names_the_sources(sid):
     victory = next(line for line in text.splitlines() if line.startswith("ПОБЕДА"))
     assert len(victory) <= 150
     if sid in SCORED:
-        assert "земля+наука+стройки+война+тайная цель" in victory
+        # core 0.7.0: with intel the secret objective is «цель» in the 150 characters
+        assert "земля+наука+стройки+война+разведка+цель" in victory
         topic = rules_topic(rs, "victory")
         assert "Монумент Предела" in topic and "Шпиль Сна" in topic and "Хозяин кузниц" in topic
     else:
@@ -202,7 +202,7 @@ def test_rules_core_fits_and_names_the_sources(sid):
 
 @pytest.mark.parametrize("scenario,seats,artifacts", [
     ("core:slice3", 3, None), ("core:quad4", 4, None), ("core:quad4", 4, "points"), ("core:slice2", 2, None),
-    ("core:blitz_score", 3, None)])
+    ("core:blitz_score", 3, None), ("core:quad4", 3, "draft")])
 def test_game_rules_with_scoring_are_never_cut(tmp_path, scenario, seats, artifacts):
     specs = [{"seat": "ABCD"[i], "nick": f"Ник{i}", "kind": "agent"} for i in range(seats)]
     config = make_config(game_id="r", scenario=scenario, seats=specs, seed=1, artifacts=artifacts)

@@ -10,7 +10,7 @@ from . import diplomacy as dip
 from . import discoveries as disc
 from . import registry
 from . import scoring as sc_
-from .content import Ruleset
+from .content import Ruleset, split_cost
 from .model import GameState, SeatOrders
 from .orders import cp_left as _cp_left
 from .resolve import TurnReport, income_of, upkeep_of, visible_provinces
@@ -51,6 +51,7 @@ def view_state(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders |
     works_on = sc_.on(ruleset, "works")
     statuses = cq.statuses_for(state) if disc.statuses_active(ruleset) else {}
     finds = disc.on(ruleset)
+    presence = army_presence(ruleset)
     for pid, p in sorted(state.provinces.items()):
         entry: dict[str, Any] = {"id": pid, "name": p.name, "type": p.type, "owner": p.owner,
                                  "neighbors": list(ruleset.map.adjacency[pid]), "visible": pid in seen}
@@ -63,9 +64,12 @@ def view_state(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders |
             entry.update(disc.province_json(ruleset, state, seat, pid, pid in seen))   # stage 5: marks, own finds
         if pid in seen:
             entry.update(units=dict(p.units), buildings=list(p.buildings), fortified=p.fortified)
+        elif presence and p.owner not in (None, seat):
+            # core 0.7.0 army fog: beyond sight only whether another seat's army stands there, never its size
+            entry["army"] = p.unit_total() > 0
         if p.owner == seat:
-            entry["building_now"] = [{"building": b.building, "turns_left": b.turns_left}
-                                     for b in state.pending_builds if b.province == pid]
+            entry["building_now"] = [build_json(ruleset, b, own=True) for b in state.pending_builds
+                                     if b.province == pid]
         elif pid in seen and works_on:
             # a great work in progress is public (SCORING.md 2.3): its mark on the provinces the seat sees now
             now = [{"building": b.building, "turns_left": b.turns_left} for b in state.pending_builds
@@ -101,9 +105,11 @@ def view_state(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders |
     if not ruleset.default_scoring:
         you["score_parts"] = dict(known[seat]["parts"])
         if sc_.on(ruleset, "war"):
+            you["war"] = sc_.war_view(state, ruleset, seat)
+        if sc_.on(ruleset, "intel"):
             key_ = stat_key(state, ruleset, seat)
-            you["war"] = {"points": sc_.war(state, ruleset, seat, key_),
-                          "cap_left": sc_.war_cap_left(state, ruleset, seat, key_)}
+            you["intel"] = {"points": sc_.intel(state, ruleset, seat, key_),
+                            "left": sc_.intel_left(state, ruleset, seat, key_)}
         if sc_.on(ruleset, "objectives"):
             you["objectives"] = sc_.objectives_view(state, ruleset, seat)
     players = []
@@ -137,6 +143,26 @@ def view_state(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders |
     if disc.on(ruleset):
         out["abandoned"] = list(state.abandoned)                 # public (ABANDONED_LANDS.md 11)
         out["discoveries_pending"] = disc.pending_json(ruleset, state, seat)
+    return out
+
+
+def army_presence(ruleset: Ruleset) -> bool:
+    """Core 0.7.0 army fog (decision 27): beyond sight a province of another seat shows whether an army stands there."""
+    return bool(ruleset.stat("fog.army_presence"))
+
+
+def build_json(ruleset: Ruleset, b: Any, own: bool) -> dict[str, Any]:
+    """A build in progress for get_state: {building, turns_left}; for its owner a build paid in parts (core 0.7.0)
+    also `share` "k/n" (the next one), `next_share` {res: n} and `stalled` (the last build step could not pay)."""
+    out: dict[str, Any] = {"building": b.building, "turns_left": b.turns_left}
+    if own and b.cost:
+        shares = ruleset.building_shares(b.building)
+        index = shares - b.turns_left
+        if 0 < index < shares:
+            out["share"] = f"{index + 1}/{shares}"
+            out["next_share"] = split_cost(b.cost, shares, index)
+        if b.stalled:
+            out["stalled"] = True
     return out
 
 
@@ -176,16 +202,27 @@ def _province_line(ruleset: Ruleset, state: GameState, seat: str, entry: Mapping
     if marks:
         head += " " + " ".join(marks)
     if not entry["visible"]:
-        parts = [f"{head} ?"]
+        army = entry.get("army")
+        parts = [f"{head} {'армия есть' if army else 'армии нет' if army is not None else '?'}"]
     else:
         parts = [f"{head} {_units_text(ruleset, entry['units'])}" + (" укр." if entry["fortified"] else "")]
         building = [ruleset.buildings[b].name.lower() for b in entry["buildings"]]
-        building += [f"строится {ruleset.buildings[b['building']].name.lower()} ({b['turns_left']})"
-                     for b in entry.get("building_now", [])]
+        building += [_build_text(ruleset, b) for b in entry.get("building_now", [])]
         if building:
             parts.append(", ".join(building))
     parts.append("→ " + " ".join(entry["neighbors"]))
     return " | ".join(parts)
+
+
+def _build_text(ruleset: Ruleset, b: Mapping[str, Any]) -> str:
+    """«строится шпиль сна (3)»; paid in parts (core 0.7.0, own builds): «… доля 2/4: 25 Пров. 15 Спл.», stalled
+    «… СТОИТ: нет доли 2/4 (25 Пров. 15 Спл.)»."""
+    text = f"строится {ruleset.buildings[b['building']].name.lower()} ({b['turns_left']})"
+    if b.get("next_share"):
+        share = " ".join(f"{n} {ruleset.resources[r].short if r in ruleset.resources else r}"
+                         for r, n in b["next_share"].items())
+        text += (f" СТОИТ: нет доли {b['share']} ({share})" if b.get("stalled") else f" доля {b['share']}: {share}")
+    return text
 
 
 def _header(state: GameState, ruleset: Ruleset, view: Mapping[str, Any], deadline: DeadlineInfo | None) -> str:
@@ -390,6 +427,7 @@ def _changes_line(state: GameState, ruleset: Ruleset, seat: str, since_turn: int
                                "retreat_lost", "order_rejected", "fortify_broken", "pact_bounce", "pact_joint",
                                "pact_broken", "pact_expired", "pact_ended", "pact_lapsed", "gift", "pact_signed",
                                "pact_renewed", "pact_leave", "tech_completed", "work_started", "work_completed",
+                               "build_stalled", "war_points",
                                *CONQUEST_EVENT_TEXT, *disc.DISCOVERY_EVENT_TEXT):
                 starving |= e["kind"] == "starvation"
                 items.append(event_text(e, ruleset, state, seat))
@@ -440,13 +478,29 @@ def event_text(e: Mapping[str, Any], ruleset: Ruleset, state: GameState, seat: s
         "tech_completed": lambda: f"изучена технология «{_tech_name(ruleset, e['tech'])}»",
         # stage 4 (SCORING.md 2.3, 2.4)
         "work_started": lambda: f"{who(e['seat'])} начал великую стройку «{_building_name(ruleset, e['building'])}» "
-                                f"в {e['province']} (готова к ходу {e['ready_turn']})",
+                                f"в {e['province']} (готова {_ready_text(ruleset, e)})",
         "work_completed": lambda: f"{who(e['seat'])} достроил великую стройку «{_building_name(ruleset, e['building'])}» "
                                   f"в {e['province']}",
         "war_credit": lambda: (f"война: {who(e['killer'])} +{e['value']} за потери {who(e['victim'])} "
                                f"({_units_text(ruleset, e['units'])}{', в обороне' if e.get('defender') else ''})"),
+        # core 0.7.0 (decision 27)
+        "war_points": lambda: (f"война: +{e['points']} очк. за {e['province']} "
+                               + ("(захват" if e.get("reason") == "capture" else f"(удержание {e.get('held')} х.")
+                               + f", с провинции {e['total']}/{e['cap']})"),
+        "build_stalled": lambda: (f"стройка «{_building_name(ruleset, e['building'])}» в {e['province']} стоит: нет "
+                                  f"доли {e['share']}/{e['shares']}, не хватает {_amounts_text(ruleset, e['missing'])}"),
+        "build_paid": lambda: (f"внесена доля {e['share']}/{e['shares']} стройки «{_building_name(ruleset, e['building'])}»"
+                               f" в {e['province']}: {_amounts_text(ruleset, e['paid'])}"),
     }
     return simple[kind]()
+
+
+def _ready_text(ruleset: Ruleset, e: Mapping[str, Any]) -> str:
+    """The ready turn of a public `work_started`: fixed when the work is paid at once; a work paid in parts (core
+    0.7.0) stands still on a turn its share is not paid, which rivals are never told, so only «не раньше»."""
+    b = ruleset.buildings.get(e["building"])
+    parts = b is not None and b.payment == "parts"
+    return f"{'не раньше хода' if parts else 'к ходу'} {e['ready_turn']}"
 
 
 def _building_name(ruleset: Ruleset, building: str) -> str:

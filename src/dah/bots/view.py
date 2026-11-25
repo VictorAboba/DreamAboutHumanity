@@ -33,6 +33,9 @@ BUILDING_COST_ALLOY: dict[str, int] = {"mine": 10, "farm": 8, "barracks": 30, "t
 BUILDING_COST_FOOD: dict[str, int] = {"monument": 25, "dream_spire": 100}
 GREAT_WORKS: dict[str, tuple[int, int, tuple[str, ...] | None]] = {
     "monument": (2, 3, None), "dream_spire": (4, 7, ("agri", "forge", "shrine", "waste"))}
+# Core 0.7.0 (decision 27): great works paid in parts (`payment: parts`), a share per build turn; tests check it
+# (a set: the simulator syncs it in place with its pack)
+WORKS_IN_PARTS: set[str] = {"monument", "dream_spire"}
 # Core 0.6.0 (decision 26): points a broken pact costs its breaker in a scored game (score.betrayal.per_break of the
 # scored scenarios); tests/test_bots_logic.py checks it, the simulator re-reads it from its pack.
 BETRAYAL_PENALTY = 3
@@ -75,6 +78,10 @@ class Province:
     status: Mapping[str, Any] = field(default_factory=dict)  # public conquest status (occupied, ruined_until, ...)
     origin: str | None = None  # the seat that started with it (conquest games)
     building_now: tuple[str, ...] = ()  # short ids building here (own provinces; others: great works only)
+    # core 0.7.0: the next shares of own builds paid in parts here (short resource id -> amount), summed
+    share_due: Mapping[str, int] = field(default_factory=dict)
+    # core 0.7.0 army fog: beyond sight only whether another seat's army stands there (`units` stays None)
+    army: bool | None = None
     # stage 5 (docs/ABANDONED_LANDS.md 13): public marks of the Abandoned lands and the find this seat knows
     abandoned: bool = False
     ruins: bool = False
@@ -126,7 +133,8 @@ class StateView:
     # stage 4 (docs/SCORING.md 8, 10): None / empty with the default scoring (land only)
     score_parts: Mapping[str, int] | None = None  # own turn score by source (you.score_parts)
     objectives: tuple[Mapping[str, Any], ...] = ()  # own secret objectives (you.objectives)
-    war: Mapping[str, int] | None = None  # you.war: points, cap_left
+    war: Mapping[str, Any] | None = None  # you.war: points, cap_left (None: per province, no total cap), provinces
+    intel: Mapping[str, int] | None = None  # core 0.7.0, you.intel: points, left
     # stage 5 (docs/ABANDONED_LANDS.md 8, 13): own pending choices of mixed finds
     # [{province, id (short), name, default, choices: [{id, ev, risk}]}]; empty without them
     pending_finds: tuple[Mapping[str, Any], ...] = ()
@@ -259,6 +267,8 @@ def parse_state(payload: dict[str, Any], me: set[str] | frozenset[str]) -> State
             origin=str(record["origin"]) if record.get("origin") else None,
             building_now=tuple(short_id(str(b.get("building"))) for b in record.get("building_now") or []
                                if isinstance(b, dict) and b.get("building")),
+            share_due=_share_due(record.get("building_now")),
+            army=record["army"] if isinstance(record.get("army"), bool) else None,
             abandoned=bool(record.get("abandoned")) or pid in abandoned,
             ruins=bool(record.get("ruins")),
             guard=dict(record["guard"]) if isinstance(record.get("guard"), dict) else None,
@@ -300,9 +310,21 @@ def parse_state(payload: dict[str, Any], me: set[str] | frozenset[str]) -> State
                      if isinstance(player.get("score_parts"), dict) else None),
         objectives=tuple(dict(o) for o in player.get("objectives") or [] if isinstance(o, dict)),
         war=dict(player["war"]) if isinstance(player.get("war"), dict) else None,
+        intel=dict(player["intel"]) if isinstance(player.get("intel"), dict) else None,
         pending_finds=tuple({**e, "id": short_id(str(e.get("id")))} for e in state.get("discoveries_pending") or []
                             if isinstance(e, dict) and e.get("province")),
     )
+
+
+def _share_due(raw: Any) -> dict[str, int]:
+    """Core 0.7.0: the next shares of the province's builds paid in parts (`building_now[].next_share`), summed."""
+    out: dict[str, int] = {}
+    for b in raw or []:
+        if isinstance(b, dict) and isinstance(b.get("next_share"), dict):
+            for r, n in b["next_share"].items():
+                if isinstance(n, int) and not isinstance(n, bool):
+                    out[short_id(str(r))] = out.get(short_id(str(r)), 0) + n
+    return out
 
 
 def _researching(raw: Any) -> str | None:

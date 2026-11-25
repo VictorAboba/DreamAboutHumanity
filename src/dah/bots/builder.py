@@ -114,8 +114,11 @@ class BuilderBot(Bot):
         view = spy.food_view(view, food_held, alloy_held)
         works, view = score.lay_works(view, self._works(view), FOOD_TURNS)
         early = not self._core_economy(view) and not score.wants_work(view)    # its objective: save at once
-        saving = None if works or early else score.saving_rate(view, MONUMENT, FOOD_TURNS)
-        if saving is not None:  # saving for the Monument: the stock is kept, recruits eat only what income leaves
+        # core 0.7.0: with the Monument standing, the builder saves for the Spire (paid in parts: the stock needs only
+        # what makes every share payable with the income)
+        goal = SPIRE if score.has_work(view, MONUMENT) and self._core_economy(view) else MONUMENT
+        saving = None if works or early else score.saving_rate(view, goal, FOOD_TURNS)
+        if saving is not None:  # saving for a work: the stock is kept, recruits eat only what income leaves
             view = spy.food_view(view, view.resource(FOOD_RESOURCE))
         orders: list[Order] = list(works)
         alloy = view.resource(BUILD_RESOURCE)
@@ -204,7 +207,7 @@ class BuilderBot(Bot):
                 out.append(hire)
                 alloy -= spy.shade_cost()
             idle = spy.idle_shades(view)
-            target = spy.strongest_neighbour(view)
+            target = spy.rival_target(view)       # core 0.7.0: a far rival too while intel points are left
             if idle and target is not None and spy.can_start(view):
                 mission = spy.SECRET if spy.secret_wanted(view, self.memory, target) else "ledger"
                 got = spy.spy_order(view, idle[0], mission, target, SECRET_ROUNDS if mission == spy.SECRET
