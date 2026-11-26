@@ -1,0 +1,37 @@
+# Great works (core 0.5.0, SCORING.md 2.3): ordinary buildings that score while ready in a full province of their
+# owner. Both exist only while the works source is on (requires_system: scoring.works); one of each per owner.
+# Balance (SCORING.md «Баланс core 0.5.0»): the Monument costs 25 provisions + 10 alloy (was 60 + 20, out of reach of
+# the bots, whose armies eat the provisions) and scores 3 (was 2: works gave the winner 2-4%); the Spire keeps its
+# price for agents with idle provisions.
+# Core 0.6.0 (decision 26, measurement m7: no agent built the Spire while one sat on 243 alloy and 119 provisions):
+# the Spire scores 7 (was 3, the Monument's points at six times its price and twice its build time); its price, build
+# time and types (not in a capital: it must stay contestable, SCORING.md 6.4) are unchanged.
+# Balance core 0.6.0 (SCORING.md «Баланс core 0.6.0»): 100 provisions + 60 alloy (was 150 + 50): no m7 agent ever held
+# 150 provisions (end stocks 15-119, alloy 8-243), so part of the price moves to the alloy agents leave idle; 23
+# resources a point against the Monument's 12 (was 29). Bots build it at no price (they save only for the Monument).
+# Core 0.7.0 (decision 27, measurement m8: an agent saved for the Spire from turn 5, was 4 alloy short on turn 9 and gave
+# it up): both works are paid in parts (`payment: parts`): a share per build turn, the first with the order, the next
+# ones at the build step of later turns; without the share the work stalls and waits. Price, time and points unchanged.
+- id: monument
+  name: {ru: Монумент Предела, en: Monument of the Verge}
+  short: монум.
+  cost: {provisions: 25, alloy: 10}
+  build_turns: 2
+  payment: parts
+  max_per_province: 1
+  max_per_owner: 1
+  score: 3
+  requires_system: scoring.works
+  lore: lore/monument.md
+- id: dream_spire
+  name: {ru: Шпиль Сна, en: Dream Spire}
+  short: шпиль
+  cost: {provisions: 100, alloy: 60}
+  build_turns: 4
+  payment: parts
+  max_per_province: 1
+  max_per_owner: 1
+  score: 7
+  allowed_types: [forge, agri, waste, shrine]
+  requires_system: scoring.works
+  lore: lore/dream_spire.md

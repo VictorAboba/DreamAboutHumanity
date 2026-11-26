@@ -238,11 +238,14 @@ def attack_bonus(view: StateView, war: bool = False) -> dict[str, float]:
 
 def war_pays(view: StateView, pid: str) -> bool:
     """Core 0.7.0 (war per province): taking `pid` still pays (its points below the cap per province); the kill credit
-    of older games: always."""
+    of older games: always. Core 0.7.1 (decision 28): a province the bot has owned earlier in this game (you.war.reclaim)
+    pays no war points when taken back — its land still counts elsewhere (territory, objectives)."""
     war = view.war or {}
     cap = war.get("per_province")
     if not cap:
         return True
+    if pid in (war.get("reclaim") or ()):
+        return False
     return int((war.get("provinces") or {}).get(pid, 0)) < int(cap)
 
 

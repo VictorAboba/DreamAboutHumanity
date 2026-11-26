@@ -427,6 +427,7 @@ def _scoring(events: list[dict[str, Any]], report: dict[str, Any]) -> dict[str, 
     # core 0.7.0 (decision 27): war points per province {seat: {province: points}} and intel points per seat
     war_provinces: dict[str, dict[str, int]] = {}
     intel: dict[str, int] = {}
+    reclaims: dict[str, dict[str, int]] = {}     # core 0.7.1: {seat: {province: returns of own land (0 points)}}
     done: dict[str, str] = {}        # province -> seat whose completed work stands there
     for e in events:
         kind = e.get("type")
@@ -449,6 +450,9 @@ def _scoring(events: list[dict[str, Any]], report: dict[str, Any]) -> dict[str, 
         elif kind == "war_points" and e.get("seat"):
             row = war_provinces.setdefault(e["seat"], {})
             row[e["province"]] = row.get(e["province"], 0) + int(e.get("points", 0))
+            if e.get("reason") == "reclaim":       # core 0.7.1: a return of one's own land, 0 war points
+                reclaims.setdefault(e["seat"], {})
+                reclaims[e["seat"]][e["province"]] = reclaims[e["seat"]].get(e["province"], 0) + 1
         elif kind == "intel_point" and e.get("seat"):
             intel[e["seat"]] = intel.get(e["seat"], 0) + int(e.get("points", 0))
         elif kind == "work_completed" and e.get("seat") in works:
@@ -462,7 +466,7 @@ def _scoring(events: list[dict[str, Any]], report: dict[str, Any]) -> dict[str, 
             "defense_share": round(sum(r["defense_value"] for r in pairs.values()) / total_war, 3) if total_war
             else None,
             "works": works, "fights": [fights[t] for t in sorted(fights)],
-            "war_provinces": war_provinces, "intel_points": intel,
+            "war_provinces": war_provinces, "war_reclaims": reclaims, "intel_points": intel,
             "gift_share_of_score_spend": _gift_share(events, list(report["seats"]))}
 
 
@@ -653,8 +657,10 @@ def _score_lines(report: dict[str, Any], nick: dict[str, str]) -> list[str]:
                       for s, w in sc["works"].items() if any(w.values()))
     if works:
         lines.append(f"великие стройки (начато/достроено/потеряно): {works}")
-    wp = "; ".join(f"{nick.get(s, s)} " + ", ".join(f"{p} {n}" for p, n in sorted(rows.items()))
-                   for s, rows in sorted((sc.get("war_provinces") or {}).items()))
+    back = sc.get("war_reclaims") or {}
+    wp = "; ".join(f"{nick.get(s, s)} " + ", ".join(
+        f"{p} {n}" + (f" (возврат своей ×{back[s][p]}: 0)" if p in back.get(s, {}) else "")
+        for p, n in sorted(rows.items())) for s, rows in sorted((sc.get("war_provinces") or {}).items()))
     if wp:
         lines.append(f"война по провинциям (очки): {wp}")
     ip = "; ".join(f"{nick.get(s, s)} {n}" for s, n in sorted((sc.get("intel_points") or {}).items()) if n)

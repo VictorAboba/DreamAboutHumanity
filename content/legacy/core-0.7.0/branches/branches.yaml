@@ -1,0 +1,27 @@
+- id: industry
+  name: {ru: Промышленность, en: Industry}
+  order: 1
+  color: "#b8742e"
+  description: Доход сплава и провианта, дешёвые постройки.
+- id: war
+  name: {ru: Война, en: War}
+  order: 2
+  color: "#b03a3a"
+  description: Укрепления, Кузня и тяжёлые юниты, удар из П2.
+- id: logistics
+  name: {ru: Логистика, en: Logistics}
+  order: 3
+  color: "#3a78b0"
+  description: Дальность хода, Очки Командования, Штаб и Склад.
+- id: mystery
+  name: {ru: Тайна, en: Mystery}
+  order: 4
+  color: "#7a4bb0"
+  description: Кредо, Сноходцы и шпионаж (Шёпот, Тени, сроки миссий).
+# Counter-intelligence (decision 21): exists only while espionage is on.
+- id: mirrors
+  name: {ru: Зеркала, en: Mirrors}
+  order: 5
+  color: "#4b9aa8"
+  requires_system: espionage
+  description: Контрразведка — Зеркала (C), Зеркальный зал, выучка гарнизонов, дознание пойманных Теней.

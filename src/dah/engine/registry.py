@@ -238,6 +238,11 @@ SCORING_STATS: tuple[StatSpec, ...] = (
     _s4("score.war.province_cap", 0, 10, 0, "war"),
     _s4("score.war.hold_turns", 1, 10, 2, "war"),
     _s4("score.war.province_total", 0, 50, 0, "war"),
+    # core 0.7.1 (decision 28): 1 = a capture (and the holding of it) pays war points only for a province the taker has
+    # not owned earlier in this game (Player.tally.owned: owner at the start of the game or at the end of any earlier
+    # turn, its own start provinces included); taking back one's own gives the land, 0 war points. 0 (the default,
+    # older packs): every capture from a living rival pays, as in core 0.7.0. Read only with province_cap > 0.
+    _s4("score.war.no_reclaim", 0, 1, 0, "war"),
     # core 0.7.0 (decision 27): points per successful spy mission against a living rival seat (each target and
     # mission kind once a turn), at most score.intel.cap over the game
     _s4("score.intel.per_success", 0, 5, 1, "intel"),

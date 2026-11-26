@@ -5,7 +5,9 @@ Sources (registry.SCORE_SOURCES, weights in `Ruleset.scenario.scoring`, 0 = off)
     science     snapshot   techs researched by order (score.science.tier<N>) + score.science.branch per complete branch
     works       snapshot   ready buildings with building.<id>.score in full own provinces
     war         tally      Player.tally.war_value {victim: value}, capped per victim and in total; core 0.7.0
-                           (score.war.province_cap > 0): Player.tally.war_provinces {province: {points, since}}
+                           (score.war.province_cap > 0): Player.tally.war_provinces {province: {points, since}};
+                           core 0.7.1 (score.war.no_reclaim 1): Player.tally.owned [province], the land a seat has
+                           owned in this game, pays no war points when taken back
     intel       tally      core 0.7.0: Player.tally.intel, successful spy missions counted (score.intel.*)
     objectives  at the end the seat's secret objectives that are met (Player.objectives)
 
@@ -148,6 +150,40 @@ def war_by_province(rs: Ruleset) -> bool:
     return _stat(rs, "score.war.province_cap", None) > 0
 
 
+def no_reclaim(rs: Ruleset) -> bool:
+    """Core 0.7.1 (decision 28): under the province scale, taking back a province the taker has owned earlier in this
+    game (score.war.no_reclaim 1 for the scenario's base stats) pays no war points, neither the capture nor the
+    holding."""
+    return war_by_province(rs) and _stat(rs, "score.war.no_reclaim", None) > 0
+
+
+def owned_before(state: GameState, seat: str) -> list[str]:
+    """Player.tally.owned: provinces the seat owned at the start of the game or at the end of an earlier turn (kept
+    while no_reclaim is on; see note_owners)."""
+    return list(state.players[seat].tally.get("owned") or [])
+
+
+def note_owners(state: GameState, rs: Ruleset) -> None:
+    """At the start of a resolution (the owners are those at the end of the previous turn, or at the game start for
+    the first one) add every seat's provinces to its Player.tally.owned, sorted. Only while no_reclaim is on: the
+    tally of older rulesets stays empty, so their states hash as before."""
+    if not no_reclaim(rs):
+        return
+    for seat in sorted(state.players):
+        mine = {p.id for p in state.owned(seat)}
+        if not mine:
+            continue
+        tally = state.players[seat].tally
+        known = set(tally.get("owned") or [])
+        if not mine <= known:
+            tally["owned"] = sorted(known | mine)
+
+
+def reclaim(state: GameState, rs: Ruleset, seat: str, pid: str) -> bool:
+    """Taking `pid` would be a return of the seat's own land (no war points; core 0.7.1)."""
+    return no_reclaim(rs) and pid in (state.players[seat].tally.get("owned") or ())
+
+
 def war_provinces(state: GameState, seat: str) -> dict[str, dict[str, Any]]:
     """Player.tally.war_provinces {province: {points, since}} (`since`: the turn of the capture while the seat has held
     the province ever since, else None)."""
@@ -189,6 +225,10 @@ def war_view(state: GameState, rs: Ruleset, seat: str, key: StatKey = ...) -> di
         out["per_province"] = _stat(rs, "score.war.province_cap", key)
         out["hold_turns"] = _stat(rs, "score.war.hold_turns", key)
         out["provinces"] = {pid: int(e.get("points", 0)) for pid, e in sorted(war_provinces(state, seat).items())}
+        if no_reclaim(rs):
+            # core 0.7.1: provinces of others the seat has owned earlier — taking them back pays no war points
+            mine = {p.id for p in state.owned(seat)}
+            out["reclaim"] = [pid for pid in owned_before(state, seat) if pid not in mine]
     return out
 
 
@@ -210,7 +250,9 @@ def credit_provinces(state: GameState, rs: Ruleset, turn: int, owners_before: Ma
     it back or a release does not) gives +1. Every (seat, province) earns at most score.war.province_cap over the game,
     so a province taken back and forth stops paying, and nothing is credited (no point, no event) once the seat holds
     score.war.province_total in all (war() would clip it anyway; an event would promise a point that never counts).
-    Neutral and Abandoned land gives no war points."""
+    Neutral and Abandoned land gives no war points. Core 0.7.1 (score.war.no_reclaim 1): a province the taker has
+    owned earlier in this game (Player.tally.owned, its own start provinces included) gives no point and no holding
+    (`since` stays as it was: None once the province was lost); its event says so (points 0, reason `reclaim`)."""
     out: list[dict[str, Any]] = []
     for seat in sorted(state.players):
         entries = state.players[seat].tally.get("war_provinces") or {}
@@ -237,6 +279,12 @@ def credit_provinces(state: GameState, rs: Ruleset, turn: int, owners_before: Ma
             continue
         key = stat_key(state, rs, taker)
         cap = _stat(rs, "score.war.province_cap", key)
+        if reclaim(state, rs, taker, pid):
+            # core 0.7.1: the land comes back, no war point and no holding; the event tells the taker why
+            out.append({"seat": taker, "province": pid, "points": 0, "reason": "reclaim",
+                        "total": int(war_provinces(state, taker).get(pid, {}).get("points", 0)), "cap": cap,
+                        "victim": loser})
+            continue
         entries = state.players[taker].tally.setdefault("war_provinces", {})
         e = entries.setdefault(pid, {"points": 0, "since": None})
         if e.get("since") == turn:

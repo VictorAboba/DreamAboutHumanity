@@ -5,7 +5,7 @@
 These are the rules as the engine implements them: the vertical slice plus stage 2 (techs, the setup phase,
 factions and artifacts). The exact contracts are in the [slice specification](../SLICE.md) and the
 [stage-2 specification](../TECH_AND_SETUP.md) (both in Russian); the [full concept](../CONCEPT.md) (in Russian)
-describes the game the slice grows towards. Numbers below are the defaults of the `core` pack, version 0.7.0 (espionage and conquest of stage 3a, the scoring of stage 4 with the decision-27 changes: great works paid in parts, intel points, war per province, army fog; both on by default in `slice3`, `slice2` and `quad4`; the Abandoned lands of stage 5 are described [below](#abandoned-lands-and-finds-stage-5)); a
+describes the game the slice grows towards. Numbers below are the defaults of the `core` pack, version 0.7.1 (espionage and conquest of stage 3a, the scoring of stage 4 with the decision-27 changes: great works paid in parts, intel points, war per province, army fog; 0.7.1: no war points for taking back one's own land, decision 28; both on by default in `slice3`, `slice2` and `quad4`; the Abandoned lands of stage 5 are described [below](#abandoned-lands-and-finds-stage-5)); a
 scenario or a pack can change them ([Content packs](modding.md)). The tables of units, buildings, techs, factions and
 artifacts are a snapshot: the match's own numbers are always in `rules(topic)` and `describe(id)` (see the end of
 this page).
@@ -454,7 +454,9 @@ line. `format=json` gives the same view as JSON.
     public;
   - **war** (core 0.7.0, decision 27): +1 per province taken from a living rival (occupied or razed counts, a raid
     that gives it back or a release does not) and +1 per 2 full turns it is held; at most 3 from one province (the
-    Growth: 4) and 8 in all (at that cap a capture or a hold gives no point and no notice); points stay after the province is lost; neutral and Abandoned land give 0. Before 0.7.0:
+    Growth: 4) and 8 in all (at that cap a capture or a hold gives no point and no notice); points stay after the province is lost; neutral and Abandoned land give 0. Since core 0.7.1 (decision 28):
+    taking back a province you have owned earlier in this game (your start provinces included) returns the land but no
+    war points, neither for the capture nor for holding it (`score.war.no_reclaim`; the list is `you.war.reclaim`). Before 0.7.0:
     the price of killed units, 1 point per 15 (the Growth: per 10), at most 3 from one rival and 5 in all;
   - **intel** (`intel`, only with espionage — with espionage off its weight is 0, 0.7.0): +1 per successful Shade mission against a living rival (once per
     Shade, target and mission a turn), at most 3 a game; `estimate_mission` says whether a success would score;
@@ -477,7 +479,7 @@ line. `format=json` gives the same view as JSON.
   equal total every seat that has it wins; an eliminated seat's objective is revealed but does not count.
 - **Where to look:** the «Счёт:» line of `get_state` (≤ 300 characters: you with the breakdown, rivals as «≥», your
   objective and whether it is met now); in JSON `you.score`, `you.score_parts`, `you.war {points, cap_left}` (0.7.0 also `per_province`,
-  `hold_turns`, `provinces`), `you.intel {points, left}`,
+  `hold_turns`, `provinces`; 0.7.1 `reclaim`), `you.intel {points, left}`,
   `you.objectives` (with a setup phase the objective is already in `get_setup`), and per player `score`,
   `score_exact` and `score_known` (`null`: unknown). Science points and branch progress are in `list_techs`; pool
   objectives and great works in `describe`; the turn report (`history`) shows only your own score. After the match

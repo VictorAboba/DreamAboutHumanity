@@ -1,0 +1,24 @@
+# Fates of a province taken from another seat (docs/SPY_AND_CONQUEST.md 3.3). Only while conquest is on. Prices and
+# loot are multiplied by the province type's conquest_value (capital 3) and the disposition.<id>.cost_mul/loot_mul
+# stats (captains: raid loot x1.5; growth: exterminate loot x1.5, subjugate cost x1.2).
+- id: subjugate
+  name: {ru: Подчинить, en: Subjugate}
+  behavior: annex
+  cost: {provisions: 5}
+  description: Снять Оккупацию за Провиант; провинция сразу полноценная, здания сохраняются.
+- id: exterminate
+  name: {ru: Истребить, en: Exterminate}
+  behavior: raze
+  loot: {alloy: 5, provisions: 3}
+  params: {ruin_turns: 6}
+  description: Добыча сразу; здания и стройки уничтожены, провинция — Пепелище на 6 ходов.
+- id: raid
+  name: {ru: Разграбить, en: Raid}
+  behavior: raid
+  loot: {alloy: 3, provisions: 3}
+  params: {ravage_turns: 2}
+  description: Добыча; провинция уходит прежнему владельцу разорённой на 2 хода, войска уходят.
+- id: liberate
+  name: {ru: Освободить, en: Liberate}
+  behavior: release
+  description: Отдать провинцию месту `to`, по умолчанию прежнему владельцу; войска уходят.

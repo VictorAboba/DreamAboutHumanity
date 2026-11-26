@@ -107,8 +107,8 @@ def test_in_a_bot_war_the_credited_events_never_pass_the_total_cap(monkeypatch):
     assert events                                                       # the bots did fight
     per_seat: dict[str, int] = {}
     for e in events:
-        assert e["points"] == 1
-        per_seat[e["seat"]] = per_seat.get(e["seat"], 0) + 1
+        assert e["points"] == (0 if e["reason"] == "reclaim" else 1)       # core 0.7.1: own land back pays 0
+        per_seat[e["seat"]] = per_seat.get(e["seat"], 0) + e["points"]
     assert max(per_seat.values()) <= 8, per_seat                         # what the report and the notices sum
 
 
@@ -140,7 +140,9 @@ def test_the_host_cannot_weigh_intel_without_espionage():
 
 
 def test_the_scenarios_with_espionage_keep_their_hashes():
-    assert build_ruleset(None, "quad4").hash.startswith("e198c9bc")
+    # core 0.7.0's quad4 (now the frozen copy; measurement m9 was journaled under it)
+    legacy = Path(__file__).resolve().parents[1] / "content" / "legacy" / "core-0.7.0"
+    assert build_ruleset([str(legacy)], "quad4").hash.startswith("e198c9bc")
 
 
 # ---------------------------------------------------------------- ENGINE-3: the ready turn of a work paid in parts

@@ -83,7 +83,8 @@ def test_parse_state_reads_the_own_score_objectives_and_war():
     assert not view.scoring("objectives")       # the objective is not a turn source: it is in view.objectives
     assert len(view.objectives) == 1 and view.objectives[0]["kind"] and "params" in view.objectives[0]
     # core 0.7.0: the war scale per province (at most 8 in all)
-    assert view.war == {"points": 0, "cap_left": 8, "per_province": 3, "hold_turns": 2, "provinces": {}}
+    # core 0.7.1: `reclaim` lists the provinces owned earlier that pay no war points when taken back (none yet)
+    assert view.war == {"points": 0, "cap_left": 8, "per_province": 3, "hold_turns": 2, "provinces": {}, "reclaim": []}
     plain = build_ruleset(None, "core:blitz_test")
     st = new_game_state(plain, seats, 3)
     view = parse_state({"state": view_state(st, plain, "A", None)}, {"A", "NA"})

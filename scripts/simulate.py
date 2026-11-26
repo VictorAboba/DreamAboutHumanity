@@ -805,7 +805,7 @@ class ScoreTally:
                 self.war_ev[e["reason"]] += 1
                 if e["reason"] == "capture" and e.get("total", 1) > 1:
                     self.war_ev["recapture"] += 1
-                if e.get("total") == e.get("cap"):
+                if e.get("points") and e.get("total") == e.get("cap"):     # a reclaim (core 0.7.1) pays 0
                     self.pingpong[1] += 1
             elif kind == "captured" and e.get("from") in kinds and e.get("to") in kinds:
                 captures[e["province"]] += 1
@@ -844,6 +844,7 @@ class ScoreTally:
                 "war": {"seat_captures_per_game": self.seat_captures / g,
                         "captures_per_game": self.war_ev["capture"] / g,
                         "recaptures_per_game": self.war_ev["recapture"] / g, "holds_per_game": self.war_ev["hold"] / g,
+                        "reclaims_per_game": self.war_ev["reclaim"] / g,      # core 0.7.1: own land back, 0
                         "pingpong_provinces_per_game": self.pingpong[0] / g,
                         "pairs_at_province_cap_per_game": self.pingpong[1] / g,
                         "per_seat_by_type": {k: mean(v) for k, v in sorted(self.war_seat.items())},
@@ -868,7 +869,8 @@ class ScoreTally:
                 f"{st['stalled_turns_per_game']:.2f}/game, works stalled {st['works_stalled']} (completed "
                 f"{st['works_stalled_then_completed']}); seat-to-seat captures {w['seat_captures_per_game']:.2f}/game; "
                 f"war events/game capture {w['captures_per_game']:.2f} "
-                f"(recapture {w['recaptures_per_game']:.2f}) hold {w['holds_per_game']:.2f}, ping-pong provinces "
+                f"(recapture {w['recaptures_per_game']:.2f}) hold {w['holds_per_game']:.2f} reclaim "
+                f"{w['reclaims_per_game']:.2f}, ping-pong provinces "
                 f"{w['pingpong_provinces_per_game']:.2f}, pairs at the province cap "
                 f"{w['pairs_at_province_cap_per_game']:.2f}; war/seat {wt}; at the total cap "
                 f"{f(None if cap is None else 100 * cap)}%; intel/seat {f(it['mean'])} {it['dist']}; missions "

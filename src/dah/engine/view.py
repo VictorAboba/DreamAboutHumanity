@@ -484,7 +484,9 @@ def event_text(e: Mapping[str, Any], ruleset: Ruleset, state: GameState, seat: s
         "war_credit": lambda: (f"война: {who(e['killer'])} +{e['value']} за потери {who(e['victim'])} "
                                f"({_units_text(ruleset, e['units'])}{', в обороне' if e.get('defender') else ''})"),
         # core 0.7.0 (decision 27)
-        "war_points": lambda: (f"война: +{e['points']} очк. за {e['province']} "
+        "war_points": lambda: (f"война: 0 очк. за {e['province']} (возврат своей провинции: земля есть, очков войны "
+                               "и удержания нет)" if e.get("reason") == "reclaim" else
+                               f"война: +{e['points']} очк. за {e['province']} "
                                + ("(захват" if e.get("reason") == "capture" else f"(удержание {e.get('held')} х.")
                                + f", с провинции {e['total']}/{e['cap']})"),
         "build_stalled": lambda: (f"стройка «{_building_name(ruleset, e['building'])}» в {e['province']} стоит: нет "

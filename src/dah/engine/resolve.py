@@ -270,6 +270,8 @@ class _Resolution:
         s = self.s
         alive = [seat for seat, p in s.players.items() if p.alive]
         seen_before = {seat: visible_provinces(s, self.rs, seat) for seat in alive}
+        if self.war_provinces:
+            sc_.note_owners(s, self.rs)           # core 0.7.1: the owners at the end of the last turn (no_reclaim)
         for op in diplomacy:
             event = dip.op_event(op, s)
             if event is not None:

@@ -48,7 +48,7 @@ def _seats(n: int) -> list[dict]:
 
 
 def test_pack_version_and_validation():
-    assert "version: 0.7.0" in (Path(default_pack_dirs()[0]) / "pack.yaml").read_text(encoding="utf-8")
+    assert "version: 0.7.1" in (Path(default_pack_dirs()[0]) / "pack.yaml").read_text(encoding="utf-8")
     assert "version: 0.5.0" in (LEGACY_PACKS_DIR / "core-0.5.0" / "pack.yaml").read_text(encoding="utf-8")
     assert validate_packs(default_pack_dirs()) == ([], [])
     for sid in SCORED + PLAIN:

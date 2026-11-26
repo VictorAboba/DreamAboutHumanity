@@ -26,6 +26,8 @@
 # rival's province shows only whether an army stands there (fog.army_presence) in the espionage scenarios.
 # Balance core 0.7.0 (SCORING.md): at most 8 war points in all (score.war.province_total; uncapped, the simulator's
 # rush bot took 15 a game and won 47% of quad4 seats).
+# Core 0.7.1 (decision 28, measurement m9): taking back a province one has owned earlier in this game (its own start
+# provinces included) pays no war points, neither the capture nor the holding (score.war.no_reclaim 1).
 - id: slice3
   name: Срез на троих
   map: mirror3
@@ -57,6 +59,7 @@
     - {type: modify, target: score.science.tier2, op: set, value: 1}
     - {type: modify, target: score.war.province_cap, op: set, value: 3}
     - {type: modify, target: score.war.province_total, op: set, value: 8}
+    - {type: modify, target: score.war.no_reclaim, op: set, value: 1}
     - {type: modify, target: score.betrayal.per_break, op: set, value: 3}
 - id: slice2
   name: Дуэль
@@ -75,6 +78,7 @@
     - {type: modify, target: score.science.tier2, op: set, value: 1}
     - {type: modify, target: score.war.province_cap, op: set, value: 3}
     - {type: modify, target: score.war.province_total, op: set, value: 8}
+    - {type: modify, target: score.war.no_reclaim, op: set, value: 1}
     - {type: modify, target: score.betrayal.per_break, op: set, value: 3}
 - id: quad4
   name: Четверо у Предела
@@ -107,6 +111,7 @@
     - {type: modify, target: score.science.tier2, op: set, value: 1}
     - {type: modify, target: score.war.province_cap, op: set, value: 3}
     - {type: modify, target: score.war.province_total, op: set, value: 8}
+    - {type: modify, target: score.war.no_reclaim, op: set, value: 1}
     - {type: modify, target: score.betrayal.per_break, op: set, value: 3}
 - id: blitz_test
   name: Блиц для тестов
@@ -148,6 +153,7 @@
     - {type: modify, target: score.science.tier2, op: set, value: 1}
     - {type: modify, target: score.war.province_cap, op: set, value: 3}
     - {type: modify, target: score.war.province_total, op: set, value: 8}
+    - {type: modify, target: score.war.no_reclaim, op: set, value: 1}
     - {type: modify, target: score.betrayal.per_break, op: set, value: 3}
 - id: blitz_finds
   name: Блиц на руинах
@@ -175,4 +181,5 @@
     - {type: modify, target: score.science.tier2, op: set, value: 1}
     - {type: modify, target: score.war.province_cap, op: set, value: 3}
     - {type: modify, target: score.war.province_total, op: set, value: 8}
+    - {type: modify, target: score.war.no_reclaim, op: set, value: 1}
     - {type: modify, target: score.betrayal.per_break, op: set, value: 3}

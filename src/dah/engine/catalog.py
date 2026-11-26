@@ -57,6 +57,8 @@ _STAT_TEXT = {
     "score.war.province_cap": "предел очков войны с одной провинции",
     "score.war.hold_turns": "ходов удержания за +1 очко войны",
     "score.war.province_total": "предел очков войны по провинциям всего",
+    # core 0.7.1 (decision 28)
+    "score.war.no_reclaim": "возврат своей провинции не даёт очков войны",
     "score.intel.per_success": "очки за успешное задание Тени", "score.intel.cap": "предел очков разведки",
     "fog.army_presence": "видно наличие чужих армий вне обзора",
 }

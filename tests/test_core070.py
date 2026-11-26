@@ -49,7 +49,7 @@ def _kinds(rep) -> list[str]:
 # ---------------------------------------------------------------- 6. freeze
 
 def test_core_060_is_frozen_exactly_with_its_hashes():
-    assert "version: 0.7.0" in (CORE / "pack.yaml").read_text(encoding="utf-8")
+    assert "version: 0.7.1" in (CORE / "pack.yaml").read_text(encoding="utf-8")
     head = (CORE060 / "pack.yaml").read_text(encoding="utf-8")
     assert "version: 0.6.0" in head and "Frozen copy of core 0.6.0" in head and "Do not edit" in head
     for sid, prefix in CORE060_HASHES.items():
@@ -67,7 +67,7 @@ def test_with_the_new_rules_off_only_the_version_changes(sid):
     off = {"espionage": False, "conquest": False, "discoveries": False}
     a = build_ruleset([str(CORE060)], sid, off, scoring={"territory": 1}).to_dict()
     b = build_ruleset(None, sid, off, scoring={"territory": 1}).to_dict()
-    assert (a.pop("packs"), b.pop("packs")) == ({"core": "0.6.0"}, {"core": "0.7.0"})
+    assert (a.pop("packs"), b.pop("packs")) == ({"core": "0.6.0"}, {"core": "0.7.1"})
     for d in (b["stats"], *b["faction_stats"].values()):
         d.pop("fog.army_presence", None)
     assert a == b
@@ -245,9 +245,9 @@ def test_the_estimate_and_the_rules_name_the_payoff():
 
 # ---------------------------------------------------------------- 7. war per province
 
-def _capture_state():
-    """blitz_score: A next to C's empty agri P07 with a strong army in its forge P02."""
-    rs = build_ruleset(None, "blitz_score")
+def _capture_state(packs: list[str] | None = None):
+    """blitz_score: A next to C's empty agri P07 with a strong army in its forge P02 (`packs`: e.g. the frozen 0.7.0)."""
+    rs = build_ruleset(packs, "blitz_score")
     st = new_game_state(rs, SEATS3, 4)
     st.provinces["P02"].units = {"core:assault": 8}
     return rs, st
@@ -277,7 +277,8 @@ def test_a_province_taken_from_a_rival_scores_one_and_holding_it_more_up_to_the_
 
 
 def test_ping_pong_recaptures_cannot_farm_beyond_the_cap_and_points_stay_after_a_loss():
-    rs, st = _capture_state()
+    # core 0.7.0's rule (frozen copy): a retake pays; core 0.7.1 does not (test_core071.py)
+    rs, st = _capture_state([str(LEGACY_PACKS_DIR / "core-0.7.0")])
     st.provinces["P05"].units = {}
     for turn in range(4):
         taker, other = ("A", "C") if turn % 2 == 0 else ("C", "A")
