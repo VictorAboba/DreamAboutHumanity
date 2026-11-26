@@ -8,7 +8,9 @@ Sources (registry.SCORE_SOURCES, weights in `Ruleset.scenario.scoring`, 0 = off)
                            (score.war.province_cap > 0): Player.tally.war_provinces {province: {points, since}};
                            core 0.7.1 (score.war.no_reclaim 1): Player.tally.owned [province], the land a seat has
                            owned in this game, pays no war points when taken back
-    intel       tally      core 0.7.0: Player.tally.intel, successful spy missions counted (score.intel.*)
+    intel       tally      core 0.7.0: Player.tally.intel, successful spy missions counted (score.intel.*); core
+                           0.8.0: Player.tally.intel_kinds [mission] (`once`), intel_targets [«mission:seat»]
+                           (`once_per_target`), written only when used
     objectives  at the end the seat's secret objectives that are met (Player.objectives)
 
 `score_parts` holds *weighted* points per source (they sum to the score); a source with weight 0 is not in it. Core
@@ -316,12 +318,79 @@ def intel_left(state: GameState, rs: Ruleset, seat: str, key: StatKey = ...) -> 
     return max(0, _stat(rs, "score.intel.cap", key) - intel(state, rs, seat, key))
 
 
+EACH_TURN, ONCE, ONCE_PER_TARGET, EFFECT, NO_INTEL = registry.INTEL_KINDS
+# why a success scored nothing (core 0.8.0, docs/SPY_V2.md 5.2; `intel_denied` of the recon step, `sabotage_effect`)
+DENY_PACT, DENY_ONCE, DENY_TARGET, DENY_CAP, DENY_TAKEN, DENY_NO_EFFECT = (
+    "pact", "once", "once_per_target", "cap", "taken", "no_effect")
+DENY_TEXT = {DENY_PACT: "партнёр по пакту", DENY_ONCE: "очко за это задание уже получено",
+             DENY_TARGET: "очко за это задание против этого места уже получено",
+             DENY_CAP: "предел очков разведки набран", DENY_TAKEN: "эффект уже засчитан другому удару",
+             DENY_NO_EFFECT: "удар без последствий"}
+
+
+def intel_kind(mission: Any) -> str:
+    """A mission's `intel` kind (registry.INTEL_KINDS); each_turn for an unknown mission."""
+    return getattr(mission, "intel", EACH_TURN) or EACH_TURN
+
+
+def intel_pair(mission: str, target: str) -> str:
+    """An entry of Player.tally.intel_targets (once_per_target): «mission:seat»."""
+    return f"{mission}:{target}"
+
+
+def intel_block(state: GameState, rs: Ruleset, seat: str, target: str, mission: str, kind: str,
+                key: StatKey = ..., pact: bool | None = None) -> str | None:
+    """Why a success of `mission` against the rival `target` would not score now (None: it would). Every kind but
+    each_turn (the rule of 0.7.0, which knows only the cap): a pact partner (G1; `pact` given: the recon snapshot's
+    answer), the once / once_per_target rules; then the cap."""
+    if key is ...:
+        key = stat_key(state, rs, seat)
+    tally = state.players[seat].tally
+    if kind != EACH_TURN:
+        if pact is None:
+            from .diplomacy import pact_between
+            pact = pact_between(state, seat, target, state.turn) is not None
+        if pact:
+            return DENY_PACT
+        if kind == ONCE and mission in (tally.get("intel_kinds") or ()):
+            return DENY_ONCE
+        if kind == ONCE_PER_TARGET and intel_pair(mission, target) in (tally.get("intel_targets") or ()):
+            return DENY_TARGET
+    if intel(state, rs, seat, key) >= _stat(rs, "score.intel.cap", key):
+        return DENY_CAP
+    return None
+
+
+def _intel_credit(state: GameState, rs: Ruleset, seat: str, target: str, mission: str, kind: str,
+                  key: StatKey) -> dict[str, Any]:
+    tally = state.players[seat].tally
+    tally["intel"] = int(tally.get("intel") or 0) + 1
+    if kind == ONCE:
+        tally["intel_kinds"] = sorted({*(tally.get("intel_kinds") or ()), mission})
+    elif kind == ONCE_PER_TARGET:
+        tally["intel_targets"] = sorted({*(tally.get("intel_targets") or ()), intel_pair(mission, target)})
+    out = {"seat": seat, "target": target, "mission": mission, "points": _stat(rs, "score.intel.per_success", key),
+           "total": intel(state, rs, seat, key)}
+    if kind != EACH_TURN:
+        out["kind"] = kind
+    return out
+
+
+def _rival(state: GameState, seat: str, target: Any) -> bool:
+    player = state.players.get(target) if isinstance(target, str) else None
+    return player is not None and target != seat and player.alive
+
+
 def credit_intel(state: GameState, rs: Ruleset, rounds: Sequence[Mapping[str, Any]],
-                 missions: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """The recon step's intel points (core 0.7.0, decision 27): a successful round (a report or a strike, any mission
-    kind) against a living rival seat (the target seat, or the owner of the target province) counts once per (spy,
-    target seat, mission kind) a turn, while the spy's points are below score.intel.cap. Adds to Player.tally.intel and
-    returns [{seat, target, mission, points, total}]."""
+                 missions: Mapping[str, Any], denied: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """The recon step's intel points (core 0.7.0, decision 27): a successful round (a report or a strike) against a
+    living rival seat (the target seat, or the owner of the target province) counts once per (spy, target seat,
+    mission kind) a turn, while the spy's points are below score.intel.cap. Core 0.8.0 (docs/SPY_V2.md 5.2): by the
+    mission's `intel` kind: `no` never, `effect` not here (credit_intel_effect, at the end of the resolution),
+    `once` once a game, `once_per_target` once per rival seat; none of these against a pact partner in force on this
+    snapshot (G1; a refused pair is not spent). Adds to Player.tally.intel (and intel_kinds / intel_targets) and
+    returns [{seat, target, mission, points, total, kind?}]; successes of the new kinds refused for a reason go to
+    `denied` [{seat, target, mission, kind, reason}]."""
     if not on(rs, "intel"):
         return []
     out: list[dict[str, Any]] = []
@@ -331,20 +400,40 @@ def credit_intel(state: GameState, rs: Ruleset, rounds: Sequence[Mapping[str, An
             continue
         seat, mission = r["seat"], r["mission"]
         m = missions.get(mission)
+        kind = intel_kind(m)
+        if kind in (NO_INTEL, EFFECT):
+            continue
         target = r["target"] if m is not None and m.target == "seat" else r.get("victim")
-        rival = state.players.get(target) if isinstance(target, str) else None
-        if rival is None or target == seat or not rival.alive or (seat, target, mission) in seen:
+        if not _rival(state, seat, target) or (seat, target, mission) in seen:
             continue
         seen.add((seat, target, mission))
         key = stat_key(state, rs, seat)
-        per = _stat(rs, "score.intel.per_success", key)
-        if per <= 0 or intel(state, rs, seat, key) >= _stat(rs, "score.intel.cap", key):
+        if _stat(rs, "score.intel.per_success", key) <= 0:
             continue
-        tally = state.players[seat].tally
-        tally["intel"] = int(tally.get("intel") or 0) + 1
-        out.append({"seat": seat, "target": target, "mission": mission, "points": per,
-                    "total": intel(state, rs, seat, key)})
+        why = intel_block(state, rs, seat, target, mission, kind, key)
+        if why is not None:
+            if denied is not None and kind != EACH_TURN:
+                denied.append({"seat": seat, "target": target, "mission": mission, "kind": kind, "reason": why})
+            continue
+        out.append(_intel_credit(state, rs, seat, target, mission, kind, key))
     return out
+
+
+def credit_intel_effect(state: GameState, rs: Ruleset, seat: str, target: Any, mission: str,
+                        pact: bool) -> tuple[dict[str, Any] | None, str | None]:
+    """Core 0.8.0 (docs/SPY_V2.md 5.2 p. 4, 4a): the point of a loud `effect` mission whose strike did something,
+    at the end of the resolution, after the recon step's points (the cap is checked now); `pact`: a pact with the
+    victim in force on the recon snapshot. (point entry, None), (None, why) or (None, None) when it cannot score
+    at all (the source off, not a living rival)."""
+    if not on(rs, "intel") or not _rival(state, seat, target):
+        return None, None
+    key = stat_key(state, rs, seat)
+    if _stat(rs, "score.intel.per_success", key) <= 0:
+        return None, None
+    why = intel_block(state, rs, seat, target, mission, EFFECT, key, pact=pact)
+    if why is not None:
+        return None, why
+    return _intel_credit(state, rs, seat, target, mission, EFFECT, key), None
 
 
 _POINTS = {"territory": territory, "science": science, "works": works, "war": war, "intel": intel}
@@ -421,8 +510,12 @@ def objective_progress(state: GameState, rs: Ruleset, seat: str, entry: Mapping[
     elif obj.kind == "hold_count":
         have = len(held)
     elif obj.kind == "hold_foreign":
+        # core 0.8.0 (docs/TRADE.md 6.3): with `via: capture` land got without a battle (a trade, a release) does not
+        # count until it is taken again
+        taken_only = p.get("via") == "capture"
         have = sum(1 for prov in held if state.origins.get(prov.id) not in (None, seat)
-                   and state.origins.get(prov.id) in state.players)
+                   and state.origins.get(prov.id) in state.players
+                   and not (taken_only and (prov.status.get(cq.TRANSFER_MARK) or {}).get("to") == seat))
     elif obj.kind == "capital_other":
         others = {pid for pid, s in homes(state).items() if s != seat}
         have = sum(1 for prov in held if prov.id in others)
@@ -737,7 +830,8 @@ def objective_text(rs: Ruleset, state: GameState | None, entry: Mapping[str, Any
     if obj.kind == "hold_count":
         return f"в конце держать ≥{n} провинций"
     if obj.kind == "hold_foreign":
-        return f"в конце держать ≥{n} провинц. из стартов других игроков"
+        how = " (взятых боем, не обменом)" if p.get("via") == "capture" else ""
+        return f"в конце держать ≥{n} провинц. из стартов других игроков{how}"
     if obj.kind == "capital_other":
         return f"в конце держать ≥{n} чужих стартовых столиц"
     if obj.kind == "techs_branch":

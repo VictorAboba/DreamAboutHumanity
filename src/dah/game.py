@@ -28,6 +28,7 @@ from dah.engine import discoveries as disc
 from dah.engine import espionage as esp
 from dah.engine.view import army_presence
 from dah.engine import scoring as sc_
+from dah.engine import trade as tr
 from dah.engine.content import ContentError, legacy_pack_sets
 from dah.engine.catalog import KIND_LABELS
 from dah.engine.content import DEFAULT_DIPLOMACY_LIMITS, DEFAULT_SETUP_LIMIT
@@ -86,6 +87,9 @@ CHECK_TOOLS = ["list_orders", "validate_orders", "estimate"]
 ORDER_TOOLS = [*CHECK_TOOLS, "submit_orders", "cancel_order", "amend_order"]
 DIPLOMACY_TOOLS = ["send_gift", "propose_pact", "respond_pact", "leave_pact", "list_pacts"]
 SPY_TOOLS = ["list_spies", "get_intel", "estimate_mission"]     # only in games with espionage on
+# core 0.8.0 (docs/TRADE.md 9): only in games with trade on; offers and answers in P1/P2, the list in every phase
+TRADE_TOOLS = ["propose_trade", "respond_trade"]
+TRADE_READ_TOOLS = ["list_trades"]
 # Orders are given only in actions; negotiation_1 can only check them (user decision 12).
 ALLOWED = {
     "setup": [*SETUP_TOOLS, "get_state", "inbox", *ALWAYS_TOOLS],
@@ -129,9 +133,11 @@ SETUP_STATE_NOTE = ("ФАЗА СТАРТА: состояние предвари�
 CONQUEST_JOURNAL = ("disposition", "policy_set", "policy_unaffordable", "dispose_failed", "occupation_revolt",
                     "claim_created", "claim_ended", "ruin_ended")
 # Espionage events of a resolution written to the journal in full (SPY_AND_CONQUEST.md 8)
-ESPIONAGE_JOURNAL = ("mission_started", "mission_end", "sabotage", "strike_cancelled")
+ESPIONAGE_JOURNAL = ("mission_started", "mission_end", "sabotage", "strike_cancelled", "sabotage_effect",
+                     "build_sabotaged")
 # stage 4 (SCORING.md 9); core 0.7.0: war points per province, builds paid in parts (shares, stalls)
-SCORING_JOURNAL = ("war_credit", "work_started", "work_completed", "war_points", "build_stalled", "build_paid")
+SCORING_JOURNAL = ("war_credit", "work_started", "work_completed", "war_points", "build_stalled", "build_paid",
+                   "intel_point")      # core 0.8.0: the point of a strike's effect, credited in the resolution
 # stage 5 (ABANDONED_LANDS.md 10): finds, choices, rewards, lairs in their full form (admin and offline metrics)
 DISCOVERY_JOURNAL = tuple(sorted(disc.JOURNAL_KINDS))
 SYSTEM_SENDER = "ИГРА"   # inbox entries written by the game itself (gifts, pacts): not player text, not wrapped
@@ -211,8 +217,9 @@ def make_config(*, game_id: str, scenario: str, seats: list[dict[str, Any]], see
     if setup is not None:
         config["setup"] = setup
     if overrides or rs.scenario.systems:
+        # discoveries (stage 5) and trade (core 0.8.0) only when on or overridden: configs of older games keep their keys
         config["systems"] = {name: rs.system(name) for name in SYSTEMS
-                             if name != "discoveries" or rs.system(name) or name in overrides}
+                             if name not in ("discoveries", "trade") or rs.system(name) or name in overrides}
     if scoring is not None or not rs.default_scoring:
         config["scoring"] = dict(rs.scenario.scoring)
     if objectives is not None:
@@ -611,9 +618,17 @@ class Game:
             j("feint", turn=turn, **f)
         for h in rep["hired"]:
             j("shade_hired", seat=h["seat"], shade=h["shade"], turn=turn)
+        for w in rep.get("wards") or []:             # core 0.8.0 (docs/SPY_V2.md 4.6)
+            j("ward_set", turn=turn, **w)
         for m in rep["started"]:
+            extra = {}
+            md = self.ruleset.missions.get(m["mission"])
+            if md is not None and md.behavior == esp.OBSERVE and md.intel != "each_turn":
+                # core 0.8.0 (docs/SPY_V2.md 11): an Observation of a province the seat sees at the close of actions
+                # (the report's «лишние наблюдения»); self.state is still that close
+                extra["in_sight"] = m["target"] in visible_provinces(self.state, self.ruleset, m["seat"])
             j("mission_started", seat=m["seat"], shade=m["shade"], mission=m["mission"], target=m["target"],
-              rounds=m["rounds"], phase=m["phase"], first_turn=m["first_turn"], turn=turn)
+              rounds=m["rounds"], phase=m["phase"], first_turn=m["first_turn"], turn=turn, **extra)
         for r in rep["rounds"]:
             j("spy_round", turn=turn, **{k: v for k, v in r.items() if k != "seat"}, seat=r["seat"])
         for seat, reports in sorted(rep["reports"].items()):
@@ -634,6 +649,8 @@ class Game:
             j("mission_end", turn=turn, **e)
         for p in rep.get("intel_points") or []:      # core 0.7.0: the scoring source `intel`
             j("intel_point", turn=turn, **p)
+        for d in rep.get("intel_denied") or []:      # core 0.8.0: successes that scored nothing, and why
+            j("intel_denied", turn=turn, **d)
 
     def recon_report(self, turn: int | None = None) -> dict[str, Any] | None:
         """The saved recon step of a turn (default: the current one, once actions closed)."""
@@ -665,13 +682,29 @@ class Game:
         t = last if t is None else t
         sid = esp.shade_id(shade) if shade not in (None, "") else None
         rid = str(report_id).strip().lstrip("#") if report_id not in (None, "") else None
+        copy_entry = tr.copy_of(self.state, seat, rid.lower()) if rid and rid.lower().startswith("c") else None
+        if rid and rid.lower().startswith("c"):
+            # core 0.8.0 (docs/TRADE.md 2.3): a bought copy, from the state (its turn is the copy's own)
+            if copy_entry is None:
+                raise GameError("UNKNOWN_ID", f"у тебя нет копии донесения {rid[:20]}; копии появляются после "
+                                              "покупки донесения обменом (list_trades)")
+            self.journal.append("intel_read", seat=seat, report_ids=[copy_entry["id"]], via="get_intel",
+                                turn=self.state.turn, phase=self.phase)
+            if fmt == "json":
+                return {"turn": copy_entry.get("turn"), "intel": {"copies": [copy_entry]}}
+            return {"turn": copy_entry.get("turn"), "text": tr.copy_text(copy_entry, self.ruleset, self.state)}
         rep = self.recon_report(t) if 1 <= t <= max(last, 0) else None
         if fmt == "json":
             data = esp.intel_json(rep, seat)
+            if self.state.players[seat].intel_copies:
+                data["copies"] = list(self.state.players[seat].intel_copies)
             self.journal.append("intel_read", seat=seat, report_ids=[r["id"] for r in data["reports"]],
                                 via="get_intel", format="json", turn=self.state.turn, phase=self.phase)
             return {"turn": t, "intel": data}
         text = esp.intel_text(rep, self.ruleset, self.state, seat, sid, rid)
+        copies = tr.copies_line(self.state, self.ruleset, seat) if rid is None else ""
+        if copies:
+            text = f"{text}\n{copies}"
         self.journal.append("intel_read", seat=seat, report_ids=[rid] if rid else
                             [r["id"] for r in ((rep or {}).get("reports") or {}).get(seat, [])],
                             via="get_intel", turn=self.state.turn, phase=self.phase)
@@ -681,7 +714,8 @@ class Game:
         self._require_espionage()
         try:
             return esp.estimate_mission(self.state, self.ruleset, seat, body.get("mission"), body.get("target"),
-                                        body.get("rounds"), body.get("shade"), body.get("assume_mirrors"))
+                                        body.get("rounds"), body.get("shade"), body.get("assume_mirrors"),
+                                        self._book(seat))
         except ValueError as exc:
             raise GameError("INVALID", str(exc)) from None
 
@@ -697,6 +731,7 @@ class Game:
         self.gdir.save_turn("reports", turn, report.to_dict())
         self.diplomacy_log = []
         self._pact_results(turn, report)
+        self._trade_results(turn, report, new_state)
         for e in report.events:
             if e["kind"] in ("research_started", "tech_completed"):
                 extra = {}
@@ -712,8 +747,14 @@ class Game:
             elif e["kind"] in DISCOVERY_JOURNAL:
                 data = {k: v for k, v in e.items() if k != "kind"}
                 self.journal.append(e["kind"], turn=turn, **data)
+            elif e["kind"] == "order_rejected" and e.get("reason") == "PROVINCE_PROMISED":
+                # core 0.8.0 (docs/TRADE.md 13.2, promised_move_rejected): journal only, private to its seat
+                self.journal.append("order_rejected", seat=e["seats"][0], order=e.get("order"), reason=e["reason"],
+                                    turn=turn)
             elif e["kind"] in SCORING_JOURNAL:
                 data = {k: v for k, v in e.items() if k not in ("kind", "seats")}
+                if e["kind"] == "intel_point" and "intel_kind" in data:
+                    data["kind"] = data.pop("intel_kind")      # as the recon step journals it
                 if e["kind"] == "work_started" and e.get("building") in self.ruleset.buildings:
                     # the price the seat paid, journal only (the public event carries none); paid in parts (core
                     # 0.7.0) also the shares and the first one, paid now
@@ -732,6 +773,8 @@ class Game:
             idle_units={s: v["units"] for s, v in report.idle.items()},
             resources={s: dict(p.resources) for s, p in new_state.players.items()},   # stocks at the turn's end
             autopilot=sorted(s for s, b in books.items() if not b.orders))
+        if self.ruleset.system("espionage"):
+            self._journal_orders_summary(turn, books)
         self.state = new_state
         self.books = {}
         if new_state.phase == GAME_OVER:
@@ -767,6 +810,8 @@ class Game:
                     "status": e["status"]}
             self.journal.append("province_captured", turn=turn, **data)
             return
+        if e["kind"] == "occupation_revolt" and esp.unrest_in(self.ruleset):
+            data["cause_private"] = True        # core 0.8.0 (docs/SPY_V2.md 7): others read it without its cause
         self.journal.append(e["kind"], turn=turn, **data)
 
     def _notify(self) -> None:
@@ -870,6 +915,9 @@ class Game:
         idle = self._idle_shades(seat)
         if idle:
             info["idle_shades"] = idle  # core 0.7.0 (decision 27): the turn-start reminder of an idle Shade
+        waiting = self._trades_waiting(seat)
+        if waiting:
+            info["trades_waiting"] = waiting    # core 0.8.0 (docs/TRADE.md 9): «обменов ждут ответа: N»
         if host:
             info.update(self.player_presence(seat))
         info["text"] = self._phase_text(info)
@@ -886,6 +934,12 @@ class Game:
         return {"reports": len((rep.get("reports") or {}).get(seat, [])),
                 "caught": len((rep.get("captures") or {}).get(seat, []))}
 
+    def _trades_waiting(self, seat: str) -> int:
+        """Open trade offers the seat has to answer, in negotiation phases of a trade game (0 otherwise)."""
+        if self.phase not in NEGOTIATION_PHASES or self.game_over or not tr.on(self.ruleset):
+            return 0
+        return len(tr.waiting_for(self.state, seat))
+
     def _idle_shades(self, seat: str) -> int:
         """Core 0.7.0 (decision 27, m8: free Shades sat idle all game): the seat's own idle Shades in negotiation_1 and
         actions of an espionage game (0 otherwise); never another seat's."""
@@ -898,6 +952,10 @@ class Game:
         tools = list(ALLOWED.get(self.phase, READ_TOOLS) if seat_alive else READ_TOOLS)
         if self.ruleset.system("espionage") and self.phase != SETUP:
             tools += [t for t in SPY_TOOLS if t not in tools]       # espionage reads: every phase (6.1)
+        if tr.on(self.ruleset) and self.phase != SETUP:
+            if seat_alive and self.phase in NEGOTIATION_PHASES and not self.game_over:
+                tools += TRADE_TOOLS
+            tools += TRADE_READ_TOOLS
         return tools
 
     def _phase_text(self, info: dict[str, Any]) -> str:
@@ -919,6 +977,8 @@ class Game:
             parts.append(intel_tail(info["intel"]))
         if info.get("idle_shades"):
             parts.append(esp.idle_reminder(info["idle_shades"]))
+        if info.get("trades_waiting"):
+            parts.append(f"обменов ждут ответа: {info['trades_waiting']} (list_trades)")
         if info.get("hint"):
             parts.append(info["hint"])
         return " | ".join(parts)
@@ -1260,6 +1320,8 @@ class Game:
             what = (f"армия в {pid} {'есть' if prov.unit_total() else 'нет'}, её размер скрыт туманом войны"
                     if seen else f"войска в {pid} скрыты туманом войны")
             spy = " (размер узнаёт Тень: наблюдение)" if self.ruleset.system("espionage") else ""
+            if spy and side == "defender":
+                spy += ' или defender="r3" — по донесению Тени'      # core 0.8.0 (docs/SPY_V2.md 6.1)
             raise self._estimate_error("INVALID", f"{side}={pid!r}: {what} — укажи предполагаемый состав объектом "
                                                   f"{{юнит: число}}{spy}")
         units = {u: n for u, n in self.state.provinces[pid].units.items() if n > 0}
@@ -1315,11 +1377,54 @@ class Game:
             units[full] = units.get(full, 0) + count
         return units
 
+    _REPORT_RE = re.compile(r"^#?([rRcC])(\d{1,6})$")
+
+    def _report_ref(self, raw: Any) -> str | None:
+        """A report id given as the defender ("r3", "#r3", a bought copy "c1"), else None."""
+        m = self._REPORT_RE.match(raw.strip()) if isinstance(raw, str) else None
+        if m and m.group(1).lower() == "c" and self._province_ref(raw):
+            return None         # a province of the map named like a copy ("C2") stays a province
+        return f"{m.group(1).lower()}{int(m.group(2))}" if m else None
+
+    def find_report(self, seat: str, rid: str) -> dict[str, Any] | None:
+        """One of the seat's own reports by id, from the recon steps played so far (ids are the seat's, never
+        reused), or a copy it bought (`c<k>`, docs/TRADE.md 2.3: the seller's report from the state, no recon file
+        needed)."""
+        if rid.startswith("c"):
+            entry = tr.copy_of(self.state, seat, rid)
+            return tr.copy_report(entry) if entry is not None else None
+        last = self.state.turn if self.phase in (P2, GAME_OVER) else self.state.turn - 1
+        for t in range(max(last, 0), 0, -1):
+            for r in ((self.recon_report(t) or {}).get("reports") or {}).get(seat, []):
+                if r.get("id") == rid:
+                    return r
+        return None
+
+    def _estimate_report(self, seat: str | None, rid: str) -> dict[str, Any]:
+        """estimate(defender="r3") (core 0.8.0, docs/SPY_V2.md 6.1): the units of an Observation report and the
+        recruits and fortify of its block «в расчёте этого хода»."""
+        report = self.find_report(seat, rid) if seat is not None and self.ruleset.system("espionage") else None
+        if report is None:
+            raise self._estimate_error("UNKNOWN_ID", f"defender={rid!r}: у тебя нет донесения {rid} (get_intel)")
+        if report.get("behavior") != esp.OBSERVE:
+            raise self._estimate_error("INVALID", f"defender по донесению — только Наблюдение (observe); {rid} — "
+                                                  f"{report.get('mission')}: у ledger армия всего, а не провинция")
+        return esp.report_defender(report, self.state.turn, rid,
+                                   persists=bool(self.ruleset.stat("combat.fortify_persists")))
+
     def estimate(self, body: dict[str, Any], seat: str | None = None) -> dict[str, Any]:
         """Battle forecast. Lenient on ids (resolve_unit, resolve_province_type); every refusal says what was
-        wrong and shows a correct call."""
+        wrong and shows a correct call. Core 0.8.0: defender="r3" takes an Observation report's garrison."""
         attacker = self._estimate_side("attacker", body.get("attacker"), seat)
-        defender = self._estimate_side("defender", body.get("defender"), seat)
+        rid = self._report_ref(body.get("defender"))
+        by_report = self._estimate_report(seat, rid) if rid is not None else None
+        if by_report is not None:
+            defender = by_report["units"]
+            body = {**body, "defender": by_report["province"]}       # the battle is in the report's province
+            if by_report["fortified"]:      # the report's fortify always counts (docs/SPY_V2.md 6.1)
+                body["fortified"] = True
+        else:
+            defender = self._estimate_side("defender", body.get("defender"), seat)
         raw_type = body.get("province_type")
         if raw_type in (None, "") and self._province_ref(body.get("defender")):
             raw_type = self._province_ref(body.get("defender"))      # defender="P07": the battle is in P07
@@ -1382,6 +1487,18 @@ class Game:
                        attacker_key=keys["attacker"], defender_key=keys["defender"], defense_mul=defense_mul)
         out["losses"] = {"attacker": out["attacker_losses_avg"], "defender": out["defender_losses_avg"]}
         out["province_type"] = ptype
+        if by_report is not None:
+            out["defender"] = dict(defender)
+            out["report"] = by_report["header"]
+            if seat is not None:     # core 0.8.0 (docs/SPY_V2.md 11, «донесение → решение» (в)); journal only
+                self.journal.append("estimate_report", seat=seat, report_id=rid, province=by_report["province"],
+                                    turn=self.state.turn, phase=self.phase)
+            if not flags["fortified"]:
+                # the fortify of P2 is not in the snapshot (docs/SPY_V2.md 6.1): the second number, one line
+                fort = estimate(self.ruleset, attacker, defender, ptype, True, flags["hasty"],
+                                attacker_key=keys["attacker"], defender_key=keys["defender"], defense_mul=defense_mul)
+                out["win_prob_if_fortified"] = fort["win_prob"]
+                out["report"] += f"; если укрепится в П2: шанс {round(fort['win_prob'] * 100)}%"
         if seat is not None:
             out["side"] = side
             how = f"по владельцу провинции: {side_note}" if side_note else (
@@ -1632,7 +1749,7 @@ class Game:
         limit = diplomacy_limits(self.config)[f"{kind}_per_phase"]
         used = self.diplomacy_counts.setdefault(seat, {})
         if used.get(kind, 0) >= limit:
-            what = "подношений" if kind == "gifts" else "предложений пакта"
+            what = {"gifts": "подношений", "trade_proposals": "предложений обмена"}.get(kind, "предложений пакта")
             raise GameError("LIMIT_EXCEEDED", f"лимит {what} в фазе: {limit}")
 
     def _bump(self, seat: str, kind: str) -> int:
@@ -1877,6 +1994,257 @@ class Game:
                          + (f" (продлён {p['renewed']} раз(а))" if p.get("renewed") else "")
                          + (f"; {p['leaving']} выходит" if p["leaving"] else ""))
         return {"mine": mine, "public": public, "text": "\n".join(lines) or "пактов нет"}
+
+    # --- trade (docs/TRADE.md, core 0.8.0) ------------------------------------------------------------------
+
+    def _require_trade(self) -> None:
+        if not tr.on(self.ruleset):
+            raise GameError("NOT_AVAILABLE", "обмена в этой партии нет (торговля выключена); ресурсы можно подарить "
+                                             "— send_gift(to, resources)")
+
+    def trade_example(self, seat: str) -> str:
+        other = next((p.nick for s, p in self.state.players.items() if s != seat and p.alive), "Ник")
+        res = [r.split(":")[-1] for r in self.ruleset.resources] or ["alloy"]
+        return f'propose_trade(to="{other}", give={{"{res[0]}": 10}}, want={{"{res[1 % len(res)]}": 10}})'
+
+    def _trade_error(self, seat: str, exc: dip.DiplomacyError, example: str) -> GameError:
+        if exc.code == "PHASE_LOCKED" and self.phase == "actions":
+            return GameError(exc.code, "в фазе Д обмен закрыт: propose_trade и respond_trade — в П1 и П2; "
+                                       "list_trades() работает и сейчас")
+        others = ", ".join(p.nick for s, p in self.state.players.items() if s != seat and p.alive)
+        hint = f" (игроки: {others})" if exc.code == "UNKNOWN_ID" and "игрок" in exc.message else ""
+        # an answer that already names the next call needs no generic example
+        named = any(x in exc.message for x in ("respond_trade(", "propose_trade(", "list_trades"))
+        tail = "" if named or exc.code in ("PHASE_LOCKED", "NOT_AVAILABLE") else f". Пример: {example}"
+        return GameError(exc.code, f"{exc.message}{hint}{tail}")
+
+    def _trade_ctx(self) -> tr.Ctx:
+        """What a trade check needs beyond the state: books (reserves and orders) and the seats' own reports."""
+        return tr.Ctx(reserved=lambda s: seat_reserved(self.state, self.ruleset, s, self._book(s)),
+                      orders=lambda s: list(self._book(s).orders),
+                      report=lambda s, rid: self._own_report(s, rid),
+                      turn_limit=self.config["turn_limit"])
+
+    def _own_report(self, seat: str, rid: str) -> dict[str, Any] | None:
+        """One of the seat's own reports (never a bought copy) of the recon steps played so far."""
+        if not self.ruleset.system("espionage") or not rid.startswith("r"):
+            return None
+        return self.find_report(seat, rid)
+
+    def propose_trade(self, seat: str, to: Any, give: Any = None, want: Any = None, later: Any = None,
+                      reply_to: Any = None, replaces: Any = None, fulfils: Any = None) -> dict[str, Any]:
+        """An offer to another living seat (docs/TRADE.md 1.2): it clears the recipient's ready and waits for its
+        answer until the end of the turn. The same offer again is `already`; another one to the same seat while one
+        is open is OFFER_EXISTS (`replaces=id` replaces it explicitly)."""
+        self._require_trade()
+        self._require_active(seat)
+        example = self.trade_example(seat)
+        try:
+            made = tr.make_offer(self.state, self.ruleset, seat, self._seat_ref(to), decode_json_arg(give),
+                                 decode_json_arg(want), decode_json_arg(later), reply_to, replaces, fulfils, self.phase,
+                                 self._trade_ctx())
+        except dip.DiplomacyError as exc:
+            raise self._trade_error(seat, exc, example) from None
+        if "already" in made:
+            t = made["already"]
+            return {"id": t["id"], "status": t["status"], "already": True,
+                    "text": f"предложение {t['id']} для {self._nick(t['b'])} на тех же условиях уже ждёт ответа; "
+                            "ничего не изменено"}
+        self._count(seat, "trade_proposals")
+        op = made
+        trade = dip.apply_op(self.state, op)
+        self.diplomacy_log.append(op)
+        self._bump(seat, "trade_proposals")
+        recipient = op["recipient"]
+        was_ready = recipient in self.ready_seats
+        self.ready_seats.discard(recipient)      # an offer needs an answer: the phase waits for the recipient again
+        self._save()
+        turn, phase, seats = self.state.turn, self.phase, sorted((seat, recipient))
+        if was_ready:
+            self.journal.append("ready_cleared", seat=recipient, turn=turn, phase=phase, reason="trade_proposed")
+        for ref, kind in (("replaces", "trade_replaced"), ("reply_to", "trade_countered")):
+            if op.get(ref):
+                self.journal.append(kind, seat=seat, seats=seats, trade_id=op[ref], by=op["id"], turn=turn,
+                                    phase=phase)
+        extra = {k: op[k] for k in ("later", "replaces", "reply_to", "fulfils", "heads") if op.get(k)}
+        self.journal.append("trade_proposed", seat=seat, to=recipient, seats=seats, trade_id=op["id"],
+                            give=op["give"], want=op["want"], settle=trade["settle"], turn=turn, phase=phase, **extra)
+        note = (f" (встречное на твоё {op['reply_to']})" if op.get("reply_to") else
+                f" (заменяет {op['replaces']})" if op.get("replaces") else "")
+        call = f'respond_trade(id="{op["id"]}", decision="accept") или decision="reject"'
+        where = tr.province_notes(self.ruleset, self.state, trade, recipient)
+        self._notice([recipient], f"{self._nick(seat)} предлагает обмен {op['id']}{note}: "
+                                  f"{tr.terms_text(self.ruleset, trade, recipient, self.state)}"
+                                  f"{'; ' + where if where else ''}. Ответь {call} до конца хода.",
+                     "trade_proposed")
+        # the reply ≤ 200 chars (docs/TRADE.md 10): the promise is in list_trades, the notes short; then bare ids
+        where = tr.province_notes(self.ruleset, self.state, trade, seat, short=True)
+        head = f"предложение {op['id']} → {self._nick(recipient)}: "
+        promise = "; обещание — в list_trades" if op.get("later") else ""
+        tail = "; ответ до конца хода"
+        variants = [head + tr.terms_text(self.ruleset, trade, seat, self.state, promise=False, names=names)
+                    + promise + (f"; {where}" if where else "") + tail for names in (True, False)]
+        variants.append(head + tr.terms_text(self.ruleset, trade, seat, promise=False, names=False) + promise + tail
+                        + (" (провинции — list_trades)" if where else ""))
+        return {"id": op["id"], "status": trade["status"], "text": tr.fit_reply(variants)}
+
+    def respond_trade(self, seat: str, trade_id: Any, decision: Any) -> dict[str, Any]:
+        """The recipient accepts (both sides checked at once; a trade without a province is carried out at once, one
+        with a province goes into escrow until this turn's resolution) or rejects; the proposer's reject withdraws
+        its offer."""
+        self._require_trade()
+        self._require_active(seat)
+        example = 'respond_trade(id="trade-A-B-1", decision="accept") или decision="reject"'
+        known = tr.trade_by_id(self.state, str(trade_id).strip())
+        if (known is not None and known["b"] == seat and known["status"] in (tr.DONE, tr.PENDING)
+                and self.phase in NEGOTIATION_PHASES
+                and str(decision).strip().lower() in ("accept", "true", "yes", "да", "принять")):
+            # accepted already (often by a teammate of the same swarm): nothing to do, not an error
+            what = (tr.settled_text(self.ruleset, known, seat) if known["status"] == tr.DONE
+                    else "переход в расчёте этого хода")
+            return {"id": known["id"], "status": known["status"], "already": True,
+                    "text": f"{known['id']} уже принят ({what}); отвечать больше не нужно"}
+        try:
+            op = tr.make_answer(self.state, self.ruleset, seat, trade_id, decision, self.phase, self._trade_ctx())
+        except dip.DiplomacyError as exc:
+            raise self._trade_error(seat, exc, example) from None
+        trade = dip.apply_op(self.state, op)
+        self.diplomacy_log.append(op)
+        self._save()
+        a, b, tid = trade["a"], trade["b"], trade["id"]
+        base = {"trade_id": tid, "seats": sorted((a, b)), "turn": self.state.turn, "phase": self.phase}
+        if not op["accept"]:
+            if trade["status"] == tr.WITHDRAWN:
+                self.journal.append("trade_withdrawn", seat=seat, **base)
+                self._notice([b], f"{self._nick(a)} отозвал предложение обмена {tid}.", "trade_withdrawn")
+                return {"id": tid, "status": trade["status"], "text": f"предложение {tid} отозвано"}
+            self.journal.append("trade_rejected", seat=seat, **base)
+            self._notice([a], f"{self._nick(b)} отклонил обмен {tid}.", "trade_rejected")
+            return {"id": tid, "status": trade["status"], "text": f"обмен {tid} отклонён"}
+        if trade["status"] == tr.PENDING:
+            self.journal.append("trade_accepted", seat=seat, settle=trade["settle"], escrow=trade.get("escrow"),
+                                **base)
+            for x, y in ((a, b), (b, a)):
+                held = tr.escrow_text(self.ruleset, (trade.get("escrow") or {}).get(x) or {})
+                self._notice([x], f"Обмен {tid} с {self._nick(y)} принят: переход в расчёте этого хода — "
+                                  f"{tr.province_notes(self.ruleset, self.state, trade, x)}"
+                                  + (f"; в залоге: {held}" if held else "") + ".", "trade_accepted")
+            held = tr.escrow_text(self.ruleset, (trade.get("escrow") or {}).get(seat) or {})
+            head = f"в залоге до расчёта: {held}" if held else "принят: переход в расчёте этого хода"
+            where = tr.province_notes(self.ruleset, self.state, trade, seat, short=True)
+            return {"id": tid, "status": trade["status"],
+                    "text": tr.fit_reply([head + (f"; {where}" if where else ""), head + "; провинции — list_trades"])}
+        self.journal.append("trade_accepted", seat=seat, settle=trade["settle"], **base)
+        if trade["status"] == tr.DONE:
+            self._journal_settled(trade, "accept", base, [c["id"] for c in self._copies_of(trade)])
+            for x, y in ((a, b), (b, a)):
+                self._notice([x], f"Обмен {tid} с {self._nick(y)} исполнен: {tr.settled_text(self.ruleset, trade, x)}"
+                                  f"{self._copies_note(trade, x)}.", "trade_settled")
+            return {"id": tid, "status": trade["status"],
+                    "text": f"исполнен: {tr.settled_text(self.ruleset, trade, seat)}{self._copies_note(trade, seat)}"}
+        lack = op.get("lack") or []
+        self.journal.append("trade_failed", reason=trade["failed_reason"], short_side=a, lack=lack, **base)
+        self._notice([a], f"Обмен {tid} с {self._nick(b)} сорван: у тебя не хватило обещанного — "
+                          f"{tr.lack_text(self.ruleset, lack)}.", "trade_failed")
+        self._notice([b], f"Обмен {tid} с {self._nick(a)} не исполним: у предложившего больше нет обещанного.",
+                     "trade_failed")
+        return {"id": tid, "status": trade["status"], "text": "не исполним: у предложившего больше нет обещанного"}
+
+    def _copies_of(self, trade: dict[str, Any]) -> list[dict[str, Any]]:
+        """The copies a trade gave its recipient (docs/TRADE.md 2.3)."""
+        holder = self.state.players[trade["b"]]
+        return [c for c in holder.intel_copies if c.get("trade") == trade["id"]]
+
+    def _copies_note(self, trade: dict[str, Any], seat: str) -> str:
+        copies = self._copies_of(trade)
+        if not copies:
+            return ""
+        if seat == trade["b"]:
+            ids = ", ".join(c["id"] for c in copies)
+            return f"; копии донесений: {ids} — get_intel(report_id=\"{copies[0]['id']}\")"
+        return f"; покупатель получил копии {', '.join(c['source'] for c in copies)} (оригиналы у тебя)"
+
+    def _journal_settled(self, trade: dict[str, Any], at: str, base: dict[str, Any], copies: list[str]) -> None:
+        """trade_settled, then promise_made for each promised part and intel_copied for each copy (journal only,
+        private to the two seats until game_over)."""
+        a, b = trade["a"], trade["b"]
+        self.journal.append("trade_settled", give=trade["give"], want=trade["want"], at=at, **base)
+        later = trade.get("later") or {}
+        for side, giver, taker in (("give", a, b), ("want", b, a)):
+            if later.get(side):
+                self.journal.append("promise_made", seat=giver, to=taker, goods=later[side],
+                                    by_turn=later["by_turn"], **base)
+        for c in self.state.players[b].intel_copies:
+            if c["id"] in copies:
+                report = c.get("report") or {}
+                self.journal.append("intel_copied", copy_id=c["id"], source=c["source"], mission=report.get("mission"),
+                                    target=report.get("target"), report_turn=report.get("turn"), to=b,
+                                    **{"from": a}, **base)
+
+    def trades(self, seat: str) -> dict[str, Any]:
+        """The seat's own offers, trades of the last turns and promises still due; nobody else's (docs/TRADE.md
+        16а). In every phase."""
+        self._require_trade()
+        return {"trades": [tr.trade_json(t, seat, lambda x: self.state.players[x].nick)
+                           for t in tr.mine(self.state, seat)],
+                "text": tr.list_text(self.state, self.ruleset, seat, self._nick)}
+
+    def _trade_results(self, turn: int, report: TurnReport, state: GameState) -> None:
+        """Journal and announce what this resolution did to trades (`state`: the state after it): offers that lapsed
+        (to their proposers), pending trades settled or failed at step 4b and the provinces they passed (private to
+        the two seats)."""
+        for e in report.events:
+            kind = e["kind"]
+            if kind == "trade_lapsed":
+                self.journal.append("trade_lapsed", trade_id=e["trade"], seats=e["seats"], turn=turn)
+                other = next((x for x in e["seats"] if x != e.get("sender")), None)
+                self._notice([e["sender"]], f"Предложение обмена {e['trade']} для {self._nick(other)} не принято до "
+                                            f"конца хода {turn} и сгорело.", "trade_lapsed", turn=turn,
+                             phase="resolution")
+                continue
+            if kind not in (tr.TRANSFERRED, "trade_failed", "trade_settled") or (
+                    kind != tr.TRANSFERRED and e.get("at") != "resolution"):
+                continue
+            base = {"trade_id": e["trade"], "seats": e["seats"], "turn": turn, "phase": "resolution"}
+            if kind == tr.TRANSFERRED:
+                self.journal.append(tr.TRANSFERRED, province=e["province"], status=e["status"],
+                                    units_withdrawn=e.get("units_withdrawn") or {}, to=e["to"],
+                                    **{"from": e["from"]}, **base)
+            elif kind == "trade_failed":
+                self.journal.append("trade_failed", reason=e["reason"], short_side=e["short_side"],
+                                    province=e.get("lost_province"), at="resolution", **base)
+                self._notice(list(e["seats"]), f"Обмен {e['trade']} сорван в расчёте хода {turn}: "
+                                               f"{e.get('lost_province')} — {tr.FAILED_TEXT[e['reason']]}; залог "
+                                               "возвращён.", "trade_failed", turn=turn, phase="resolution")
+            else:
+                b = next(x for x in e["seats"] if x != e["a"])
+                trade = {**(tr.trade_by_id(state, e["trade"]) or {}), "a": e["a"], "b": b, "give": e["give"],
+                         "want": e["want"], "id": e["trade"]}
+                self._journal_settled_in(state, trade, base, e.get("copies") or [])
+                for x, y in ((e["a"], b), (b, e["a"])):
+                    self._notice([x], f"Обмен {e['trade']} с {self._nick(y)} исполнен в расчёте хода {turn}: "
+                                      f"{tr.settled_text(self.ruleset, trade, x)}.", "trade_settled", turn=turn,
+                                 phase="resolution")
+
+    def _journal_settled_in(self, state: GameState, trade: dict[str, Any], base: dict[str, Any],
+                            copies: list[str]) -> None:
+        saved, self.state = self.state, state
+        try:
+            self._journal_settled(trade, "resolution", base, copies)
+        finally:
+            self.state = saved
+
+    def _journal_orders_summary(self, turn: int, books: dict[str, SeatOrders]) -> None:
+        """Core 0.8.0 (docs/SPY_V2.md 11, «донесение → решение»): each seat's resolved moves (not false entries) and
+        fortifies with the phase they were given in, the owner of a move's target at the start of the resolution
+        and its pact mark; journal only, private to the seat until game_over (journal.view_events)."""
+        for seat, book in sorted(books.items()):
+            moves = [{"to": o.dst, "owner": self.state.provinces[o.dst].owner, "p2": o.phase_added == P2,
+                      **({"pact": "break"} if o.pact == "break" else {})}
+                     for o in book.orders if o.kind == "move" and not o.feint and o.dst in self.state.provinces]
+            fortify = [{"province": o.province, "p2": o.phase_added == P2} for o in book.orders if o.kind == "fortify"]
+            if moves or fortify:
+                self.journal.append("orders_summary", seat=seat, turn=turn, moves=moves, fortify=fortify)
 
     def _pact_results(self, turn: int, report: TurnReport) -> None:
         """Journal and announce the pact changes of a resolution (breaks, expiries, endings); public."""

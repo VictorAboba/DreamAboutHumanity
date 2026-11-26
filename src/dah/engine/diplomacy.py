@@ -284,17 +284,28 @@ def make_leave(state: GameState, seat: str, pact_id: Any, phase: str) -> dict[st
 
 # ---------------------------------------------------------------- applying
 
+def transfer_resources(state: GameState, sender: str, recipient: str, amounts: Mapping[str, int]) -> None:
+    """Move resources from one seat to another (a gift, a side of a trade). Raises DiplomacyError when the sender
+    has not enough (nothing moves then)."""
+    giver, taker = state.players[sender], state.players[recipient]
+    for res, n in amounts.items():
+        if giver.resources.get(res, 0) < n:
+            raise DiplomacyError("NOT_ENOUGH_RESOURCES", f"transfer of {n} {res}: not enough")
+    for res, n in amounts.items():
+        giver.resources[res] -= n
+        taker.resources[res] = taker.resources.get(res, 0) + n
+
+
 def apply_op(state: GameState, op: Mapping[str, Any]) -> dict[str, Any] | None:
-    """Apply one op to the state in place; returns the pact it touched (None for a gift). Raises DiplomacyError
-    when the op does not fit the state (a replay of a different game)."""
+    """Apply one op to the state in place; returns the pact (or trade) it touched (None for a gift). Raises
+    DiplomacyError when the op does not fit the state (a replay of a different game). Trade ops (`trade_*`,
+    docs/TRADE.md) are applied by engine/trade.py."""
     kind = op.get("op")
+    if isinstance(kind, str) and kind.startswith("trade_"):
+        from . import trade      # trade builds on this module
+        return trade.apply_op(state, op)
     if kind == "gift":
-        giver, taker = state.players[op["sender"]], state.players[op["recipient"]]
-        for res, n in op["resources"].items():
-            if giver.resources.get(res, 0) < n:
-                raise DiplomacyError("NOT_ENOUGH_RESOURCES", f"gift of {n} {res}: not enough")
-            giver.resources[res] -= n
-            taker.resources[res] = taker.resources.get(res, 0) + n
+        transfer_resources(state, op["sender"], op["recipient"], op["resources"])
         return None
     if kind == "propose":
         pact = {"id": op["id"], "a": op["sender"], "b": op["recipient"], "turns": op["turns"], "status": PROPOSED,
@@ -345,7 +356,10 @@ def apply_ops(state: GameState, ops: Iterable[Mapping[str, Any]]) -> None:
 
 # Events of diplomacy in the turn report. Kinds only their two seats see; and fields only the two seats (and the admin)
 # see in a public event: gift amounts and pact ids (an id would count the pair's private proposals).
-PRIVATE_KINDS = frozenset({"pact_proposed", "pact_rejected", "pact_withdrawn", "pact_lapsed"})
+# Core 0.8.0 (docs/TRADE.md 5, 16а): every trade event is private to its two seats, an executed trade too.
+PRIVATE_KINDS = frozenset({"pact_proposed", "pact_rejected", "pact_withdrawn", "pact_lapsed",
+                           "trade_proposed", "trade_rejected", "trade_withdrawn", "trade_settled", "trade_failed",
+                           "trade_lapsed", "trade_accepted", "intel_copied"})
 PUBLIC_KINDS = frozenset({"gift", "pact_signed", "pact_renewed", "pact_leave", "pact_broken", "pact_expired",
                           "pact_ended"})
 PRIVATE_FIELDS = ("resources", "pact", "renewal")
@@ -353,6 +367,9 @@ PRIVATE_FIELDS = ("resources", "pact", "renewal")
 
 def op_event(op: Mapping[str, Any], state: GameState) -> dict[str, Any] | None:
     """The turn-report event of an op (full form, with the private fields)."""
+    if str(op.get("op", "")).startswith("trade_"):
+        from . import trade
+        return trade.op_event(op, state)
     if op["op"] == "gift":
         return {"kind": "gift", "seats": sorted((op["sender"], op["recipient"])), "province": None,
                 "sender": op["sender"], "recipient": op["recipient"], "resources": dict(op["resources"]),

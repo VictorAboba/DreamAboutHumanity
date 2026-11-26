@@ -5,7 +5,7 @@
 These are the rules as the engine implements them: the vertical slice plus stage 2 (techs, the setup phase,
 factions and artifacts). The exact contracts are in the [slice specification](../SLICE.md) and the
 [stage-2 specification](../TECH_AND_SETUP.md) (both in Russian); the [full concept](../CONCEPT.md) (in Russian)
-describes the game the slice grows towards. Numbers below are the defaults of the `core` pack, version 0.7.1 (espionage and conquest of stage 3a, the scoring of stage 4 with the decision-27 changes: great works paid in parts, intel points, war per province, army fog; 0.7.1: no war points for taking back one's own land, decision 28; both on by default in `slice3`, `slice2` and `quad4`; the Abandoned lands of stage 5 are described [below](#abandoned-lands-and-finds-stage-5)); a
+describes the game the slice grows towards. Numbers below are the defaults of the `core` pack, version 0.8.0 (espionage and conquest of stage 3a, the scoring of stage 4 with the decision-27 changes: great works paid in parts, intel points, war per province, army fog; 0.7.1: no war points for taking back one's own land, decision 28; 0.8.0: espionage v2, decision 30 and [SPY_V2.md](../SPY_V2.md); both on by default in `slice3`, `slice2` and `quad4`; the Abandoned lands of stage 5 are described [below](#abandoned-lands-and-finds-stage-5)); a
 scenario or a pack can change them ([Content packs](modding.md)). The tables of units, buildings, techs, factions and
 artifacts are a snapshot: the match's own numbers are always in `rules(topic)` and `describe(id)` (see the end of
 this page).
@@ -326,6 +326,21 @@ who broke it in the turn report and the inbox. `"break"` against a player withou
 `validate_orders` and `submit_orders` warn (`warning`, not a refusal) when a move goes into a partner's province:
 with `honor` it will bounce, with `break` it is the breach.
 
+**Trade (core 0.8.0, when the game has trade on)** — "I give X for Y" in one operation: both parts happen at once or
+not at all. Details: `rules(topic="trade")` and [TRADE.md](../TRADE.md).
+
+- `propose_trade(to, give, want)` — `give` is what you hand over, `want` what you ask for; resources
+  `{"alloy": 10}`, a province `{"P07": 1}`, an own report `{"r4": 1}` (the buyer gets a certified copy `c<k>`, the
+  original stays). One open offer to the same player (`replaces=id` replaces it, `reply_to=id` counters); ≤ 3 offers
+  per phase; an offer clears the recipient's ready.
+- `respond_trade(id, "accept" | "reject")` — the answer, until the end of the turn; an unanswered offer lapses at
+  resolution. A trade without a province is carried out at once; with a province the resources go into escrow and the
+  province passes at resolution after the battles (an Occupation for the receiver, a Return of its own land); if it is
+  taken in battle first, everything goes back.
+- `later={"give": …, "want": …, "by_turn": 6}` — a promise: the game does not carry it out, it only remembers it
+  (`list_trades`).
+- Only the two sides know of a trade: there is no public event; a passed province shows as an ordinary change of owner.
+
 ## Resolution
 
 The engine resolves a turn in this order:
@@ -459,7 +474,11 @@ line. `format=json` gives the same view as JSON.
     war points, neither for the capture nor for holding it (`score.war.no_reclaim`; the list is `you.war.reclaim`). Before 0.7.0:
     the price of killed units, 1 point per 15 (the Growth: per 10), at most 3 from one rival and 5 in all;
   - **intel** (`intel`, only with espionage — with espionage off its weight is 0, 0.7.0): +1 per successful Shade mission against a living rival (once per
-    Shade, target and mission a turn), at most 3 a game; `estimate_mission` says whether a success would score;
+    Shade, target and mission a turn), at most 3 a game; `estimate_mission` says whether a success would score.
+    Since core 0.8.0 the mission's kind (its `intel` field) decides: Secret Objective once a game, Read Orders once
+    per rival, Sabotage when the strike worked (a battle the victim lost units in, a stopped build, a revolt; the
+    point goes to the first strike on the province); Observe and Ledger score nothing; nothing against a pact partner
+    (as of the recon step);
   - **secret objective**: one per seat, dealt at the start (hold two forges, six provinces, a province of another
     seat's start, a ready great work; on `mirror2`/`mirror3` also two agri worlds, four War or three Industry techs,
     on `mirror4` two shrines; with three seats or more a rival's capital, or take the named rival's capital); points
@@ -531,6 +550,16 @@ before. The numbers below are the defaults; a game's exact numbers are in `rules
 - Core missions: Observe (`observe`), Ledger (`ledger`), Secret Objective (`secret`: the seat's objective exactly —
   condition, points, met now; only with secret objectives; D1, 1–3 rounds, 2 provisions a round), Read Orders
   (`read_orders`), Sabotage (`sabotage`).
+- Core 0.8.0 (espionage v2, [SPY_V2.md](../SPY_V2.md)): Observe is D0 and shows the units exactly plus the block
+  «в расчёте этого хода» (the recruits and fortify of the target's book; moves are never shown);
+  `estimate(defender="r3")` forecasts the battle by such a report (a header, «устарело на N ходов», a second number
+  «если укрепится в П2»). Ledger adds the whole army as an interval. Read Orders opens at S1 (D2) and starts with
+  «НАРУШЕНИЕ ПАКТА» and «НА ТЕБЯ». Sabotage (S2, Whisper Veil) also stops a build in the province for a turn (once
+  per build) and raises a revolt in an Occupation held by at most 1 unit (2 owner-less militia rebels; only the
+  sides see the cause). The Ward, `{"kind": "ward", "province": "P05"}` (actions, 5 alloy, 3 with `watch_drill`;
+  one's own full province), adds +2 to C_loc for this recon step. Up to 2 + S//2 Shades on missions at once; the
+  capture chance grows by 8% per other own Shade checked at the same place (R); report intervals are at least
+  `spy.intel.width_min` (1) wide.
 - A mission, `{"kind": "spy", "shade": "s1", "mission": "observe", "target": "P07", "rounds": 2}`: given in actions,
   its first round is this turn; given in N2 (1 CP), from the next turn. The whole term is reserved when given and is
   not refunded. `{"kind": "recall", "shade": "s1"}` ends a mission (in N2: 1 CP, this turn's strike is cancelled).
@@ -542,8 +571,9 @@ before. The numbers below are the defaults; a game's exact numbers are in `rules
   `list_spies`.
 - A caught Shade is lost for good. Its owner sees only "no contact" (`нет связи`); the owner of the checked place sees
   where it was caught, its mission and target, and its owner if attribution succeeds. Third seats learn nothing.
-- Sabotage (a loud mission): in this turn's resolution the province's fortify is broken, defense x0.85, income 0. The
-  victim sees the strike without its author; the delayed spectator sees only "sabotage in P07".
+- Sabotage (a loud mission): in this turn's resolution the province's fortify is broken, defense x0.85, income 0
+  (since 0.8.0 also the build stop and the revolt, see above). The victim sees the strike without its author; the
+  delayed spectator sees only "sabotage in P07".
 - A false entry is a `move` with `"feint": true` (actions only, 1 CP): its units are reserved but stay home and
   defend. Only Read orders sees it. In N2 `amend_order(id, {"feint": false})` makes it real at a new attack's price.
 

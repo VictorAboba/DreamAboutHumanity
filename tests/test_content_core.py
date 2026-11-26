@@ -45,7 +45,8 @@ def test_core_content_values():
     assert rs.scenario.turn_limit == 10
     assert rs.scenario.phase_limits == {"setup": 300, "negotiation_1": 720, "actions": 300, "negotiation_2": 300}
     assert build_ruleset(None, "slice2").scenario.phase_limits == rs.scenario.phase_limits
-    assert rs.scenario.diplomacy_limits == {"gifts_per_phase": 3, "pact_proposals_per_phase": 3}
+    assert rs.scenario.diplomacy_limits == {"gifts_per_phase": 3, "pact_proposals_per_phase": 3,
+                                           "trade_proposals_per_phase": 3}     # core 0.8.0 (docs/TRADE.md 8)
     assert build_ruleset(None, "blitz_test").scenario.phase_limits["actions"] == 5
     assert rs.scenario.message_limits["negotiation_1"] == {"per_recipient": 6, "private": 20, "public": 2}
     assert rs.scenario.message_limits["max_chars"] == 800

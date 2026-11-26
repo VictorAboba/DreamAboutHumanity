@@ -78,7 +78,16 @@ def wake_text(phase_info: dict[str, Any], *, reminder: bool = False) -> str:
     prefix = "[DAH] Напоминание: фаза скоро закроется, ты ещё не нажал ready. " if reminder else "[DAH] "
     ready = f" Готово {phase_info['ready']}." if phase_info.get("ready") else ""
     return (f"{prefix}{head}.{ready} {_hint(phase, turn, phase_info.get('orders_hash'), phase_info.get('intel'))}"
-            + _idle_shades(phase, phase_info.get("idle_shades")))
+            + _idle_shades(phase, phase_info.get("idle_shades"))
+            + _trades_waiting(phase, phase_info.get("trades_waiting")))
+
+
+def _trades_waiting(phase: str, n: Any) -> str:
+    """Core 0.8.0 (docs/TRADE.md 9): the trade offers the seat has to answer in negotiation_1 and negotiation_2
+    (phase info `trades_waiting`)."""
+    if phase not in ("negotiation_1", "negotiation_2") or isinstance(n, bool) or not isinstance(n, int) or n <= 0:
+        return ""
+    return f" Обменов ждут ответа: {n} — dah.list_trades(), dah.respond_trade(id, decision)."
 
 
 def _idle_shades(phase: str, n: Any) -> str:

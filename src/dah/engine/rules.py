@@ -37,7 +37,8 @@ TOPICS: dict[str, tuple[str, str]] = {
     "combat": ("РАСЧЁТ", "порядок расчёта и бой"),
     "victory": ("ПОБЕДА", "победа и очки"),
     "pacts": ("ДИПЛОМАТИЯ", "подношения и пакты"),
-    "spying": ("ШПИОНАЖ", "Тени, миссии, донесения, ложные записи"),
+    "trade": ("ОБМЕН", "обмен с другими игроками"),        # core 0.8.0 (docs/TRADE.md 10)
+    "spying": ("ШПИОНАЖ", "Тени, миссии, донесения"),      # core 0.8.0: shorter (docs/SPY_V2.md 9.3)
     "conquest": ("ЗАВОЕВАНИЕ", "оккупация, судьбы провинций, притязания"),
     "fog": ("ВИДИМОСТЬ", "туман войны"),
     "discoveries": ("ЗАБРОШЕННЫЕ", "Заброшенные земли и находки"),
@@ -61,6 +62,8 @@ ALIASES = {
     "discovery": "discoveries", "finds": "discoveries", "find": "discoveries", "abandoned": "discoveries",
     "находки": "discoveries", "находка": "discoveries", "заброшенные": "discoveries", "discover": "discoveries",
     "ruins": "discoveries", "руины": "discoveries", "lair": "discoveries", "логово": "discoveries",
+    "trades": "trade", "trading": "trade", "exchange": "trade", "обмен": "trade", "торговля": "trade",
+    "сделка": "trade", "сделки": "trade",
 }
 
 
@@ -458,7 +461,14 @@ def _victory_detail(rs: Ruleset, core: str) -> str:
                      f"{int(st('score.war.defense_pct'))}%; 1 очко за {int(st('score.war.per_point'))}, не больше "
                      f"{int(st('score.war.cap_per_victim'))} с одного соперника и {int(st('score.war.cap'))} всего. "
                      "Нейтралы, голод, бунт, гибель при отступлении — 0.")
-    if sc_.on(rs, "intel"):
+    if sc_.on(rs, "intel") and any(m.intel != sc_.EACH_TURN for m in rs.missions.values()):
+        # core 0.8.0 (docs/SPY_V2.md 5): only the deep missions score
+        lines.append(f"- Разведка: +{int(st('score.intel.per_success'))} за успех глубокого задания Тени против живого "
+                     f"соперника, не больше {int(st('score.intel.cap'))} за партию: secret — раз за партию, "
+                     "read_orders — раз на соперника, sabotage — если удар что-то сделал (бой с потерями жертвы, "
+                     "стройка, бунт; в конце расчёта). Наблюдение и Счётная книга очков не дают; против партнёра "
+                     "по пакту очков нет. Сколько даст успех — estimate_mission.")
+    elif sc_.on(rs, "intel"):
         lines.append(f"- Разведка: +{int(st('score.intel.per_success'))} за успешное задание Тени (донесение или удар, "
                      f"любая миссия) против живого соперника, не больше {int(st('score.intel.cap'))} за партию; одна "
                      "и та же цель и миссия — раз за ход. Сколько даст успех — estimate_mission.")
@@ -518,10 +528,61 @@ def _pacts(rs: Ruleset) -> Section:
         "нарушителю возвращаются); затем пакт разорван, и все узнают, кто нарушил.")
     short = ("ДИПЛОМАТИЯ (только П1 и П2): send_gift(to, resources) — подношение свободных ресурсов; "
              "propose_pact(to, turns) → respond_pact(id, accept|reject); leave_pact(id). Пакт: армии сторон не "
-             'сражаются (ход к союзнику вернётся); move с "pact":"break" нарушает пакт публично. Продление — '
-             "propose_pact тому же партнёру, пока пакт действует (срок добавится). "
-             "Подробно: rules(topic=\"pacts\").")
+             'сражаются (ход к союзнику вернётся); move с "pact":"break" нарушает пакт публично. ')
+    if rs.system("trade"):
+        # core 0.8.0 (docs/TRADE.md 10.1, 16а): the renewal phrase goes to the topic to make room for ОБМЕН; the
+        # rules of pacts do not change
+        short += "Продление: rules(topic=\"pacts\")."
+    else:
+        short += ("Продление — propose_pact тому же партнёру, пока пакт действует (срок добавится). "
+                  "Подробно: rules(topic=\"pacts\").")
     return Section("pacts", core, short=short)
+
+
+TRADE_TOPIC_LIMIT = 1600        # docs/TRADE.md 10.2
+
+
+def _trade(rs: Ruleset) -> Section | None:
+    """Core 0.8.0 (docs/TRADE.md 10): one core line, the rest in its topic; phrases of what a game does not trade
+    (provinces without conquest, reports without espionage, `later` off) drop out."""
+    if not rs.system("trade"):
+        return None
+    from . import trade as tr
+    limit = rs.scenario.diplomacy_limits.get("trade_proposals_per_phase", 3)
+    provinces, reports = tr.provinces_on(rs), tr.reports_on(rs)
+    core = 'ОБМЕН: propose_trade(to, give, want) → respond_trade(id, accept|reject); подробно — rules(topic="trade")'
+    goods = '{"alloy": 10}' + (', провинции ["P07"]' if provinces else "") + (
+        '; в give ещё свои донесения ["r4"]' if reports else "")
+    lines = [
+        f"ОБМЕН (только П1 и П2). propose_trade(to, give, want): give — что отдаёшь, want — что просишь; ресурсы "
+        f"{goods}. Одна сторона может быть пустой. Тому же игроку — одно открытое "
+        "предложение (второе — OFFER_EXISTS); заменить — replaces=id, встречное — reply_to=id. "
+        f"Снимает «готов» у получателя; ≤{limit} предложений за фазу.",
+        "respond_trade(id, accept|reject) — ответ получателя до конца хода (reject предложившего — отзыв); "
+        "неотвеченное сгорает в расчёте. Первое принятое забирает товар. При принятии: не хватает у предложившего — обмен сорван, у принимающего — "
+        "ошибка, предложение ждёт. " + ("Без провинции обмен исполняется сразу" if provinces else
+                                        "Принятый обмен исполняется сразу") + ", обе части разом; отменить нельзя.",
+    ]
+    if provinces:
+        n = int(rs.stat("trade.provinces_per_turn"))
+        conqueror = [o.name for o in rs.objectives.values()
+                     if o.kind == "hold_foreign" and o.params.get("via") == "capture"]
+        lines.append(
+            "С провинцией ресурсы обеих сторон уходят в залог и переходят в расчёте после боёв; провинцию "
+            "отбили — всё возвращается. Отдать: свою или оккупированную тобой, не Пепелище, без своей "
+            f"стройки и приказов в ней, ≤{n} за ход; стартовую столицу места — только ему самому. Твои войска "
+            "уходят в соседнюю твою (нет — распускаются). Получателю входить в неё в этом ходу нельзя; у него — "
+            "Оккупация, подчинить — со следующего хода; его исконная — сразу полноценная; ждущий выбор находки — "
+            "его. Передача — не захват: очков войны нет"
+            + (f", в цель «{conqueror[0]}» не идёт." if conqueror else "."))
+    if reports:
+        lines.append("Донесение: покупатель получает заверенную игрой копию c<k> (get_intel), оригинал твой; до "
+                     "сделки видна только шапка; копию не перепродать.")
+    if rs.stat("trade.later"):
+        lines.append('later={"give": {...}, "want": {...}, "by_turn": 6} — обещание: игра его не '
+                     "исполняет, только помнит (list_trades).")
+    lines.append("Об обменах знают только двое. list_trades() — твои обмены и обещания, в любой фазе.")
+    return Section("trade", core, "\n".join(lines))
 
 
 _BEHAVIOR_TEXT = {"annex": "оккупация снята: доход, очки, стройка и найм — с этого расчёта",
@@ -597,13 +658,47 @@ _MISSION_TEXT = {esp.OBSERVE: "юниты по видам (интервалы), 
                                      "хватит одного донесения)",
                  esp.SABOTAGE: "удар в расчёте этого хода: {effects}"}
 _TARGET_TEXT = {"province": "провинция", "owned_province": "провинция игрока", "seat": "игрок (ник)"}
+# core 0.8.0 (docs/SPY_V2.md 9.2): what a success scores, by the mission's `intel` kind
+_INTEL_TEXT = {"each_turn": "очко: за успех", "once": "очко: 1 раз за партию", "once_per_target": "очко: 1 раз на соперника",
+               "effect": "очко: если удар сработал (бой с потерями, стройка, бунт)", "no": "без очков"}
+
+
+def _mission_text_v2(m: Any, what: str) -> str:
+    """The new mission parameters of core 0.8.0 in «даёт: …» (docs/SPY_V2.md 4.1, 4.2)."""
+    if m.behavior == esp.OBSERVE:
+        if m.params.get("exact"):
+            what = what.replace("юниты по видам (интервалы)", "юниты по видам точно")
+        if m.params.get("planned"):
+            what += "; найм и укрепление в ней из книги этого хода (без ходов)"
+    elif m.behavior == esp.LEDGER and m.params.get("army_total"):
+        what = what.replace("свободные запасы (интервалы)", "свободные запасы и армия всего (интервалы)")
+    elif m.behavior == esp.READ_ORDERS:
+        what = "сперва нарушения пактов и удары по тебе, затем " + what
+    return what
+
+
+def _whisper_need(rs: Ruleset, level: int) -> str:
+    """«S2 (Завеса шёпота)»: the cheapest tech of the pack that lifts spy.whisper from its base to `level`
+    (docs/SPY_V2.md 4.7); just «S2» when there is none or the base is enough."""
+    base = int(rs.stat("spy.whisper"))
+    if level <= base:
+        return f"S{level}"
+    best = None
+    for tid, t in sorted(rs.techs.items()):
+        raised = registry.apply_modifiers(base, [e for e in getattr(t, "effects", ()) if isinstance(e, Mapping)
+                                                 and e.get("type") == "modify" and e.get("target") == "spy.whisper"])
+        if raised >= level:
+            cost = rs.tech_cost(tid, None)
+            if best is None or cost < best[0]:
+                best = (cost, t.name)
+    return f"S{level} ({best[1]})" if best else f"S{level}"
 
 
 def _pct(x: float) -> str:
     return f"{round(x * 100)}%"
 
 
-def _sabotage_effects(params: Mapping[str, Any]) -> str:
+def _sabotage_effects(params: Mapping[str, Any], rs: Ruleset | None = None) -> str:
     parts = []
     if params.get("deny_fortify"):
         parts.append("укрепление сорвано")
@@ -611,6 +706,15 @@ def _sabotage_effects(params: Mapping[str, Any]) -> str:
         parts.append(f"оборона ×{params['defense_mul']:g}")
     if params.get("income_mul", 1) != 1:
         parts.append(f"доход ×{params['income_mul']:g}")
+    # core 0.8.0 (docs/SPY_V2.md 4.5): the stop of a build and the revolt of an occupation
+    if params.get("stall_build"):
+        limit = int(params.get("stall_max") or 0)
+        parts.append("стройка там стоит ход" + (f" ({limit} раз на стройку)" if limit else ""))
+    if params.get("unrest_units") is not None:
+        rebels = params.get("revolt_garrison") or {}
+        names = " ".join(f"{rs.short(u) if rs else u}×{n}" for u, n in rebels.items())
+        parts.append(f"оккупация с ≤{params['unrest_units']} юн. бунтует"
+                     + (f" (повстанцы {names})" if names else ""))
     return ", ".join(parts) or "без эффекта"
 
 
@@ -634,15 +738,29 @@ def _spying(rs: Ruleset) -> Section | None:
             f"с правдой внутри. В книге бывают ложные записи (move…feint:true: войска дома, {feint_cp} ОК). "
             + (f"Чужую тайную цель даёт миссия {_short(secret.id)}. " if secret else "")
             + 'list_spies, estimate_mission, rules(topic="spying").')
-    # core 0.7.0 (decision 27): a success scores (the source `intel`)
-    pays = (f"Успех задания: +{int(st('score.intel.per_success'))} очко (≤{int(st('score.intel.cap'))}). "
-            if sc_.on(rs, "intel") else "")
+    # core 0.7.0 (decision 27): a success scores (the source `intel`); core 0.8.0 (docs/SPY_V2.md 9.1): only the
+    # missions whose `intel` is not `no` score, named from the pack (secret first)
+    v2 = any(m.intel != sc_.EACH_TURN for m in rs.missions.values())
+    pays = ""
+    if sc_.on(rs, "intel"):
+        per, cap = int(st('score.intel.per_success')), int(st('score.intel.cap'))
+        if v2:
+            scoring = sorted((m for m in rs.missions.values() if m.intel != sc_.NO_INTEL),
+                             key=lambda m: (m.behavior != esp.READ_OBJECTIVE, m.id))
+            pays = f"Очки (+{per}, ≤{cap}): {', '.join(_short(m.id) for m in scoring)}. " if scoring else ""
+        else:
+            pays = f"Успех задания: +{per} очко (≤{cap}). "
     core = core.replace("list_spies, estimate_mission", pays + "list_spies, estimate_mission") if pays else core
-    short = ("ШПИОНАЖ: " + (f"Тени даром с начала: {free}; " if free else "") + "hire_shade, "
-             "spy{shade,mission,target,rounds}"
-             + (f" ({_short(secret.id)} — чужая тайная цель)" if secret else "")
-             + "; донесения в П2 — get_intel; бывают ложные записи (move feint:true). " + pays
-             + 'Подробно: rules(topic="spying").')
+    if v2:
+        # core 0.8.0 (9.1, 9.3): the false entries and the secret's gloss go to the topic, the topic is in the index
+        short = ("ШПИОНАЖ: " + (f"Тени даром с начала: {free}; " if free else "") + "hire_shade, "
+                 "spy{shade,mission,target,rounds}; донесения в П2 — get_intel. " + pays).rstrip()
+    else:
+        short = ("ШПИОНАЖ: " + (f"Тени даром с начала: {free}; " if free else "") + "hire_shade, "
+                 "spy{shade,mission,target,rounds}"
+                 + (f" ({_short(secret.id)} — чужая тайная цель)" if secret else "")
+                 + "; донесения в П2 — get_intel; бывают ложные записи (move feint:true). " + pays
+                 + 'Подробно: rules(topic="spying").')
     lines = [core.replace(', rules(topic="spying").', "."), "Миссии:"]
     for mid, m in sorted(rs.missions.items()):
         price = []
@@ -650,12 +768,18 @@ def _spying(rs: Ruleset) -> Section | None:
             price.append(_amounts(rs, m.cost))
         if m.cost_per_round:
             price.append(_amounts(rs, m.cost_per_round) + "/раунд")
-        need = [f"S{m.whisper}"] + [rs.techs[t].name if t in rs.techs else t for t in m.requires_tech]
-        what = _MISSION_TEXT.get(m.behavior, m.behavior).format(effects=_sabotage_effects(m.params))
+        need = [_whisper_need(rs, m.whisper) if v2 else f"S{m.whisper}"] + [
+            rs.techs[t].name if t in rs.techs else t for t in m.requires_tech]
+        what = _MISSION_TEXT.get(m.behavior, m.behavior).format(effects=_sabotage_effects(m.params, rs))
+        if v2:
+            what = _mission_text_v2(m, what)
         loud = " (громкая)" if m.loud else ""
+        point = f"; {_INTEL_TEXT[m.intel]}" if v2 and sc_.on(rs, "intel") else ""
         lines.append(f"- {_short(mid)} «{m.name}»{loud}: цель — {_TARGET_TEXT.get(m.target, m.target)}; "
                      f"D{esp.difficulty(rs, mid, None)}; срок {m.rounds_min}–{esp.max_rounds(rs, mid, None)}; нужно "
-                     f"{', '.join(need)}; цена {' + '.join(price) or '0'}; даёт: {what}.")
+                     f"{', '.join(need)}; цена {' + '.join(price) or '0'}; даёт: {what}{point}.")
+    repeat = bool(int(st("spy.detect.repeat_on")))
+    observe_exact = any(m.behavior == esp.OBSERVE and m.params.get("exact") for m in rs.missions.values())
     s = lambda k: st(f"spy.success.{k}")      # noqa: E731
     d = lambda k: st(f"spy.detect.{k}")       # noqa: E731
     a = lambda k: st(f"spy.attribution.{k}")  # noqa: E731
@@ -663,36 +787,45 @@ def _spying(rs: Ruleset) -> Section | None:
         f"{shade}: не больше {int(st('spy.shades_max'))}"
         + (f" (из них {free} — у каждого с начала партии, свободна)" if free else "")
         + f", на заданиях одновременно {int(st('spy.active_base'))} + S//2. Нанимается только при своей "
-        "полноценной стартовой столице, одна за ход; появляется на закрытии Д, задания — со следующего Д. Голод Теней не трогает. Цена задания — вся за срок, резерв при подаче, не "
+        "полноценной стартовой столице, одна за ход; появляется на закрытии Д, задания — со следующего Д."
+        + ("" if v2 else " Голод Теней не трогает.") + " Цена задания — вся за срок, резерв при подаче, не "
         "возвращается (кроме снятия записи spy до закрытия Д).",
         f"S — шпионаж (база {int(st('spy.whisper'))}), C — контрразведка (база {int(st('spy.mirrors'))}); их "
         "поднимают технологии. Место проверки — провинция-цель; для цели-игрока — его столица, иначе первая "
         "полноценная, иначе первая оккупированная. C_лок = C владельца + Зеркальные залы там (не в оккупации и не на "
-        f"пепелище) + {int(st('spy.detect.army'))}, если там его войска; нейтральная — 0.",
-        f"Поимка (первой): p = {_pct(d('base'))} + {_pct(d('difficulty'))}·D + {_pct(d('skill'))}·(C_лок − S) − "
-        f"{_pct(d('xp'))}·V − {_pct(d('cover'))}·K, в пределах {_pct(d('min'))}–{_pct(d('max'))}. "
+        f"пепелище) + {int(st('spy.detect.army'))}, если там его войска"
+        + (f" + {int(st('spy.ward.bonus'))}, если там Застава этого хода (ward{{province}} в Д, "
+           f"{_amounts(rs, esp.ward_cost(rs, None)) or '0'}, своя полноценная провинция)" if v2 else "")
+        + "; нейтральная — 0.",
+        f"Поимка (первой): p = {_pct(d('base'))} + {_pct(d('difficulty'))}·D + {_pct(d('skill'))}·(C_лок − S) "
+        + (f"+ {_pct(d('repeat'))}·R " if repeat else "") +
+        f"− {_pct(d('xp'))}·V − {_pct(d('cover'))}·K, в пределах {_pct(d('min'))}–{_pct(d('max'))}"
+        + (" (R — другие твои Тени в этом разведсрезе у того же места)" if repeat else "") + ". "
         f"Находка: p = {_pct(s('base'))} + {_pct(s('skill'))}·(S − D) + {_pct(s('xp'))}·V + {_pct(s('cover'))}·K, "
         f"{_pct(s('min'))}–{_pct(s('max'))}. K — раунды, уже сыгранные этим заданием (до "
         f"{int(st('spy.cover_max'))}); V — опыт (+1 за задание с находкой и без поимки, до {int(st('spy.xp_max'))}). "
         "estimate_mission(mission, target, rounds) считает это точно (чужое C — база, если не задать assume_mirrors).",
-        f"Донесение: число n — интервал шириной max(2, ⌈{st('spy.intel.width'):g}·n⌉), правда всегда внутри; смещение "
+        f"Донесение: число n — интервал шириной max({int(st('spy.intel.width_min'))}, ⌈{st('spy.intel.width'):g}·n⌉)"
+        + (" (Наблюдение — точно)" if observe_exact else "") + ", правда всегда внутри; смещение "
         "постоянно для пары «ты — цель». Снимок — конец Д: правки П2 в нём не видны. get_intel() — донесения хода, "
         "get_intel(report_id=\"r4\") — одно целиком; во входящих — одна запись [ИГРА] о разведсрезе.",
         "Поймана — Тень потеряна навсегда, плата за срок пропала. Хозяин видит только «нет связи». Владелец места "
         "проверки видит, где поймана, задание и цель; хозяина — если удалась атрибуция: "
         f"{_pct(a('base'))} + {_pct(a('skill'))}·(C_лок − S), {_pct(a('min'))}–{_pct(a('max'))}. Другие не узнают "
-        "ничего; в нейтральной провинции о поимке не узнаёт никто.",
+        "ничего" + ("." if v2 else "; в нейтральной провинции о поимке не узнаёт никто."),
         "Громкая миссия с находкой: удар в расчёте этого хода по провинции (видит её владелец, без исполнителя); "
         f"отзыв Тени в П2 удар снимает. recall{{shade}}: из Д — без раунда, из П2 — {recall_cp} ОК (раунд хода уже "
         "был); плата не возвращается. Задание снимается, если цель выбыла или провинция стала твоей.",
         f"Ложная запись: move с \"feint\":true, только в Д, {feint_cp} ОК хода; войска резервируются, но остаются "
         "дома, обороняются, укрепление не срывают. Видна только Чтению приказов. В П2 amend {\"feint\":false} — "
         f"как новая атака ({int(st('p2.cost.new_attack'))} ОК, наспех); обратно нельзя; отмена — {CP_CANCEL} ОК.",
-        f"П2: новый spy {spy_cp} ОК, recall {recall_cp} ОК; hire_shade и новая ложная запись — PHASE_LOCKED; "
-        "записи spy/recall/hire_shade из Д в П2 не меняются (их исполнил разведсрез).",
-        "Видимость: свои Тени, задания, донесения и S/C видишь только ты; пакт шпионаж не запрещает.",
-        "Ошибки: NO_CAPITAL, SHADE_LIMIT, SHADE_BUSY, TOO_MANY_MISSIONS, MISSION_LOCKED, BAD_TARGET, BAD_ROUNDS "
-        "(срок длиннее оставшихся ходов).",
+        f"П2: новый spy {spy_cp} ОК, recall {recall_cp} ОК; hire_shade{', ward' if v2 else ''} и новая ложная "
+        f"запись — PHASE_LOCKED; записи spy/recall/hire_shade{'/ward' if v2 else ''} из Д в П2 не меняются (их "
+        "исполнил разведсрез).",
+        "Видимость: свои Тени, задания, донесения и S/C видишь только ты; пакт шпионаж не запрещает."
+        + (" Очков нет против партнёра по пакту (на разведсрезе)." if v2 and sc_.on(rs, "intel") else ""),
+        "Ошибки: NO_CAPITAL, SHADE_LIMIT, SHADE_BUSY, TOO_MANY_MISSIONS, MISSION_LOCKED, BAD_TARGET, BAD_ROUNDS"
+        + ("." if v2 else " (срок длиннее оставшихся ходов)."),
     ]
     return Section("spying", core, "\n".join(lines), short)
 
@@ -880,7 +1013,8 @@ def sections(rs: Ruleset, setup: Mapping[str, Any] | None = _UNSET,
         from .setup import setup_config
         setup = setup_config(rs)
     out = [_turn(rs, setup), _setup(rs, setup), _resources(rs), _provinces(rs), _units(rs), _abilities(rs),
-           _buildings(rs), _orders(rs), _p2(rs), _combat(rs), _victory(rs), _pacts(rs), _spying(rs), _conquest(rs), _fog(rs),
+           _buildings(rs), _orders(rs), _p2(rs), _combat(rs), _victory(rs), _pacts(rs), _trade(rs), _spying(rs),
+           _conquest(rs), _fog(rs),
            *extra,
            _techs(rs), _factions(rs, setup), _artifacts(rs, setup)]
     return [s for s in out if s is not None]

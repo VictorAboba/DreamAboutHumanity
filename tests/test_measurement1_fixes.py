@@ -235,8 +235,8 @@ def test_bridge_passes_estimate_to_server_and_adds_examples_to_argument_errors()
 
     bridge = Bridge(GameClient("http://game.test", "dah_g_A_k", transport=httpx.MockTransport(server)))
     text, is_error = bridge.call("estimate", {"task_id": 2})
-    assert is_error and seen == [{"attacker": None, "defender": None, "province_type": None, "fortified": False,
-                                  "hasty": False}]
+    # core 0.8.0: the flags go only when given (an omitted fortified lets defender="r3" take the report's)
+    assert is_error and seen == [{"attacker": None, "defender": None, "province_type": None}]
     text, is_error = bridge.call("send_message", {"text": "мир"})
     assert is_error and "не указан аргумент to" in text and "Пример: send_message(to=" in text
 

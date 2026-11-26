@@ -1,0 +1,40 @@
+- id: drill_doctrine
+  name: {ru: Строевой устав, en: Drill Doctrine}
+  branch: war
+  tier: 1
+  cost: 10
+  effects:
+    - {effect: modify, target: unit.assault.attack, op: add, value: 1}
+    - {effect: modify, target: unit.militia.attack, op: add, value: 1}
+- id: fortification
+  name: {ru: Фортификация, en: Fortification}
+  branch: war
+  tier: 1
+  cost: 12
+  unlocks: [citadel]
+  effects:
+    - {effect: modify, target: combat.fortify_bonus, op: add, value: 0.05}
+- id: smithcraft
+  name: {ru: Кузнечное дело, en: Smithcraft}
+  branch: war
+  tier: 1
+  cost: 12
+  unlocks: [smithy, mortar]
+- id: war_engines
+  name: {ru: Боевые машины, en: War Engines}
+  branch: war
+  tier: 2
+  cost: 24
+  requires: [smithcraft]
+  requires_tier: {tier: 1, count: 2}
+  unlocks: [titan]
+  effects:
+    - {effect: modify, target: unit.armor.attack, op: add, value: 1}
+- id: surprise_doctrine
+  name: {ru: Доктрина внезапного удара, en: Surprise Strike Doctrine}
+  branch: war
+  tier: 2
+  cost: 20
+  requires_tier: {tier: 1, count: 2}
+  effects:
+    - {effect: modify, target: p2.hasty_penalty, op: add, value: -0.1}

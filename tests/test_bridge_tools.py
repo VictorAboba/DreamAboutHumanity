@@ -60,8 +60,11 @@ MAPPING = [
     ("amend_order", {"id": 7, "patch": {"to": "P03"}}, "PATCH", "/v1/orders/7", {}, {"to": "P03"}),
     ("estimate", {"attacker": {"core:armor": 2}, "defender": {"core:assault": 3}, "province_type": "core:forge"},
      "POST", "/v1/estimate", {},
-     {"attacker": {"core:armor": 2}, "defender": {"core:assault": 3}, "province_type": "core:forge",
-      "fortified": False, "hasty": False}),
+     {"attacker": {"core:armor": 2}, "defender": {"core:assault": 3}, "province_type": "core:forge"}),
+    # the flags go only when given: an omitted fortified lets defender="r3" take the report's (docs/SPY_V2.md 6.1)
+    ("estimate", {"attacker": {"assault": 9}, "defender": "r3", "fortified": False, "hasty": True},
+     "POST", "/v1/estimate", {},
+     {"attacker": {"assault": 9}, "defender": "r3", "province_type": None, "fortified": False, "hasty": True}),
     ("send_message", {"to": ["Хор"], "text": "мир?"}, "POST", "/v1/messages", {}, {"to": ["Хор"], "text": "мир?"}),
     ("send_message", {"to": "all", "text": "привет"}, "POST", "/v1/messages", {}, {"to": "all", "text": "привет"}),
     ("inbox", {"since": 4}, "GET", "/v1/inbox", {"since": "4"}, None),
@@ -84,8 +87,8 @@ MAPPING = [
     ("ready", {}, "POST", "/v1/ready", {}, {"confirm_hash": None}),
     ("estimate", {"attacker": {"militia": 2}, "defender": {"militia": 1}, "province_type": "forge",
                   "side": "defender", "opponent": "Хор"}, "POST", "/v1/estimate", {},
-     {"attacker": {"militia": 2}, "defender": {"militia": 1}, "province_type": "forge", "fortified": False,
-      "hasty": False, "side": "defender", "opponent": "Хор"}),
+     {"attacker": {"militia": 2}, "defender": {"militia": 1}, "province_type": "forge",
+      "side": "defender", "opponent": "Хор"}),
     ("get_setup", {}, "GET", "/v1/setup", {}, None),
     ("choose_faction", {"prefs": ["iron", "ash"]}, "POST", "/v1/setup/faction", {}, {"prefs": ["iron", "ash"]}),
     ("choose_faction", {"prefs": '["iron", "ash"]'}, "POST", "/v1/setup/faction", {}, {"prefs": ["iron", "ash"]}),
@@ -105,6 +108,15 @@ MAPPING = [
      {"turn": "3", "shade": "s1", "report": "r4"}, None),
     ("estimate_mission", {"mission": "observe", "target": "P07", "rounds": 2}, "POST", "/v1/estimate/mission", {},
      {"mission": "observe", "target": "P07", "rounds": 2}),
+    # core 0.8.0 (docs/TRADE.md 9)
+    ("list_trades", {}, "GET", "/v1/trades", {}, None),
+    ("propose_trade", {"to": "Хор", "give": {"alloy": 10}, "want": '{"provisions": 15}'}, "POST", "/v1/trades", {},
+     {"to": "Хор", "give": {"alloy": 10}, "want": {"provisions": 15}}),
+    ("propose_trade", {"to": "Хор", "want": {"alloy": 5}, "replaces": "trade-A-B-1",
+                       "later": {"give": {"alloy": 5}, "by_turn": 4}}, "POST", "/v1/trades", {},
+     {"to": "Хор", "want": {"alloy": 5}, "replaces": "trade-A-B-1", "later": {"give": {"alloy": 5}, "by_turn": 4}}),
+    ("respond_trade", {"id": "trade-A-B-1", "decision": "accept"}, "POST", "/v1/trades/trade-A-B-1/respond", {},
+     {"decision": "accept"}),
 ]
 
 

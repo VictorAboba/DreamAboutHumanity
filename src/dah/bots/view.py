@@ -51,8 +51,14 @@ SHADE_COST_ALLOY = 20      # core 0.6.0 (was 25); every seat also holds one Shad
 SHADE_UPKEEP_FOOD = 1
 # mission short id -> (whisper needed, rounds_max, alloy once, provisions per round)
 MISSIONS: dict[str, tuple[int, int, int, int]] = {"observe": (1, 5, 0, 1), "ledger": (1, 3, 0, 1),
-                                                  "secret": (1, 3, 0, 2), "read_orders": (2, 3, 0, 2),
+                                                  "secret": (1, 3, 0, 2), "read_orders": (1, 3, 0, 2),   # core 0.8.0: S1
                                                   "sabotage": (2, 4, 8, 1)}
+# core 0.8.0 (docs/SPY_V2.md 5.1, 10): mission short id -> its `intel` kind (each_turn | once | once_per_target |
+# effect | no); the simulator re-reads it from its pack (older cores: each_turn for all)
+MISSION_INTEL: dict[str, str] = {"observe": "no", "ledger": "no", "secret": "once", "read_orders": "once_per_target",
+                                 "sabotage": "effect"}
+DEEP_KINDS = frozenset({"once", "once_per_target", "effect"})   # the «deep» missions of docs/SPY_V2.md 10
+WARD_COST_ALLOY = 5         # registry default of spy.ward.cost (3 with watch_drill: the bot plans with the full price)
 # disposition short id -> provisions per point of conquest value (before the faction multiplier)
 DISPOSITION_FOOD: dict[str, int] = {"subjugate": 5, "exterminate": 0, "raid": 0, "liberate": 0}
 CONQUEST_VALUE: dict[str, int] = {"capital": 3}     # province type short id -> value (others 1)
@@ -78,6 +84,8 @@ class Province:
     status: Mapping[str, Any] = field(default_factory=dict)  # public conquest status (occupied, ruined_until, ...)
     origin: str | None = None  # the seat that started with it (conquest games)
     building_now: tuple[str, ...] = ()  # short ids building here (own provinces; others: great works only)
+    # core 0.8.0: (short id, turns_left) of the builds here as shown (a stalled one keeps its turns_left)
+    work_left: tuple[tuple[str, int], ...] = ()
     # core 0.7.0: the next shares of own builds paid in parts here (short resource id -> amount), summed
     share_due: Mapping[str, int] = field(default_factory=dict)
     # core 0.7.0 army fog: beyond sight only whether another seat's army stands there (`units` stays None)
@@ -138,6 +146,9 @@ class StateView:
     # stage 5 (docs/ABANDONED_LANDS.md 8, 13): own pending choices of mixed finds
     # [{province, id (short), name, default, choices: [{id, ev, risk}]}]; empty without them
     pending_finds: tuple[Mapping[str, Any], ...] = ()
+    # core 0.8.0 (docs/TRADE.md 9): own offers and trades (`trades` of get_state); None: the game has no trade
+    trades: tuple[Mapping[str, Any], ...] | None = None
+    nicks: Mapping[str, str] = field(default_factory=dict)  # nick -> seat (trades name the other side by nick)
 
     def scoring(self, source: str) -> bool:
         """The score source is on in this game (it appears in the own breakdown)."""
@@ -268,6 +279,8 @@ def parse_state(payload: dict[str, Any], me: set[str] | frozenset[str]) -> State
             building_now=tuple(short_id(str(b.get("building"))) for b in record.get("building_now") or []
                                if isinstance(b, dict) and b.get("building")),
             share_due=_share_due(record.get("building_now")),
+            work_left=tuple((short_id(str(b.get("building"))), int(b.get("turns_left") or 0))
+                            for b in record.get("building_now") or [] if isinstance(b, dict) and b.get("building")),
             army=record["army"] if isinstance(record.get("army"), bool) else None,
             abandoned=bool(record.get("abandoned")) or pid in abandoned,
             ruins=bool(record.get("ruins")),
@@ -313,6 +326,10 @@ def parse_state(payload: dict[str, Any], me: set[str] | frozenset[str]) -> State
         intel=dict(player["intel"]) if isinstance(player.get("intel"), dict) else None,
         pending_finds=tuple({**e, "id": short_id(str(e.get("id")))} for e in state.get("discoveries_pending") or []
                             if isinstance(e, dict) and e.get("province")),
+        trades=(tuple(dict(t) for t in state["trades"] if isinstance(t, dict))
+                if isinstance(state.get("trades"), list) else None),
+        nicks={str(p["nick"]): str(p["seat"]) for p in state.get("players") or []
+               if isinstance(p, dict) and p.get("nick") is not None and p.get("seat") is not None},
     )
 
 

@@ -114,6 +114,16 @@
         "params": {
           "type": "object"
         },
+        "intel": {
+          "enum": [
+            "each_turn",
+            "once",
+            "once_per_target",
+            "effect",
+            "no",
+            false
+          ]
+        },
         "description": {
           "type": "string",
           "maxLength": 1000

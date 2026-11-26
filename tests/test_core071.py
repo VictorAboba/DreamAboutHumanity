@@ -20,6 +20,7 @@ from test_core070 import SEATS3, _orders
 
 CORE = DEFAULT_PACKS_DIR / "core"
 CORE070 = LEGACY_PACKS_DIR / "core-0.7.0"
+CORE071 = LEGACY_PACKS_DIR / "core-0.7.1"     # core 0.8.0 froze 0.7.1: the 0.7.0 -> 0.7.1 step is checked on the copy
 # ruleset hashes of the frozen core 0.7.0, as core 0.7.0 itself built them at 5ffd756 (measurement m9: quad4)
 CORE070_HASHES = {"slice3": "4ddde183cd4c", "slice2": "e11bb21ab379", "quad4": "e198c9bc95b4",
                   "blitz_test": "c7b543f770ee", "blitz_spy": "3362b0478502", "blitz_score": "d3aee839cf66",
@@ -48,7 +49,7 @@ def _take(st, rs, seat: str, src: str, dst: str = "P07"):
 # ---------------------------------------------------------------- freeze
 
 def test_core_070_is_frozen_exactly_with_its_hashes():
-    assert "version: 0.7.1" in (CORE / "pack.yaml").read_text(encoding="utf-8")
+    assert "version: 0.8.0" in (CORE / "pack.yaml").read_text(encoding="utf-8")
     head = (CORE070 / "pack.yaml").read_text(encoding="utf-8")
     assert "version: 0.7.0" in head and "Frozen copy of core 0.7.0" in head and "Do not edit" in head
     for sid, prefix in CORE070_HASHES.items():
@@ -62,13 +63,14 @@ def test_only_the_scenarios_and_the_version_moved_from_the_frozen_copy():
     for path in CORE070.rglob("*"):
         rel = path.relative_to(CORE070).as_posix()
         if path.is_file() and rel not in changed:
-            assert path.read_bytes().replace(b"\r\n", b"\n") == (CORE / rel).read_bytes().replace(b"\r\n", b"\n"), rel
+            assert path.read_bytes().replace(b"\r\n", b"\n") == (CORE071 / rel).read_bytes().replace(b"\r\n", b"\n"), rel
 
 
 @pytest.mark.parametrize("sid", SCORED)
 def test_the_scored_scenarios_turn_no_reclaim_on_and_only_it_changes(sid):
-    new, old = build_ruleset(None, sid), build_ruleset([str(CORE070)], sid)
+    new, old = build_ruleset([str(CORE071)], sid), build_ruleset([str(CORE070)], sid)
     assert sc.no_reclaim(new) and new.stat("score.war.no_reclaim") == 1
+    assert sc.no_reclaim(build_ruleset(None, sid))
     a, b = old.to_dict(), new.to_dict()
     assert (a.pop("packs"), b.pop("packs")) == ({"core": "0.7.0"}, {"core": "0.7.1"})
     for d in (b["stats"], *b["faction_stats"].values()):

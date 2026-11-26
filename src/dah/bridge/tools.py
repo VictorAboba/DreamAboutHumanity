@@ -22,8 +22,8 @@ _ORDER_ITEM = {
                    "units {юнит: число} или несколько приказов",
     "properties": {
         "kind": {"type": "string", "enum": ["move", "recruit", "build", "fortify", "research", "dispose", "policy",
-                                            "hire_shade", "spy", "recall", "discover"],
-                 "description": "dispose/policy — только с завоеванием, hire_shade/spy/recall и feint — только со "
+                                            "hire_shade", "spy", "recall", "ward", "discover"],
+                 "description": "dispose/policy — только с завоеванием, hire_shade/spy/recall/ward и feint — только со "
                                 "шпионажем, discover {province, choice} — выбор смешанной находки, только с Заброшенными "
                                 "землями (rules покажет разделы "
                                 "ЗАВОЕВАНИЕ, ШПИОНАЖ, ЗАБРОШЕННЫЕ)"},
@@ -34,7 +34,7 @@ _ORDER_ITEM = {
                                                   "(core:assault) или метка из get_state (штурм)"},
         "count": {"type": "integer", "minimum": 1, "description": "move/recruit: сколько юнитов"},
         "units": _UNITS,
-        "province": {"type": "string", "description": "recruit/build/fortify: провинция"},
+        "province": {"type": "string", "description": "recruit/build/fortify/ward (Застава): провинция"},
         "building": {"type": "string", "description": "build: здание (mine, barracks...)"},
         "tech": {"type": "string", "description": "research: технология — ID или название из list_techs "
                                                   "(только в Д, один приказ research на ход)"},
@@ -48,8 +48,10 @@ _ORDER_ITEM = {
                         "description": "dispose/policy: судьба провинции — ID или название (subjugate, raze, raid, "
                                        "release; список — rules(topic=\"conquest\")); policy: null — без политики"},
         "shade": {"type": ["string", "integer"], "description": "spy/recall: Тень (\"s1\" или 1) из list_spies"},
-        "mission": {"type": "string", "description": "spy: миссия — ID или название (observe, ledger, secret, read_orders, "
-                                                     "sabotage; список — rules(topic=\"spying\"))"},
+        "mission": {"type": "string", "description": "spy: миссия — ID или название (observe — состав точно и кто "
+                                                     "будет защищать провинцию; read_orders — удары по тебе и "
+                                                     "нарушения пактов; ledger, secret, sabotage; список — "
+                                                     "rules(topic=\"spying\"))"},
         "target": {"type": "string", "description": "spy: цель — провинция (P07) или ник игрока, по миссии"},
         "rounds": {"type": "integer", "minimum": 1, "description": "spy: срок задания в раундах (по одному за ход)"},
         "choice": {"type": "string", "description": "discover: вариант смешанной находки из строки НАХОДКА "
@@ -61,7 +63,8 @@ _EST_UNITS = {"anyOf": [{"type": "object", "additionalProperties": {"type": "int
                         {"type": "string"}],
               "description": "Юниты стороны: {юнит: число}, например {\"core:assault\": 4, \"core:armor\": 1}; "
                              "юнит — полный ID, короткий (assault) или метка из get_state (штурм). Или ID провинции "
-                             "с видимыми войсками (своей или соседней, \"P05\") — берутся все войска в ней"}
+                             "с видимыми войсками (своей или соседней, \"P05\") — берутся все войска в ней; "
+                             "у defender ещё ID донесения Наблюдения (\"r3\") — гарнизон и найм по нему"}
 EST_EXAMPLE = ('estimate(attacker={"core:assault": 4}, defender={"core:assault": 2}, province_type="core:agri", '
                'fortified=false)')
 _ORDERS = {"type": "array", "items": _ORDER_ITEM,
@@ -89,12 +92,16 @@ RESEARCH = '{"kind": "research", "tech": "deep_drilling"}'
 _ORDERS_HINT = (f" Плоская форма move: {FLAT_MOVE}; исследование: {RESEARCH}; если вложенные объекты теряются — "
                 "передай orders одной JSON-строкой.")
 _LIST_OR_STRING = {"anyOf": [{"type": "array", "items": {"type": "string"}}, {"type": "string"}]}
-RULE_TOPICS = ("turn, setup, units, buildings, orders, p2, combat, pacts, spying, conquest, discoveries, fog, "
+RULE_TOPICS = ("turn, setup, units, buildings, orders, p2, combat, pacts, trade, spying, conquest, discoveries, fog, "
                "messages, techs, factions, artifacts, abilities, resources, provinces, victory (очки, стройки, тайные "
                "цели)")
 DISPOSE = '{"kind": "dispose", "province": "P07", "disposition": "subjugate"}'
 SPY = '{"kind": "spy", "shade": "s1", "mission": "observe", "target": "P07", "rounds": 2}'
 SPY_ONLY = " Только в партиях со шпионажем."
+TRADE_ONLY = " Только в партиях с торговлей."
+_GOODS = {"anyOf": [{"type": "object"}, {"type": "string"}],
+          "description": "{ресурс: число}, например {\"alloy\": 10}; провинция {\"P07\": 1}, своё донесение "
+                         "(только в give) {\"r4\": 1}; пусто или {} — ничего"}
 
 
 @dataclass(frozen=True)
@@ -182,10 +189,10 @@ TOOLS: tuple[ToolSpec, ...] = (
                                                        "core:capital или метка из get_state: кузн., агро, пуст., "
                                                        "столица) либо ID провинции (P07); без него, если "
                                                        "defender — ID провинции, бой в ней"},
-                      "fortified": {"type": "boolean", "default": False,
-                                    "description": "Защитник укрепился (fortify)"},
-                      "hasty": {"type": "boolean", "default": False,
-                                "description": "Атака подана в П2 (наспех, штраф)"},
+                      "fortified": {"type": "boolean",
+                                    "description": "Защитник укрепился (fortify); без него — нет, а при "
+                                                   "defender=\"r3\" — по донесению"},
+                      "hasty": {"type": "boolean", "description": "Атака подана в П2 (наспех, штраф); без него — нет"},
                       "side": {"type": "string", "enum": ["attacker", "defender"],
                                "description": "Твоя сторона: на ней действуют твои технологии, артефакты и здания. "
                                               "Без него — по ID провинций (своя — твоя сторона, чужая армия у "
@@ -197,7 +204,8 @@ TOOLS: tuple[ToolSpec, ...] = (
                            f"донесение), миссии (сложность D, срок, нужное S), в П2 — пойманные у тебя.{SPY_ONLY} "
                            f"Задание — приказ {SPY}.", _schema()),
     ToolSpec("get_intel", "Донесения Теней (снимок конца Д, числа — интервалы с правдой внутри): без аргументов — "
-                          "свёрнутые донесения последнего разведсреза; report_id — одно донесение целиком; turn — "
+                          "свёрнутые донесения последнего разведсреза; report_id — одно донесение целиком "
+                          "(купленная копия — \"c1\"); turn — "
                           f"прошлый ход; shade — одна Тень.{SPY_ONLY} Пример: get_intel(report_id=\"r4\").",
              _schema({"turn": {"type": ["integer", "string"], "description": "Ход разведсреза (по умолчанию последний)"},
                       "shade": {"type": ["string", "integer"], "description": "Тень: \"s1\" или 1"},
@@ -251,6 +259,30 @@ TOOLS: tuple[ToolSpec, ...] = (
                            "leave_pact(id=\"pact-A-B-1\").",
              _schema({"id": {"type": "string", "description": "ID пакта"}}, ["id"])),
     ToolSpec("list_pacts", "Твои пакты и предложения (с ID) и все действующие пакты других (публично).", _schema()),
+    ToolSpec("propose_trade", "Предложить обмен (только П1 и П2): give — что отдаёшь, want — что просишь; одна "
+                              "сторона может быть пустой; провинция переходит в расчёте этого хода (ресурсы — в "
+                              "залоге до него), донесение — заверенной копией. Тому же игроку — одно открытое предложение: заменить — "
+                              "replaces=id, встречное на чужое — reply_to=id. Ответ — до конца хода. later — обещание "
+                              "на будущее {\"give\": {...}, \"want\": {...}, \"by_turn\": N}: игра его не "
+                              "исполняет, только помнит; fulfils=id — пометка «это исполнение обещания обмена id»."
+                              f"{TRADE_ONLY} Пример: propose_trade(to=\"Ник\", give={{\"alloy\": 10}}, "
+                              "want={\"provisions\": 15}).",
+             _schema({"to": {"type": "string", "description": "Ник"}, "give": _GOODS, "want": _GOODS,
+                      "later": {"anyOf": [{"type": "object"}, {"type": "string"}],
+                                "description": "Обещание: {\"give\": {...}, \"want\": {...}, \"by_turn\": N}"},
+                      "reply_to": {"type": "string", "description": "ID предложения тебе, на которое это встречное"},
+                      "replaces": {"type": "string", "description": "ID твоего открытого предложения, которое "
+                                                                    "это заменяет"},
+                      "fulfils": {"type": "string", "description": "ID обмена, обещание которого это исполняет"}},
+                     ["to"])),
+    ToolSpec("respond_trade", "Ответить на предложение обмена (только П1 и П2) до конца хода: accept — обмен "
+                              "исполняется сразу, если у обоих хватает свободного (с провинцией — в расчёте хода); reject — отказ, а для своего "
+                              f"предложения — отзыв.{TRADE_ONLY} Пример: respond_trade(id=\"trade-A-B-1\", "
+                              "decision=\"accept\").",
+             _schema({"id": {"type": "string", "description": "ID обмена из входящих или list_trades"},
+                      "decision": {"type": "string", "enum": ["accept", "reject"]}}, ["id", "decision"])),
+    ToolSpec("list_trades", f"Твои предложения обмена, сделки последних ходов и обещания (в любой фазе).{TRADE_ONLY}",
+             _schema()),
     ToolSpec("ready", "Нажать «готово», как только в фазе сказать и сделать больше нечего (фаза кончается, когда "
                       "готовы все). Старт и П1 — ready() без confirm_hash. Д и П2 — ready(confirm_hash=orders_hash "
                       "твоих текущих приказов): он есть в ответе submit_orders, в phase() и list_orders(); после "
@@ -312,6 +344,8 @@ EXAMPLES = {
     "propose_pact": 'propose_pact(to="Ник", turns=3) или propose_pact(to="Ник")',
     "respond_pact": 'respond_pact(id="pact-A-B-1", decision="accept")',
     "leave_pact": 'leave_pact(id="pact-A-B-1")',
+    "propose_trade": 'propose_trade(to="Ник", give={"alloy": 10}, want={"provisions": 15})',
+    "respond_trade": 'respond_trade(id="trade-A-B-1", decision="accept")',
 }
 
 
@@ -386,8 +420,8 @@ class Bridge:
                                                         _json_arg(_required(a, "patch"), dict, "patch")),
             # estimate: the server checks the arguments and answers with what was wrong and a correct call.
             "estimate": lambda a: client.estimate(_lenient_json(a.get("attacker")), _lenient_json(a.get("defender")),
-                                                  a.get("province_type"), a.get("fortified", False),
-                                                  a.get("hasty", False), a.get("side"), a.get("opponent")),
+                                                  a.get("province_type"), a.get("fortified"),
+                                                  a.get("hasty"), a.get("side"), a.get("opponent")),
             "get_setup": lambda a: _compact(client.get_setup(), SETUP_KEEP),
             "choose_faction": lambda a: client.choose_faction(
                 _lenient_json(_first(a, "prefs", "factions", "faction"), lists_only=True)),
@@ -403,6 +437,12 @@ class Bridge:
             "propose_pact": lambda a: client.propose_pact(_required(a, "to"), a.get("turns")),
             "respond_pact": lambda a: client.respond_pact(str(_required(a, "id")), _required(a, "decision")),
             "leave_pact": lambda a: client.leave_pact(str(_required(a, "id"))),
+            # trade: the server reads the forms it documents (flat or nested goods, a JSON string)
+            "list_trades": lambda a: _compact(client.list_trades(), ()),
+            "propose_trade": lambda a: client.propose_trade(
+                _required(a, "to"), _lenient_json(a.get("give")), _lenient_json(a.get("want")),
+                _lenient_json(a.get("later")), _any(a, "reply_to"), _any(a, "replaces"), _any(a, "fulfils")),
+            "respond_trade": lambda a: client.respond_trade(str(_first(a, "id", "trade_id")), _required(a, "decision")),
             "ready": lambda a: client.ready(None if a.get("confirm_hash") in (None, "") else str(a["confirm_hash"])),
             "unready": lambda a: client.unready(),
             "history": lambda a: client.history(a.get("turn")),

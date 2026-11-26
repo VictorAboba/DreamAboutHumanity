@@ -22,6 +22,10 @@ in those held) or its branch first in research.
 Stage 5 (docs/ABANDONED_LANDS.md 14.1, dah.bots.finds): cautious in Abandoned land: only an army of 4 units or more
 goes where a find may lie; the ruins' guard and a find's neutrals at estimate >= 0.8 (a lair >= 0.95); mixed finds by
 its rank on the visible score.
+Core 0.8.0 (docs/SPY_V2.md 10): after the secret objective (turn 1, one point) its Shade reads the orders of the
+neighbour with the most troops at its borders (2 rounds, again once READ_EVERY turns have passed; in negotiation_2 it
+fortifies an own province such a book attacks), between them the ledger of its strongest neighbour; while it builds
+a great work and a neighbour's ledger showed S >= 2 it sets a Ward in the work's province.
 """
 
 from __future__ import annotations
@@ -71,9 +75,11 @@ CITADEL = "citadel"
 CITADEL_TECH = "fortification"
 CITADEL_SPARE = 12  # alloy left after a citadel (one assault)
 SHADE_FROM_TURN = 3
-SHADE_MIN_ALLOY = 35
+SHADE_MIN_ALLOY = 28   # balance core 0.8.0: was 35 (a lost Shade came back too late: G5 pace on slice3)
 LEDGER_ROUNDS = 2
 SECRET_ROUNDS = 2      # core 0.6.0: the secret objective mission (one report is enough)
+READ_ROUNDS = 2        # core 0.8.0: Read Orders of the neighbour at its borders
+READ_EVERY = 3         # ... again once this many turns have passed since the last report on that seat
 MONUMENT = "monument"   # stage 4: great works (docs/SCORING.md 10)
 SPIRE = "dream_spire"
 FIND_ARMY = 4           # stage 5: an army into Abandoned land that may hold a find (dah.bots.finds)
@@ -83,6 +89,7 @@ LAIR_MARGIN = 0.2       # a lair: >= 0.95 (late: 0.8)
 
 class BuilderBot(Bot):
     name = "builder"
+    trade_policy = "builder"  # core 0.8.0 (docs/TRADE.md 12.1, dah.bots.trade)
     faction_style = ("litany", "ash_choir", "growth", "captains", "synclite")
     artifact_likes = ("ore_vein", "tithe_chalice", "citadel_keystone", "ancient_blueprint", "smith_relic")
     branch_priority = ("industry", "mirrors", "war", "mystery", "logistics")
@@ -207,16 +214,36 @@ class BuilderBot(Bot):
                 out.append(hire)
                 alloy -= spy.shade_cost()
             idle = spy.idle_shades(view)
-            target = spy.rival_target(view)       # core 0.7.0: a far rival too while intel points are left
-            if idle and target is not None and spy.can_start(view):
-                mission = spy.SECRET if spy.secret_wanted(view, self.memory, target) else "ledger"
-                got = spy.spy_order(view, idle[0], mission, target, SECRET_ROUNDS if mission == spy.SECRET
-                                    else LEDGER_ROUNDS, alloy, food)
+            plan = self._mission_plan(view)
+            if idle and plan is not None and spy.can_start(view):
+                mission, target, rounds = plan
+                got = spy.spy_order(view, idle[0], mission, target, rounds, alloy, food)
                 if got is not None:
                     out.append(got[0])
                     alloy -= got[1]
                     food -= got[2]
+            ward = spy.ward_order(view, self.memory, alloy)
+            if ward is not None:
+                out.append(ward[0])
+                alloy -= ward[1]
         return out, view.free_food() - food, view.resource(BUILD_RESOURCE) - alloy
+
+    def _mission_plan(self, view: StateView) -> tuple[str, str, int] | None:
+        """(mission, target, rounds): the secret objective first, then Read Orders of the seat with the most troops at
+        our borders (once READ_EVERY turns have passed since its last report), else the ledger of the strongest
+        neighbour (a far rival while intel points are left)."""
+        target = spy.rival_target(view)
+        if target is not None and spy.secret_wanted(view, self.memory, target):
+            return spy.SECRET, target, SECRET_ROUNDS
+        threat = spy.border_threat(view, lambda s: not view.is_partner(s)) or spy.border_threat(view)
+        if (threat is not None and "read_orders" in spy.MISSIONS and view.whisper >= spy.MISSIONS["read_orders"][0]
+                and view.turn - self.memory.read_turn.get(threat, -READ_EVERY) >= READ_EVERY):
+            return "read_orders", threat, READ_ROUNDS
+        return ("ledger", target, LEDGER_ROUNDS) if target is not None else None
+
+    def p2_orders(self, view: StateView, current: list[Order], cp_left: int, estimate: Estimator) -> list[Order]:
+        """Core 0.8.0: fortify the own provinces this turn's Read Orders report shows attacked."""
+        return spy.fortify_threatened(view, self.memory, current, cp_left)
 
     def _choose_build(self, view: StateView, upkeep: int) -> tuple[Province, str] | None:
         return choose_build(view, upkeep, temple=True)

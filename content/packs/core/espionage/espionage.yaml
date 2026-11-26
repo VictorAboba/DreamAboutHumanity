@@ -3,19 +3,25 @@
 # Core 0.6.0 (decision 26, measurement m7: four agents hired no Shade at all): a Shade costs 20 alloy (was 25) and
 # every seat holds one from the start for free (`free`, counted in the Shade limit); the new mission `secret` reads
 # what talk cannot give, the target's secret objective.
+# Core 0.8.0 (docs/SPY_V2.md, decision 30): intel points only for deep missions (`intel`: secret once a game,
+# read_orders once per rival, sabotage only when its strike did something); observe and ledger give information only;
+# observe is easier (D0) and exact, with the recruits and fortify of the turn; read_orders opens at S1 (D2).
 config:
   shade: {name: {ru: Тень, en: Shade}, cost: {alloy: 20}, upkeep: {provisions: 1}, free: 1}
-  ward: {cost: {alloy: 5}}     # Застава, stage 3b
+  ward: {cost: {alloy: 5}}     # Застава (core 0.8.0, docs/SPY_V2.md 4.6): +2 C_loc in its province this recon
 missions:
   - id: observe
     name: {ru: Наблюдение, en: Observe}
     behavior: observe_province
     target: province
-    difficulty: 1
+    difficulty: 0                # core 0.8.0: was 1 (docs/SPY_V2.md 3.3)
     rounds: [1, 5]
     requires: {whisper: 1}
     cost_per_round: {provisions: 1}
-    description: Юниты провинции по видам (интервалы), здания, стройка, укрепление прошлого хода, статус.
+    intel: "no"
+    params: {exact: true, planned: true}
+    description: >-
+      Юниты провинции точно, здания, стройка, статус; найм и укрепление в ней из книги этого хода.
   - id: ledger
     name: {ru: Счётная книга, en: Ledger}
     behavior: read_ledger
@@ -24,9 +30,11 @@ missions:
     rounds: [1, 3]
     requires: {whisper: 1}
     cost_per_round: {provisions: 1}   # was 2
+    intel: "no"
+    params: {army_total: true}
     description: >-
-      Свободные запасы места (интервалы), изученные технологии, активное исследование и прогресс, артефакты, Шёпот и
-      Зеркала цели, число её Теней.
+      Свободные запасы места (интервалы), армия всего (интервал), изученные технологии, активное исследование и
+      прогресс, артефакты, Шёпот и Зеркала цели, число её Теней.
   - id: secret
     name: {ru: Тайная цель, en: Secret Objective}
     behavior: read_objective
@@ -37,6 +45,7 @@ missions:
     requires: {whisper: 1}
     cost_per_round: {provisions: 2}
     requires_system: scoring.objectives
+    intel: once
     description: >-
       Тайная цель места: название, условие, очки и выполнена ли сейчас (на конец Д). Цель не меняется до конца
       партии: одного донесения хватит.
@@ -44,11 +53,14 @@ missions:
     name: {ru: Чтение приказов, en: Read Orders}
     behavior: read_orders
     target: seat
-    difficulty: 3
+    difficulty: 2                # core 0.8.0: was 3 at S2 (decision 30: from S1; S2 makes it better, not possible)
     rounds: [1, 3]
-    requires: {whisper: 2}
+    requires: {whisper: 1}
     cost_per_round: {provisions: 2}
-    description: Книга приказов цели на конец Д (в П2 приказы могли измениться); ложные записи можно разоблачить.
+    intel: once_per_target
+    description: >-
+      Книга приказов цели на конец Д (в П2 приказы могли измениться): сперва нарушения пактов и удары по тебе;
+      ложные записи можно разоблачить.
   - id: sabotage
     name: {ru: Саботаж, en: Sabotage}
     behavior: sabotage
@@ -58,6 +70,11 @@ missions:
     requires: {whisper: 2}
     cost: {alloy: 8}
     cost_per_round: {provisions: 1}
-    params: {deny_fortify: true, defense_mul: 0.85, income_mul: 0}
+    intel: effect
+    # core 0.8.0 (docs/SPY_V2.md 4.5): a build there stands for the turn (once per build a game); an occupation held
+    # with <= 1 unit revolts and keeps 2 militia without an owner
+    params: {deny_fortify: true, defense_mul: 0.85, income_mul: 0, stall_build: true, stall_max: 1,
+             unrest_units: 1, revolt_garrison: {militia: 2}}
     description: >-
-      Громкая миссия против провинции места: в расчёте этого хода укрепление сорвано, оборона ×0.85, доход 0.
+      Громкая миссия против провинции места: в расчёте этого хода укрепление сорвано, оборона ×0.85, доход 0;
+      стройка там стоит ход (раз на стройку); оккупация с 1 юнитом бунтует, остаются 2 ополченца.

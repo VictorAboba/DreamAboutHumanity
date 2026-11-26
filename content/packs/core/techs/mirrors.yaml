@@ -9,7 +9,6 @@
   unlocks: [mirror_hall]
   effects:
     - {effect: modify, target: spy.mirrors, op: add, value: 1}
-# 3b adds the Ward lines here: spy.ward.bonus +1, spy.ward.cost.alloy -2.
 - id: watch_drill
   name: {ru: Караульная выучка, en: Watch Drill}
   branch: mirrors
@@ -17,6 +16,8 @@
   cost: 10
   effects:
     - {effect: modify, target: spy.detect.army, op: add, value: 1}
+    - {effect: modify, target: spy.ward.bonus, op: add, value: 1}        # core 0.8.0: the Ward (docs/SPY_V2.md 4.6)
+    - {effect: modify, target: spy.ward.cost.alloy, op: add, value: -2}
 - id: glass_inquest
   name: {ru: Зеркальный дознаватель, en: Glass Inquest}
   branch: mirrors

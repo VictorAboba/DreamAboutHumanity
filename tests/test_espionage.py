@@ -205,7 +205,10 @@ def test_espionage_orders_validate(rs):
     assert ok(spy("s9", "observe", "B2", 1)).reason == "UNKNOWN_ID"
     assert ok({"kind": "spy", "shade": 1, "mission": "observe", "target": "B2"}).reason == "INVALID"
     assert ok({"kind": "recall", "shade": 1}).reason == "INVALID"              # not on a mission
-    assert ok({"kind": "ward", "province": "A1"}).reason == "NOT_AVAILABLE"     # stage 3b
+    # core 0.8.0 (docs/SPY_V2.md 4.6): the Ward is given in actions, in the seat's own province, one per province
+    assert ok({"kind": "ward", "province": "A1"}).ok
+    assert ok({"kind": "ward", "province": "B2"}).reason == "NOT_OWNER"
+    assert ok({"kind": "ward", "province": "A1"}, P2).reason == "PHASE_LOCKED"
     st.players["A"].techs = ["t3:veil"]
     assert ok(spy(sid, "sabotage", "M", 1)).reason == "BAD_TARGET"
     assert ok(spy(sid, "sabotage", "B2", 1)).ok

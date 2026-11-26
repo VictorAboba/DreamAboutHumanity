@@ -56,11 +56,20 @@ wins the penalty cost). Core 0.7.0 (decision 27) adds the `core 0.7.0` line (JSO
 (started / completed, turns), stalled works, seat-to-seat captures, `war_points` captures / recaptures / holds, provinces
 taken >= 3 times (ping-pong), pairs at the per-province cap, war per seat and seats at the total cap, the intel points
 per seat, Shade missions per game and the winner's points by source.
+
+Core 0.8.0 (docs/SPY_V2.md 10): with espionage on, the `spy v2` line and the gates printed as `######## spy gates`
+(JSON `spy_gates`; `spy` in the tallies): the bot checks (share of deep missions secret / read_orders / sabotage,
+missions after the intel cap per seat, the G5 pace of turns 10-12 against turns 1-3, the rush bot's P2 cancels and
+hasty attacks after a report) and the balance gates (Shade survival per mission, great works stopped by sabotage per
+game and those left unfinished, sabotage revolts per game, the shift of the win share per bot type against
+`--spy-base FILE` (the `--json-out` of the same run on the previous core, e.g. `--packs` with content/legacy/core-0.7.1),
+the intel share of the winner's score, read_orders points from one target per seat, empty Observations).
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import itertools
 import json
 import statistics
@@ -74,13 +83,14 @@ from dah.bots import BOT_TYPES
 from dah.bots.builder import BuilderBot
 from dah.bots.scout import ScoutBot
 from dah.bots.tactics import ArmyOk, Reserved
-from dah.bots.view import StateView
+from dah.bots.view import StateView, parse_state
 from dah.bots.base import Bot, seat_seed
 from dah.bots.client import ApiError
 from dah.bots.choices import pick_artifacts
 from dah.engine import (
     SeatOrders,
     SetupChoiceError,
+    cancel_order,
     artifact_pool,
     build_ruleset,
     check_artifacts,
@@ -94,6 +104,7 @@ from dah.engine import (
     orders_hash,
     resolve,
     resolve_setup,
+    rules_text,
     seat_reserved,
     setup_config,
     stat_key,
@@ -107,12 +118,14 @@ from dah.engine import discoveries as disc
 from dah.engine import espionage as esp
 from dah.engine.combat import unit_price
 from dah.engine import scoring as sc_
+from dah.engine import trade as tr
 from dah.engine.registry import SCORE_SOURCES, TURN_SOURCES
 from dah.engine.content import Ruleset
 from dah.engine.model import GameState
 from dah.engine.setup import artifact_choices, faction_choices
 
 PHASES = ("negotiation_1", "actions", "negotiation_2")
+REPLY_PASSES = 2        # core 0.8.0 (docs/TRADE.md 12.2): answer-only passes after a negotiation phase
 SEATS = ("A", "B", "C", "D", "E", "F", "G", "H")
 DEFAULT_CONFIGS = (
     "rush,builder,diplomat",
@@ -142,6 +155,12 @@ class Match:
         self.ops: list[dict[str, Any]] = []
         self.counts: Counter[tuple[str, str]] = Counter()
         self.recon: dict[str, Any] | None = None    # the last recon step (espionage)
+        self.messages: list[tuple[int, str, str, str]] = []     # (turn, phase, seat, text) of the bots' messages
+        self.recons: list[dict[str, Any]] = []      # every recon step played (a trade may sell any own report)
+        # core 0.8.0 (docs/TRADE.md 12.2): the trade ops of the game with what they did ({op, turn, phase, trade})
+        self.trade_log: list[dict[str, Any]] = []
+        self.gifts: list[tuple[int, str, str, str, dict[str, int]]] = []   # (turn, phase, from, to, resources)
+        self.state_line_max = 0     # the longest ОБМЕН line a seat's get_state showed (gate G7)
 
 
 _ESTIMATES: dict[Any, float] = {}
@@ -187,7 +206,32 @@ class EngineApi:
             _ESTIMATES[key] = estimate(self.m.rs, attacker, defender, province_type, fortified, hasty)["win_prob"]
         return _ESTIMATES[key]
 
+    def estimate_report(self, attacker: dict[str, int], report_id: str, hasty: bool) -> dict[str, Any]:
+        """Core 0.8.0: estimate(defender="r3") by one of the seat's Observation reports of this recon step (the
+        engine's `report_defender`, as the server; base stats, like `estimate`)."""
+        report = next((r for r in ((self.m.recon or {}).get("reports") or {}).get(self.seat, [])
+                       if r.get("id") == report_id), None)
+        if report is None or report.get("behavior") != esp.OBSERVE:
+            raise ApiError("UNKNOWN_ID", report_id)
+        d = esp.report_defender(report, self.m.state.turn, report_id,
+                                persists=bool(self.m.rs.stat("combat.fortify_persists")))
+        ptype = self.m.state.provinces[d["province"]].type
+        out = {"win_prob": self.estimate(attacker, d["units"], ptype, d["fortified"], hasty),
+               "defender": d["units"], "report": d["header"]}
+        if not d["fortified"]:
+            out["win_prob_if_fortified"] = self.estimate(attacker, d["units"], ptype, True, hasty)
+        return out
+
+    def cancel_order(self, order_id: str) -> dict[str, Any]:
+        s = self.m.state
+        res = cancel_order(s, self.m.rs, self.seat, self._book(), order_id, s.phase)
+        if not res.ok:
+            raise ApiError(str(res.reason), str(res.message))
+        self.m.books[self.seat] = res.book
+        return {"orders_hash": orders_hash(res.book)}
+
     def send_message(self, to: list[str] | str, text: str) -> dict[str, Any]:
+        self.m.messages.append((self.m.state.turn, self.m.state.phase, self.seat, text))
         return {}
 
     def ready(self, confirm_hash: str | None) -> dict[str, Any]:
@@ -225,7 +269,56 @@ class EngineApi:
     def send_gift(self, to: str, resources: dict[str, int]) -> dict[str, Any]:
         s, rs = self.m.state, self.m.rs
         reserved = seat_reserved(s, rs, self.seat, self._book())
-        return self._apply("gifts", lambda: dip.make_gift(s, rs, self.seat, to, resources, s.phase, reserved))
+        out = self._apply("gifts", lambda: dip.make_gift(s, rs, self.seat, to, resources, s.phase, reserved))
+        op = out["op"]
+        self.m.gifts.append((s.turn, s.phase, self.seat, op["recipient"], dict(op["resources"])))
+        return out
+
+    # core 0.8.0 (docs/TRADE.md 9, 12.2): trade, with the checks and limits of the live game
+    def _seat_ref(self, ref: Any) -> Any:
+        nicks = {p.nick: seat for seat, p in self.m.state.players.items()}
+        return nicks.get(ref, ref) if isinstance(ref, str) else ref
+
+    def _trade_ctx(self) -> tr.Ctx:
+        m = self.m
+        return tr.Ctx(reserved=lambda x: seat_reserved(m.state, m.rs, x, m.books.get(x, SeatOrders())),
+                      orders=lambda x: list(m.books.get(x, SeatOrders()).orders),
+                      report=lambda x, rid: own_report(m, x, rid), turn_limit=m.rs.scenario.turn_limit)
+
+    def propose_trade(self, to: str, give: dict[str, Any] | None = None, want: dict[str, Any] | None = None,
+                      **extra: Any) -> dict[str, Any]:
+        s, rs = self.m.state, self.m.rs
+        limit = rs.scenario.diplomacy_limits.get("trade_proposals_per_phase", 3)
+        try:
+            made = tr.make_offer(s, rs, self.seat, self._seat_ref(to), give, want, extra.get("later"),
+                                 extra.get("reply_to"), extra.get("replaces"), extra.get("fulfils"), s.phase,
+                                 self._trade_ctx())
+        except dip.DiplomacyError as exc:
+            raise ApiError(exc.code, exc.message) from None
+        if "already" in made:
+            return {"id": made["already"]["id"], "status": made["already"]["status"], "already": True}
+        if self.m.counts[(self.seat, "trade_proposals")] >= limit:
+            raise ApiError("LIMIT_EXCEEDED", "trade_proposals")
+        trade = dip.apply_op(s, made)
+        self.m.ops.append(made)
+        self.m.counts[(self.seat, "trade_proposals")] += 1
+        self.m.trade_log.append({"op": made, "turn": s.turn, "phase": s.phase, "trade": copy.deepcopy(trade)})
+        return {"id": made["id"], "status": trade["status"]}
+
+    def respond_trade(self, trade_id: str, decision: str) -> dict[str, Any]:
+        s, rs = self.m.state, self.m.rs
+        try:
+            op = tr.make_answer(s, rs, self.seat, trade_id, decision, s.phase, self._trade_ctx())
+        except dip.DiplomacyError as exc:
+            raise ApiError(exc.code, exc.message) from None
+        trade = dip.apply_op(s, op)
+        self.m.ops.append(op)
+        self.m.trade_log.append({"op": op, "turn": s.turn, "phase": s.phase, "trade": copy.deepcopy(trade)})
+        return {"id": trade["id"], "status": trade["status"]}
+
+    def list_trades(self) -> dict[str, Any]:
+        s = self.m.state
+        return {"trades": [tr.trade_json(t, self.seat, lambda x: s.players[x].nick) for t in tr.mine(s, self.seat)]}
 
     def propose_pact(self, to: str, turns: int | None) -> dict[str, Any]:
         s = self.m.state
@@ -241,6 +334,30 @@ class EngineApi:
 
 
 # ---------------------------------------------------------------- one game
+
+def own_report(m: Match, seat: str, rid: str) -> dict[str, Any] | None:
+    """One of the seat's own reports of the recon steps played so far (`Game.find_report` without copies)."""
+    if not rid.startswith("r"):
+        return None
+    for rep in reversed(m.recons):
+        for r in (rep.get("reports") or {}).get(seat, []):
+            if r.get("id") == rid:
+                return r
+    return None
+
+
+def reply_passes(m: Match, bots: dict[str, Bot], apis: dict[str, EngineApi]) -> None:
+    """Core 0.8.0 (docs/TRADE.md 12.2): after a negotiation phase's pass, up to REPLY_PASSES passes in which the seats
+    with open offers made to them only answer (the `[DAH]` wake of the live game), so an offer of a later seat to an
+    earlier one is answered in the same phase."""
+    for _ in range(REPLY_PASSES):
+        waiting = [seat for seat in sorted(bots) if m.state.players[seat].alive and tr.waiting_for(m.state, seat)]
+        if not waiting:
+            return
+        for seat in waiting:
+            me = {seat, m.state.players[seat].nick}
+            bots[seat].answer_trades(parse_state(apis[seat].state(), me), apis[seat])
+
 
 def setup_view(rs: Ruleset, setup: dict[str, Any], offer: list[str]) -> dict[str, Any]:
     """What `GET /v1/setup` gives a seat while the phase is open (the parts the bots read)."""
@@ -326,6 +443,8 @@ def play_game(rs: Ruleset, kinds: dict[str, str], seed: str, setup: dict[str, An
     central_by_turn: dict[int, dict[str, int]] = {}
     central = central_provinces(rs)
     espionage = rs.system("espionage")
+    trade = tr.on(rs)
+    transfers: list[dict[str, Any]] = []        # core 0.8.0: trade events of the resolutions
     while m.state.phase != "game_over":
         m.books, m.ops = {}, []
         for phase in PHASES:
@@ -333,11 +452,18 @@ def play_game(rs: Ruleset, kinds: dict[str, str], seed: str, setup: dict[str, An
                 m.state.phase = "actions"
                 m.state, m.recon = esp.recon(m.state, m.books, rs, seed)
                 recons.append(m.recon)
+                m.recons.append(m.recon)
             m.state.phase = phase
             m.counts.clear()
             for seat in sorted(kinds):
                 if m.state.players[seat].alive:
                     bots[seat].play_phase(apis[seat], phase, {seat, m.state.players[seat].nick})
+            if trade and phase != "actions":
+                for seat in sorted(kinds):      # what get_state shows before the answers (gate G7)
+                    if m.state.players[seat].alive:
+                        line = tr.state_line(m.state, rs, seat, lambda x: m.state.players[x].nick)
+                        m.state_line_max = max(m.state_line_max, len(line))
+                reply_passes(m, bots, apis)
         turn = m.state.turn
         m.state.phase = "resolution"
         alive = [s for s, p in m.state.players.items() if p.alive]
@@ -400,7 +526,16 @@ def play_game(rs: Ruleset, kinds: dict[str, str], seed: str, setup: dict[str, An
             "placed": len((layout or {}).get("finds") or {}),
             # core 0.7.0 (decision 27): the total war cap each seat plays under (0 = none)
             "war_total_cap": {s: int(rs.stat("score.war.province_total", stat_key(m.state, rs, s)))
-                              for s in m.state.players}}
+                              for s in m.state.players},
+            # core 0.8.0 (docs/SPY_V2.md 10): the intel cap, the great works, the bots' P2 decisions after a report
+            "intel_cap": int(rs.stat("score.intel.cap")) if sc_.on(rs, "intel") else None,
+            "great_works": sorted(b for b, bd in rs.buildings.items() if bd.score),
+            "decisions": {s: dict(b.memory.decisions) for s, b in bots.items() if b.memory.decisions},
+            # core 0.8.0 (docs/TRADE.md 12.2): the trade ops, gifts, the bots' promises, the ОБМЕН line, the end map
+            "trade": trade, "trade_log": m.trade_log, "gifts": m.gifts, "state_line_max": m.state_line_max,
+            "promises": {s: dict(b.trade_mem.promises) for s, b in bots.items()},
+            "final_owner": {pid: p.owner for pid, p in m.state.provinces.items()},
+            "ptype": {pid: short(p.type) for pid, p in m.state.provinces.items()}}
 
 
 def _abandoned_points(rs: Ruleset, state: GameState, abandoned: list[str]) -> dict[str, int]:
@@ -465,6 +600,8 @@ class Tally:
         self.tier2_seats = 0
         self.seat_rows: list[tuple[str, str, list[str], float]] = []  # (faction, bot type, artifacts, win share)
         self.s3 = Stage3Tally()
+        self.sv2 = SpyTally()      # core 0.8.0 (docs/SPY_V2.md 10)
+        self.trd = TradeTally()    # core 0.8.0 (docs/TRADE.md 12.2)
         self.s4 = ScoreTally()
         self.s5 = DiscoveryTally()
 
@@ -532,6 +669,8 @@ class Tally:
                           "pact_joint"):
                 self.diplo[kind] += 1
         self.s3.add(g)
+        self.sv2.add(g)
+        self.trd.add(g)
         self.s4.add(g)
         self.s5.add(rs, g)
         if first_cap is None:
@@ -724,6 +863,179 @@ class Stage3Tally:
         return out
 
 
+DEEP_MISSIONS = ("secret", "read_orders", "sabotage")    # docs/SPY_V2.md 10: the «deep» missions
+EARLY_TURNS = (1, 2, 3)         # G5: the pace of the first turns ...
+LATE_TURNS = (10, 11, 12)       # ... against the last ones (a shorter game: its last three turns)
+
+
+class SpyTally:
+    """Core 0.8.0 (docs/SPY_V2.md 10): the bot checks and the balance gates of espionage v2."""
+
+    def __init__(self) -> None:
+        self.games = 0
+        self.seats = 0
+        self.started: Counter[str] = Counter()          # mission -> started
+        self.after_cap = 0                              # missions started by a seat already at the intel cap
+        self.cap_seats = 0                              # seats that reached the cap
+        self.early = 0                                  # missions started on EARLY_TURNS
+        self.late = 0                                   # ... on the last three turns
+        self.late_turns = 0                             # turns counted as late (a shorter game has fewer)
+        self.early_turns = 0
+        self.ended: Counter[str] = Counter()            # end reason -> count (all missions)
+        self.observe_ended: Counter[str] = Counter()    # end reason -> count (observe)
+        self.decisions: Counter[str] = Counter()        # rush: cancel | hasty after a report
+        self.stopped_works = 0                          # great works a sabotage stopped (each stop)
+        self.stopped_unfinished = 0                     # ... of them not completed by the end
+        self.stopped_builds = 0                         # any build a sabotage stopped
+        self.revolts = 0                                # occupation revolts by sabotage
+        self.winner_intel: list[float] = []             # intel share of each winner's final score
+        self.read_points: Counter[tuple[int, str, str]] = Counter()   # (game, seat, target) -> read_orders points
+        self.wards = 0
+        self.points_by_kind: Counter[str] = Counter()
+
+    def add(self, g: dict[str, Any]) -> None:
+        recons = g.get("recons") or []
+        if not recons:
+            return
+        self.games += 1
+        game = self.games
+        self.seats += len(g["kinds"])
+        cap = g.get("intel_cap")
+        parts = g.get("parts_by_turn") or {}
+        last = g.get("turns") or 0
+        late = set(range(max(1, last - 2), last + 1)) if last < LATE_TURNS[-1] else set(LATE_TURNS)
+        self.late_turns += len(late)
+        self.early_turns += len([t for t in EARLY_TURNS if t <= last])
+        capped: set[str] = set()
+        for rep_ in recons:
+            turn = int(rep_.get("turn") or 0)
+            for st in rep_.get("started", []):
+                mid = short(st["mission"])
+                self.started[mid] += 1
+                if turn in EARLY_TURNS:
+                    self.early += 1
+                if turn in late:
+                    self.late += 1
+                done = (parts.get(turn - 1) or {}).get(st["seat"], {}).get("intel", 0)
+                if cap and done >= cap:
+                    self.after_cap += 1
+                    capped.add(st["seat"])
+            for e in rep_.get("ended", []):
+                self.ended[e["reason"]] += 1
+                if short(e["mission"]) == "observe":
+                    self.observe_ended[e["reason"]] += 1
+            for pt in rep_.get("intel_points") or []:
+                self.points_by_kind[pt.get("kind", "each_turn")] += 1
+                if short(pt["mission"]) == "read_orders" and pt.get("kind") == "once_per_target":
+                    self.read_points[(game, pt["seat"], pt["target"])] += int(pt["points"])
+            self.wards += len(rep_.get("wards") or [])
+        self.cap_seats += len(capped)
+        for seat, d in (g.get("decisions") or {}).items():
+            self.decisions.update(d)
+        works = set(g.get("great_works") or ())
+        done_works = {(e["seat"], e["province"], e["building"]) for e in g["events"] if e["kind"] == "work_completed"}
+        stopped: set[tuple[str, str, str]] = set()
+        for e in g["events"]:
+            if e["kind"] == "build_sabotaged":
+                self.stopped_builds += 1
+                if e.get("building") in works:
+                    self.stopped_works += 1
+                    stopped.add((e["seat"], e["province"], e["building"]))
+            elif e["kind"] == "occupation_revolt" and e.get("reason") == "sabotage":
+                self.revolts += 1
+            elif e["kind"] == "intel_point":
+                self.points_by_kind[e.get("intel_kind", "effect")] += 1
+        self.stopped_unfinished += len(stopped - done_works)
+        for w in g.get("winners") or []:
+            sp = (g.get("score_parts") or {}).get(w) or {}
+            total = sum(v for v in sp.values() if v > 0)
+            if total > 0:
+                self.winner_intel.append(sp.get("intel", 0) / total)
+
+    def summary(self) -> dict[str, Any]:
+        started = sum(self.started.values())
+        ended = sum(self.ended.values())
+        obs = sum(self.observe_ended.values())
+        g = self.games or 1
+        early = self.early / self.early_turns if self.early_turns else None
+        late = self.late / self.late_turns if self.late_turns else None
+        return {
+            "games": self.games, "missions": dict(sorted(self.started.items())),
+            "deep_share": sum(self.started[m] for m in DEEP_MISSIONS) / started if started else None,
+            "after_cap_per_capped_seat": self.after_cap / self.cap_seats if self.cap_seats else None,
+            "capped_seats": self.cap_seats,
+            "pace_early": early, "pace_late": late,
+            "late_vs_early": late / early if early else None,
+            "rush_p2_after_report": dict(self.decisions),
+            "shade_survival": 1 - self.ended["caught"] / ended if ended else None,
+            "works_stopped_per_game": self.stopped_works / g, "builds_stopped_per_game": self.stopped_builds / g,
+            "stopped_unfinished_share": self.stopped_unfinished / self.stopped_works if self.stopped_works else None,
+            "sabotage_revolts_per_game": self.revolts / g,
+            "winner_intel_share": statistics.mean(self.winner_intel) if self.winner_intel else None,
+            "read_orders_points_max_per_target": max(self.read_points.values()) if self.read_points else None,
+            "empty_observe_share": self.observe_ended["empty"] / obs if obs else None,
+            "wards_per_game": self.wards / g, "intel_points_by_kind": dict(sorted(self.points_by_kind.items())),
+        }
+
+    def report(self) -> list[str]:
+        if not self.games:
+            return []
+        sm = self.summary()
+
+        def pct(x: float | None) -> str:
+            return "-" if x is None else f"{100 * x:.0f}%"
+
+        after = sm["after_cap_per_capped_seat"]
+        return [f"  spy v2: deep missions {pct(sm['deep_share'])}; after the intel cap "
+                f"{'-' if after is None else f'{after:.2f}'}/capped seat; pace turns 10-12 vs 1-3 {pct(sm['late_vs_early'])}; works stopped "
+                f"{sm['works_stopped_per_game']:.2f}/game (unfinished {pct(sm['stopped_unfinished_share'])}); "
+                f"sabotage revolts {sm['sabotage_revolts_per_game']:.2f}/game; wards {sm['wards_per_game']:.2f}/game; "
+                f"empty observe {pct(sm['empty_observe_share'])}; rush P2 after a report {sm['rush_p2_after_report']}"]
+
+
+def spy_gates(t: SpyTally, win: dict[str, float], base: dict[str, float] | None) -> list[dict[str, Any]]:
+    """docs/SPY_V2.md 10: the bot checks (a miss is a bug in a bot) and the balance gates. `win`: win share per bot
+    type of this run; `base`: the same of the previous core (`--spy-base`), or None."""
+    rows: list[dict[str, Any]] = []
+    sm = t.summary()
+
+    def row(name: str, value: Any, corridor: str, ok: bool | None, gate: bool = True) -> None:
+        status = "-" if ok is None else ("PASS" if ok else "FAIL") if gate else ("track" if ok else "miss")
+        rows.append({"name": name, "value": round(value, 3) if isinstance(value, float) else value,
+                     "corridor": corridor, "status": status, "gate": gate})
+
+    deep = sm["deep_share"]
+    row("bots: deep missions (secret / read_orders / sabotage)", deep, ">= 0.45", None if deep is None else deep >= 0.45)
+    after = sm["after_cap_per_capped_seat"]
+    row("bots: missions after the intel cap per capped seat", after, ">= 1.5", None if after is None else after >= 1.5)
+    pace = sm["late_vs_early"]
+    row("bots G5: mission pace turns 10-12 vs 1-3", pace, ">= 0.60", None if pace is None else pace >= 0.60)
+    p2 = sum(sm["rush_p2_after_report"].values())
+    row("bots: rush attacks cancelled or joined in P2 after a report", p2, "> 0", p2 > 0)
+    surv = sm["shade_survival"]
+    row("Shade survival per mission", surv, "0.65-0.80", None if surv is None else 0.65 <= surv <= 0.80)
+    stop = sm["works_stopped_per_game"]
+    row("great works stopped by sabotage per game", stop, "0.3-1.5", 0.3 <= stop <= 1.5)
+    left = sm["stopped_unfinished_share"]
+    row("stopped works left unfinished", left, "<= 0.25", None if left is None else left <= 0.25)
+    rev = sm["sabotage_revolts_per_game"]
+    row("revolts by sabotage per game", rev, "<= 1", rev <= 1)
+    if base:
+        shift = {k: round(win.get(k, 0.0) - base.get(k, 0.0), 3) for k in sorted(set(win) | set(base))}
+        row("win share shift per bot type vs --spy-base", shift, "<= 0.05 each",
+            all(abs(v) <= 0.05 for v in shift.values()))
+    else:
+        row("win share shift per bot type vs --spy-base", "no base", "<= 0.05 each", None)
+    share = sm["winner_intel_share"]
+    row("intel share of the winner's score", share, "<= 0.10", None if share is None else share <= 0.10)
+    most = sm["read_orders_points_max_per_target"]
+    row("read_orders points from one target per seat (engine, once_per_target)", most, "<= 1",
+        None if most is None else most <= 1)
+    empty = sm["empty_observe_share"]
+    row("empty Observations", empty, "<= 0.35", None if empty is None else empty <= 0.35)
+    return rows
+
+
 IDLE_TURN = 8          # SCORING.md 10: idle stocks "к ходу 8" (the last turn of a shorter game)
 NO_CENTRE_TURN = 6     # ... the seat without central provinces "на ходу 6"
 FEED_FIGHTS = 3        # a war pair is flagged as feeding: >= this many credits one way and none back, or a pact
@@ -731,6 +1043,214 @@ FEED_FIGHTS = 3        # a war pair is flagged as feeding: >= this many credits 
 PROFILE_KINDS = {"great_work": "builder", "hold_foreign": "rush", "capital_other": "rush",
                  "rival_capital_taken": "rush"}
 PROFILE_BRANCHES = {"war": "rush", "industry": "builder", "logistics": "diplomat"}
+
+
+IDLE_STOCK = 30          # core 0.8.0 (docs/TRADE.md 12.2): a resource at or above this at a turn's end is idle
+RECAPTURE_WINDOW = 3     # turns: a province given away and taken back by its giver (report constant, docs/TRADE.md 13.2)
+
+
+def _amount_sum(side: dict[str, Any] | None) -> int:
+    return sum(int(n) for n in ((side or {}).get("resources") or {}).values())
+
+
+class TradeTally:
+    """Core 0.8.0 (docs/TRADE.md 12.2): trades settled per game, by kind, rates of resource-for-resource trades,
+    province transfers and their price, report copies, failures by reason, lapsed offers, the bots' promises kept /
+    broken, transfers taken back by their giver within RECAPTURE_WINDOW turns (by the giver's bot type), objectives
+    met with a bought province, and per bot type the idle resource-turns (stock >= IDLE_STOCK at a turn's end) and the
+    final stocks. The idle and final figures are kept with trade off too (the base of gate G2)."""
+
+    def __init__(self) -> None:
+        self.games = 0          # games with trade on
+        self.seen = 0           # all games (idle / final)
+        self.settled: list[int] = []
+        self.kinds: Counter[str] = Counter()            # resources | province | report
+        self.proposed = 0
+        self.proposed_by: Counter[str] = Counter()      # bot type
+        self.accepted_by: Counter[str] = Counter()      # bot type of the answerer
+        self.rejected = 0
+        self.failed: Counter[str] = Counter()
+        self.lapsed = 0
+        self.rates: dict[str, list[float]] = defaultdict(list)
+        self.province_prices: list[int] = []
+        self.transfers = 0
+        self.reports = 0
+        self.promises: Counter[str] = Counter()
+        self.recapture: Counter[str] = Counter()
+        self.hold_type = [0, 0]         # [met, met while holding a bought province of the type]
+        self.hold_foreign_traded = 0    # hold_foreign met while holding a traded province (via: capture excludes it)
+        self.idle: dict[str, list[int]] = defaultdict(list)
+        self.final: dict[str, list[int]] = defaultdict(list)
+        self.state_line_max = 0
+
+    def add(self, g: dict[str, Any]) -> None:
+        kinds = g["kinds"]
+        self.seen += 1
+        for seat, kind in kinds.items():
+            self.idle[kind].append(sum(1 for t in sorted(g["res_by_turn"])
+                                       for n in g["res_by_turn"][t].get(seat, {}).values() if n >= IDLE_STOCK))
+            self.final[kind].append(sum(g["resources"][seat].values()))
+        if not g.get("trade"):
+            return
+        self.games += 1
+        self.state_line_max = max(self.state_line_max, g.get("state_line_max", 0))
+        for e in g["trade_log"]:
+            op = e["op"]
+            if op["op"] == "trade_offer":
+                self.proposed += 1
+                self.proposed_by[kinds[op["sender"]]] += 1
+            elif op.get("accept"):
+                self.accepted_by[kinds[op["seat"]]] += 1
+            elif op["seat"] != e["trade"]["a"]:
+                self.rejected += 1
+        settled = 0
+        received: dict[str, set[str]] = defaultdict(set)    # seat -> provinces it got by trade
+        transfers: list[dict[str, Any]] = []
+        for e in g["events"]:
+            kind = e["kind"]
+            if kind == "trade_settled":
+                settled += 1
+                give, want = e.get("give") or {}, e.get("want") or {}
+                if give.get("provinces") or want.get("provinces"):
+                    self.kinds["province"] += 1
+                    self.province_prices.append(_amount_sum(want if give.get("provinces") else give))
+                elif give.get("reports"):
+                    self.kinds["report"] += 1
+                    self.reports += len(give["reports"])
+                else:
+                    self.kinds["resources"] += 1
+                    gr, wr = give.get("resources") or {}, want.get("resources") or {}
+                    if len(gr) == 1 and len(wr) == 1:
+                        (r1, n1), (r2, n2) = next(iter(gr.items())), next(iter(wr.items()))
+                        self.rates[f"{short(r1)}→{short(r2)}"].append(n2 / n1)
+            elif kind == "trade_failed":
+                self.failed[e.get("reason") or "?"] += 1
+            elif kind == "trade_lapsed":
+                self.lapsed += 1
+            elif kind == tr.TRANSFERRED:
+                self.transfers += 1
+                received[e["to"]].add(e["province"])
+                transfers.append(e)
+        self.settled.append(settled)
+        for t in transfers:
+            if any(c["kind"] == "captured" and c.get("province") == t["province"] and c.get("to") == t["from"]
+                   and t["turn"] < c["turn"] <= t["turn"] + RECAPTURE_WINDOW for c in g["events"]):
+                self.recapture[kinds[t["from"]]] += 1
+        for counts in (g.get("promises") or {}).values():
+            self.promises.update(counts)
+        for seat, entries in (g.get("objectives") or {}).items():
+            held = {pid for pid in received.get(seat, ()) if g["final_owner"].get(pid) == seat}
+            for o in entries:
+                okind, params = g["objective_kinds"].get(o["id"], (None, {}))
+                if not o.get("met"):
+                    continue
+                if okind == "hold_type":
+                    self.hold_type[0] += 1
+                    self.hold_type[1] += any(g["ptype"].get(pid) == short(str(params.get("type", ""))) for pid in held)
+                elif okind == "hold_foreign" and held:
+                    self.hold_foreign_traded += 1
+
+    def summary(self) -> dict[str, Any]:
+        g = max(1, self.games)
+
+        def mean(v: list[int]) -> float | None:
+            return statistics.mean(v) if v else None
+
+        kept, broken = self.promises["kept"], self.promises["broken"]
+        return {"games": self.games, "settled_median": statistics.median(self.settled) if self.settled else None,
+                "settled_per_game": sum(self.settled) / g, "by_kind": dict(self.kinds),
+                "proposed_per_game": self.proposed / g, "proposed_by": dict(self.proposed_by),
+                "accepted_by": dict(self.accepted_by), "rejected_per_game": self.rejected / g,
+                "failed": dict(self.failed), "lapsed_per_game": self.lapsed / g,
+                "rates": {k: {"median": statistics.median(v), "min": min(v), "max": max(v), "n": len(v)}
+                          for k, v in sorted(self.rates.items())},
+                "provinces_per_game": self.transfers / g,
+                "province_price": mean(self.province_prices), "reports_per_game": self.reports / g,
+                "promises": {"kept": kept, "broken": broken,
+                             "kept_rate": kept / (kept + broken) if kept + broken else None},
+                "transfer_recapture": dict(self.recapture),
+                "hold_type_met": self.hold_type[0], "hold_type_bought": self.hold_type[1],
+                "hold_foreign_traded": self.hold_foreign_traded,
+                "idle_resource_turns": {k: mean(v) for k, v in sorted(self.idle.items())},
+                "final_resources": {k: mean(v) for k, v in sorted(self.final.items())},
+                "state_line_max": self.state_line_max}
+
+    def report(self) -> list[str]:
+        if not self.games:
+            return []
+        sm = self.summary()
+        rates = ", ".join(f"{k} {v['median']:.2f} (n={v['n']})" for k, v in list(sm["rates"].items())[:4]) or "-"
+        kept = sm["promises"]["kept_rate"]
+        price = sm["province_price"]
+        kinds = ", ".join(f"{k} {v}" for k, v in sorted(sm["by_kind"].items())) or "-"
+        return [f"  trade: settled {sm['settled_per_game']:.2f}/game (median {sm['settled_median']}), {kinds}; "
+                f"offers {sm['proposed_per_game']:.2f}/game, lapsed {sm['lapsed_per_game']:.2f}, failed "
+                f"{sm['failed'] or '-'}; rates {rates}; provinces {sm['provinces_per_game']:.2f}/game (price "
+                f"{'-' if price is None else f'{price:.1f}'}); report copies {sm['reports_per_game']:.2f}/game; "
+                f"promises kept {sm['promises']['kept']} / broken {sm['promises']['broken']} "
+                f"({'-' if kept is None else f'{100 * kept:.0f}%'}); recaptured transfers "
+                f"{sm['transfer_recapture'] or '-'}"]
+
+
+def trade_base(path: str | None) -> dict[str, Any] | None:
+    """The base of the trade gates (docs/TRADE.md 12.2): a `--json-out` of the same run with `--trade off` - its win
+    share per bot type and idle / final stocks."""
+    if not path:
+        return None
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if "ALL" not in data:
+        data = next((v for v in data.values() if isinstance(v, dict) and "ALL" in v), {})
+    al = data.get("ALL") or {}
+    return {"win": al.get("win_per_seat") or {},
+            **{k: (al.get("trade") or {}).get(k) or {} for k in ("idle_resource_turns", "final_resources")}}
+
+
+def trade_gates(rs: Ruleset, t: TradeTally, win: dict[str, float], base: dict[str, Any] | None
+                ) -> list[dict[str, Any]]:
+    """docs/TRADE.md 12.2, gates G1-G7 (`base`: trade_base(), or None: G1 and G2 are not measured)."""
+    rows: list[dict[str, Any]] = []
+    sm = t.summary()
+
+    def row(name: str, value: Any, corridor: str, ok: bool | None, gate: bool = True) -> None:
+        status = "-" if ok is None else ("PASS" if ok else "FAIL") if gate else ("track" if ok else "miss")
+        rows.append({"name": name, "value": round(value, 3) if isinstance(value, float) else value,
+                     "corridor": corridor, "status": status, "gate": gate})
+
+    if base and base.get("win"):
+        shift = {k: round(100 * (win.get(k, 0.0) - base["win"].get(k, 0.0)), 1) for k in sorted(win)}
+        row("G1: win share shift per bot type vs trade off (p.p.)", shift, "|shift| <= 10",
+            all(abs(v) <= 10 for v in shift.values()))
+    else:
+        row("G1: win share shift per bot type vs trade off (p.p.)", None, "|shift| <= 10 (--trade-base)", None)
+    for key, need, label in (("idle_resource_turns", 0.25, "idle resource-turns"),
+                             ("final_resources", 0.20, "final stocks")):
+        drops = {}
+        for kind in ("builder", "diplomat"):
+            old, new = (base or {}).get(key, {}).get(kind), sm[key].get(kind)
+            if old and new is not None:
+                drops[kind] = round(1 - new / old, 3)
+        row(f"G2: {label} drop, builder / diplomat", drops or None, f">= {need:.0%}",
+            all(v >= need for v in drops.values()) if drops else None)
+    med = sm["settled_median"]
+    row("G3: settled trades per game (median)", med, ">= 2", None if med is None else med >= 2)
+    row("G3: provinces passed by trade per 10 games", 10 * sm["provinces_per_game"], ">= 1",
+        10 * sm["provinces_per_game"] >= 1)
+    row("G4: hold_foreign met holding a traded province (via: capture excludes it)", sm["hold_foreign_traded"],
+        "0 (track: an upper bound)", sm["hold_foreign_traded"] == 0, gate=False)
+    met, bought = sm["hold_type_met"], sm["hold_type_bought"]
+    share = bought / met if met else None
+    row("G4: hold_type met holding a bought province of the type", share, "< 20%",
+        None if share is None else share < 0.2)
+    rec = sm["transfer_recapture"]
+    row("G5: transfers taken back by an honest giver (builder)", rec.get("builder", 0), "0", rec.get("builder", 0) == 0)
+    row("G5: transfers taken back by their giver, all bot types", rec or 0, "track (no war points: decision 28)",
+        True, gate=False)
+    row("G6: kingmaker against gifts", None, "not played (no forced kingmaker run)", None, gate=False)
+    text = rules_text(rs)
+    row("G7: rules core chars (rules_text, uncut)", len(text), "<= 6000, no «сокращено»",
+        len(text) <= 6000 and "сокращено" not in text)
+    row("G7: longest ОБМЕН line of get_state", sm["state_line_max"], "<= 160", sm["state_line_max"] <= 160)
+    return rows
 
 
 def objective_profile(kind: str, params: dict[str, Any]) -> str | None:
@@ -1636,6 +2156,8 @@ def report(name: str, t: Tally) -> list[str]:
     if len(t.f_seats) > 1 or t.a_seats or t.has_techs:
         out += stage2_report(t)
     out += t.s3.report()
+    out += t.sv2.report()
+    out += t.trd.report()
     out += t.s4.report()
     out += t.s5.report()
     return out
@@ -1745,6 +2267,16 @@ def sync_bot_numbers(rs: Ruleset) -> list[str]:
         for sid in sorted(set(bv.MISSIONS) - {short(f) for f in rs.missions}):     # e.g. `secret` on core 0.5.0
             changed.append(f"mission {sid} {bv.MISSIONS[sid]} -> none")
             bv.MISSIONS.pop(sid)
+        # core 0.8.0 (docs/SPY_V2.md 10): the missions' `intel` kinds and the Ward's price
+        intel = {short(f): md.intel for f, md in rs.missions.items()}
+        if intel != bv.MISSION_INTEL:
+            changed.append(f"intel {bv.MISSION_INTEL} -> {intel}")
+            bv.MISSION_INTEL.clear()
+            bv.MISSION_INTEL.update(intel)
+        ward = rs.espionage.ward_cost.get(build, 0)
+        if bv.WARD_COST_ALLOY != ward:
+            changed.append(f"ward {bv.WARD_COST_ALLOY} -> {ward}")
+        bv.WARD_COST_ALLOY = ward
     if rs.system("conquest"):
         for full, dd in rs.dispositions.items():
             value = dd.cost.get(food, 0)
@@ -1770,7 +2302,8 @@ def summary(t: Tally) -> dict[str, Any]:
             "techs_per_faction": {f: statistics.mean(v) for f, v in t.f_techs.items() if v},
             "techs_per_seat": {k: statistics.mean(v) for k, v in t.techs.items() if v},
             "synclite_win_per_seat": (t.f_wins["synclite"] / t.f_seats["synclite"]) if t.f_seats["synclite"] else None,
-            "stage3": t.s3.summary(), "scoring": t.s4.summary(), "discoveries": t.s5.summary()}
+            "stage3": t.s3.summary(), "spy": t.sv2.summary(), "scoring": t.s4.summary(), "discoveries": t.s5.summary(),
+            "trade": t.trd.summary()}
 
 
 def rotations(kinds: list[str]) -> list[dict[str, str]]:
@@ -1820,6 +2353,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="weight set: land (territory only), scenario (default), all (every source 1), both (land "
                          "and the scenario's) or SRC=W,... (repeatable)")
     ap.add_argument("--objectives", type=int, help="objectives dealt per seat (a host's --objectives)")
+    ap.add_argument("--spy-base", help="core 0.8.0: the --json-out of the same run on the previous core (the win "
+                                       "share shift of the spy gates, docs/SPY_V2.md 10)")
+    ap.add_argument("--trade", choices=("on", "off", "both"), help="core 0.8.0: trade (default: the scenario's)")
+    ap.add_argument("--trade-base", help="core 0.8.0: the --json-out of the same run with --trade off (gates G1, G2 of "
+                                         "docs/TRADE.md 12.2)")
     ap.add_argument("--json", action="store_true", help="print the tallies as JSON")
     ap.add_argument("--json-out", help="also write the JSON tallies to this file")
     args = ap.parse_args(argv)
@@ -1834,7 +2372,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     lines: list[str] = []
     data: dict[str, Any] = {}
-    combos = switch_combos(base, args.espionage, args.conquest, args.discoveries)
+    combos = switch_combos(base, args.espionage, args.conquest, args.discoveries, args.trade)
     try:
         knobs = discovery_knobs(args.discovery_knob)
     except ValueError as exc:
@@ -1853,11 +2391,12 @@ def main(argv: list[str] | None = None) -> int:
                 rs = build_ruleset(packs, args.scenario, systems=combo, scoring=weights, objectives=args.objectives,
                                    discoveries=knobs) \
                     if len(combos) > 1 or weights is not None or args.objectives is not None or knobs or any(
-                        v is not None for v in (args.espionage, args.conquest, args.discoveries)) else base
+                        v is not None for v in (args.espionage, args.conquest, args.discoveries, args.trade)) else base
             except Exception as exc:    # ContentError: a bad weight set
                 ap.error(str(exc))
             label = ",".join(f"{k}={'on' if rs.system(k) else 'off'}" for k in ("espionage", "conquest")
-                             + (("discoveries",) if "discoveries" in combo else ()))
+                             + (("discoveries",) if "discoveries" in combo else ())
+                             + (("trade",) if "trade" in combo else ()))
             if len(weight_sets) > 1 or weights is not None:
                 label += f",scoring={name}"
             if len(combos) > 1 or len(weight_sets) > 1:
@@ -1915,9 +2454,10 @@ def scoring_sets(rs: Ruleset, specs: list[str] | None) -> list[tuple[str, dict[s
 
 
 def switch_combos(rs: Ruleset, espionage: str | None, conquest: str | None,
-                  discoveries: str | None = None) -> list[dict[str, bool]]:
+                  discoveries: str | None = None, trade: str | None = None) -> list[dict[str, bool]]:
     """The switch combinations to play: each of `on|off|both` (None: the scenario's value). `discoveries` (stage 5,
-    ABANDONED_LANDS.md 14.2) joins the combination only when given or on in the scenario."""
+    ABANDONED_LANDS.md 14.2) joins the combination only when given or on in the scenario; `trade` (core 0.8.0) only
+    when given."""
     def values(name: str, arg: str | None) -> list[bool]:
         if arg == "both":
             return [True, False]
@@ -1926,8 +2466,11 @@ def switch_combos(rs: Ruleset, espionage: str | None, conquest: str | None,
         return [arg == "on"]
 
     finds = values("discoveries", discoveries) if discoveries is not None or rs.system("discoveries") else [None]
-    return [{"espionage": e, "conquest": c, **({} if d is None else {"discoveries": d})}
-            for e in values("espionage", espionage) for c in values("conquest", conquest) for d in finds]
+    trades = values("trade", trade) if trade is not None else [None]
+    return [{"espionage": e, "conquest": c, **({} if d is None else {"discoveries": d}),
+             **({} if x is None else {"trade": x})}
+            for e in values("espionage", espionage) for c in values("conquest", conquest) for d in finds
+            for x in trades]
 
 
 def discovery_knobs(items: list[str] | None) -> dict[str, Any] | None:
@@ -2021,8 +2564,29 @@ def run_combo(ap: argparse.ArgumentParser, args: argparse.Namespace, rs: Ruleset
     rows = corridors(rs, overall, per_config, probe, land if not rs.default_scoring else None)
     lines += corridor_lines(rows)
     data["corridors"] = rows
+    if overall.sv2.games:       # core 0.8.0 (docs/SPY_V2.md 10)
+        win = data["ALL"]["win_per_seat"]
+        gates = spy_gates(overall.sv2, win, spy_base(getattr(args, "spy_base", None)))
+        lines.append("######## spy gates (docs/SPY_V2.md 10; bots: a miss is a bot bug)")
+        lines += corridor_lines(gates)[1:]
+        data["spy_gates"] = gates
+    if overall.trd.games:       # core 0.8.0 (docs/TRADE.md 12.2)
+        gates = trade_gates(rs, overall.trd, data["ALL"]["win_per_seat"], trade_base(getattr(args, "trade_base", None)))
+        lines.append("######## trade gates (docs/TRADE.md 12.2)")
+        lines += corridor_lines(gates)[1:]
+        data["trade_gates"] = gates
     players = len([k for k in configs[0].split(",") if k.strip()]) if configs else 0
     return lines, data, played, {"overall": overall, "players": players, "scout": scout}
+
+
+def spy_base(path: str | None) -> dict[str, float] | None:
+    """The win share per bot type of a previous run (`--json-out`; its ALL tallies, or the first combination's)."""
+    if not path:
+        return None
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if "ALL" not in data:
+        data = next((v for v in data.values() if isinstance(v, dict) and "ALL" in v), {})
+    return (data.get("ALL") or {}).get("win_per_seat")
 
 
 def scout_sweep(rs: Ruleset, args: argparse.Namespace, configs: list[str],

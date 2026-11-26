@@ -176,7 +176,7 @@ def _stripped_core(tmp_path: Path) -> Path:
         m.write_text(re.sub(r"(?m)^# rotation.*\n^rotation:.*\n", "", m.read_text(encoding="utf-8")),
                      encoding="utf-8")
     sc = dst / "scenarios" / "scenarios.yaml"
-    text = sc.read_text(encoding="utf-8").replace(", discoveries: true}", "}")
+    text = sc.read_text(encoding="utf-8").replace(", discoveries: true", "")
     text = re.sub(r"(?m)^  discoveries:\n(?:    .*\n)+", "", text)
     sc.write_text(text[:text.index("- id: blitz_finds")], encoding="utf-8")
     return dst

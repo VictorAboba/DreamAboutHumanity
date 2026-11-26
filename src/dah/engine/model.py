@@ -78,13 +78,17 @@ class Player:
     # only grows; objectives [{id, target?}] are the seat's secret objectives (dealt at the start)
     tally: dict[str, Any] = field(default_factory=dict)
     objectives: list[dict[str, Any]] = field(default_factory=list)
+    # core 0.8.0 (docs/TRADE.md 2.3), left out of state_hash while empty: copies of reports bought in trades
+    # [{id: "c<k>", from, turn, source, trade, report}] (the content certified by the game, never its truth)
+    intel_copies: list[dict[str, Any]] = field(default_factory=list)
 
 
 PLAYER_STAGE2_FIELDS = ("techs", "research", "researching", "artifacts")
 PLAYER_STAGE3_FIELDS = ("home", "shades", "spy_seq", "conquest_policy")
 PLAYER_SCORE_FIELDS = ("tally", "objectives")
+PLAYER_TRADE_FIELDS = ("intel_copies",)
 PROVINCE_STAGE3_FIELDS = ("status",)
-STATE_STAGE3_FIELDS = ("claims", "origins", "abandoned", "discoveries")
+STATE_STAGE3_FIELDS = ("claims", "origins", "abandoned", "discoveries", "trades", "trade_seq")
 
 
 @dataclass
@@ -98,9 +102,13 @@ class PendingBuild:
     # full hash as before
     cost: dict[str, int] = field(default_factory=dict)
     stalled: bool = False
+    # core 0.8.0 (docs/SPY_V2.md 4.5): stops of this build by sabotage so far (a pack's stall_max limits them) and the
+    # turn a stop cannot happen (the turn after one); out of state_hash while 0 / None
+    sabotage_stalls: int = 0
+    sabotage_immune_turn: int | None = None
 
 
-PENDING_BUILD_NEW_FIELDS = ("cost", "stalled")
+PENDING_BUILD_NEW_FIELDS = ("cost", "stalled", "sabotage_stalls", "sabotage_immune_turn")
 
 
 @dataclass
@@ -123,6 +131,10 @@ class GameState:
     # Abandoned provinces, and the finds {pid: {id, state, known, pending?}} (secret: never in a seat's view)
     abandoned: list[str] = field(default_factory=list)
     discoveries: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # core 0.8.0 (docs/TRADE.md 1.1, engine/trade.py), left out of state_hash while empty: trade offers and trades,
+    # oldest first, and the per-pair counter of their ids {"x-y": k} (old terminal trades leave the list)
+    trades: list[dict[str, Any]] = field(default_factory=list)
+    trade_seq: dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -142,6 +154,8 @@ class GameState:
             origins=dict(data.get("origins") or {}),
             abandoned=list(data.get("abandoned") or []),
             discoveries={k: dict(v) for k, v in (data.get("discoveries") or {}).items()},
+            trades=[dict(t) for t in data.get("trades") or []],
+            trade_seq=dict(data.get("trade_seq") or {}),
         )
 
     def owned(self, seat: str) -> list[Province]:
@@ -157,7 +171,7 @@ def state_hash(state: GameState) -> str:
         if not data.get(key):
             data.pop(key, None)
     for player in data["players"].values():
-        for key in PLAYER_STAGE2_FIELDS + PLAYER_STAGE3_FIELDS + PLAYER_SCORE_FIELDS:
+        for key in PLAYER_STAGE2_FIELDS + PLAYER_STAGE3_FIELDS + PLAYER_SCORE_FIELDS + PLAYER_TRADE_FIELDS:
             if not player.get(key):
                 player.pop(key, None)
     for build in data["pending_builds"]:

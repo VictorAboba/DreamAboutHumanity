@@ -45,7 +45,7 @@ def _seats(n: int) -> list[dict]:
 # ---------------------------------------------------------------- freeze
 
 def test_core_050_is_frozen_with_its_hashes():
-    assert "version: 0.7.1" in (CORE / "pack.yaml").read_text(encoding="utf-8")
+    assert "version: 0.8.0" in (CORE / "pack.yaml").read_text(encoding="utf-8")
     head = (CORE050 / "pack.yaml").read_text(encoding="utf-8")
     assert "version: 0.5.0" in head and "Frozen copy of core 0.5.0" in head and "Do not edit" in head
     for sid, prefix in CORE050_HASHES.items():
@@ -184,7 +184,8 @@ def test_secret_in_rules_and_list_spies():
     rs = build_ruleset(None, "quad4")
     core = rules_text(rs)
     spying = next(line for line in core.splitlines() if line.startswith("ШПИОНАЖ"))
-    assert "Тени даром с начала: 1" in spying and "secret — чужая тайная цель" in spying
+    # core 0.8.0 (docs/SPY_V2.md 9.1): the secret is named among the scoring missions, its gloss is in the topic
+    assert "Тени даром с начала: 1" in spying and "Очки (+1, ≤3): secret" in spying
     topic = rules_topic(rs, "spying")
     assert "secret «Тайная цель»" in topic and "из них 1 — у каждого с начала партии" in topic
     assert "20 Сплав" in topic

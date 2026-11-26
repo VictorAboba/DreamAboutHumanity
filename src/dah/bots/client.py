@@ -72,6 +72,15 @@ class ApiClient:
         )
         return float(data.get("win_prob", data.get("estimate", {}).get("win_prob", 0.0)))
 
+    def estimate_report(self, attacker: dict[str, int], report_id: str, hasty: bool) -> dict[str, Any]:
+        """Core 0.8.0 (docs/SPY_V2.md 6.1): estimate(defender="r3") by an own Observation report: {win_prob,
+        win_prob_if_fortified?, fortified?, report}."""
+        data = self._call("POST", "/v1/estimate", json={"attacker": attacker, "defender": report_id, "hasty": hasty})
+        return dict(data.get("estimate") or data)
+
+    def cancel_order(self, order_id: str) -> dict[str, Any]:
+        return self._call("DELETE", f"/v1/orders/{order_id}")
+
     def send_message(self, to: list[str] | str, text: str) -> dict[str, Any]:
         return self._call("POST", "/v1/messages", json={"to": to, "text": text})
 
@@ -86,6 +95,20 @@ class ApiClient:
 
     def leave_pact(self, pact_id: str) -> dict[str, Any]:
         return self._call("POST", f"/v1/pacts/{pact_id}/leave", json={})
+
+    # --- core 0.8.0: trade (docs/TRADE.md 9) ---
+
+    def list_trades(self) -> dict[str, Any]:
+        return self._call("GET", "/v1/trades")
+
+    def propose_trade(self, to: str, give: dict[str, Any] | None = None, want: dict[str, Any] | None = None,
+                      **extra: Any) -> dict[str, Any]:
+        """`extra`: later, reply_to, replaces, fulfils."""
+        body = {"to": to, "give": give or {}, "want": want or {}, **{k: v for k, v in extra.items() if v is not None}}
+        return self._call("POST", "/v1/trades", json=body)
+
+    def respond_trade(self, trade_id: str, decision: str) -> dict[str, Any]:
+        return self._call("POST", f"/v1/trades/{trade_id}/respond", json={"decision": decision})
 
     def ready(self, confirm_hash: str | None) -> dict[str, Any]:
         """`None`: no hash (the setup phase accepts that; it confirms the current choice)."""

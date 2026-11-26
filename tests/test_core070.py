@@ -23,6 +23,7 @@ from test_review_stage2 import FakeClock, _play_out
 
 CORE = DEFAULT_PACKS_DIR / "core"
 CORE060 = LEGACY_PACKS_DIR / "core-0.6.0"
+CORE071 = LEGACY_PACKS_DIR / "core-0.7.1"     # the intel rule of 0.7.0 (every success scores) lives on there
 # ruleset hashes of the frozen core 0.6.0, as core 0.6.0 itself built them at b7c6d6c (measurement m8: quad4)
 CORE060_HASHES = {"slice3": "96e7815e10f4", "slice2": "3e6b42c166e3", "quad4": "4b1cae4580d8",
                   "blitz_test": "d6feaf2ec597", "blitz_spy": "ffe962f8d312", "blitz_score": "9db225137694",
@@ -49,7 +50,7 @@ def _kinds(rep) -> list[str]:
 # ---------------------------------------------------------------- 6. freeze
 
 def test_core_060_is_frozen_exactly_with_its_hashes():
-    assert "version: 0.7.1" in (CORE / "pack.yaml").read_text(encoding="utf-8")
+    assert "version: 0.8.0" in (CORE / "pack.yaml").read_text(encoding="utf-8")
     head = (CORE060 / "pack.yaml").read_text(encoding="utf-8")
     assert "version: 0.6.0" in head and "Frozen copy of core 0.6.0" in head and "Do not edit" in head
     for sid, prefix in CORE060_HASHES.items():
@@ -64,10 +65,10 @@ def test_core_060_is_frozen_exactly_with_its_hashes():
 def test_with_the_new_rules_off_only_the_version_changes(sid):
     """Espionage, conquest, finds and the scoring off: 0.7.0 builds exactly the rules of 0.6.0 but for the army fog
     switch the played scenarios set (fog.army_presence)."""
-    off = {"espionage": False, "conquest": False, "discoveries": False}
+    off = {"espionage": False, "conquest": False, "discoveries": False, "trade": False}
     a = build_ruleset([str(CORE060)], sid, off, scoring={"territory": 1}).to_dict()
     b = build_ruleset(None, sid, off, scoring={"territory": 1}).to_dict()
-    assert (a.pop("packs"), b.pop("packs")) == ({"core": "0.6.0"}, {"core": "0.7.1"})
+    assert (a.pop("packs"), b.pop("packs")) == ({"core": "0.6.0"}, {"core": "0.8.0"})
     for d in (b["stats"], *b["faction_stats"].values()):
         d.pop("fog.army_presence", None)
     assert a == b
@@ -199,7 +200,7 @@ def _rounds(*items):
 
 
 def test_intel_counts_successes_against_living_rivals_once_per_target_and_kind_a_turn_up_to_the_cap():
-    rs = build_ruleset(None, "quad4")
+    rs = build_ruleset([str(CORE071)], "quad4")      # core 0.8.0: by the mission's kind (test_core080_spy.py)
     assert rs.weight("intel") == 1 and rs.stat("score.intel.per_success") == 1 and rs.stat("score.intel.cap") == 3
     st = new_game_state(rs, _seats(3), 3)
     got = sc.credit_intel(st, rs, _rounds(("A", "core:ledger", "B", "B", True),
@@ -229,7 +230,7 @@ def test_intel_is_off_with_its_weight_or_without_espionage():
 
 
 def test_the_estimate_and_the_rules_name_the_payoff():
-    rs = build_ruleset(None, "quad4")
+    rs = build_ruleset([str(CORE071)], "quad4")
     st = new_game_state(rs, _seats(3), 3)
     est = esp.estimate_mission(st, rs, "A", "ledger", "B", 1)
     assert est["intel_points"] == 1 and "+1 очк. разведки" in est["text"]

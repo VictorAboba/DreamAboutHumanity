@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Mapping
 
 from . import conquest as cq
 from .content import MissionDef, Ruleset, StatKey
-from .model import ACTIONS, P2, GameState, Order, SeatOrders, as_int, canonical_json, sha256_json
+from .model import ACTIONS, P2, GameState, Order, Province, SeatOrders, as_int, canonical_json, sha256_json
 from .rng import stream
 from .techs import province_stat, stat_key
 
@@ -44,7 +44,11 @@ OBSERVE, LEDGER, READ_ORDERS, SABOTAGE = "observe_province", "read_ledger", "rea
 READ_OBJECTIVE = "read_objective"     # core 0.6.0 (decision 26): the target's secret objectives
 
 # Report events only their sides see (resolve._PRIVATE_KINDS); the victim of a `sabotage` sees it without its author.
-PRIVATE_KINDS = frozenset({"sabotage", "strike_cancelled", "feint", "mission_started", "mission_end"})
+PRIVATE_KINDS = frozenset({"sabotage", "strike_cancelled", "feint", "mission_started", "mission_end",
+                           # core 0.8.0 (docs/SPY_V2.md 7): what a strike did and its point, to the spy only
+                           "sabotage_effect", "intel_point",
+                           # to the build's owner: its build stands this turn by sabotage, no author
+                           "build_sabotaged"})
 
 COMPACT_ENTRIES = 6            # read_orders: entry lines in the compact text, then "+k ещё"
 COMPACT_CHARS = 400            # one compact report
@@ -215,11 +219,12 @@ def check_place(state: GameState, rs: Ruleset, mission: MissionDef, target: str)
 
 
 def honest_range(seed: int | str, spy_seat: str, target: str, facet: str, key: str, n: int,
-                 width: float) -> list[int]:
-    """An honest interval [lo, hi] with the truth inside (2.4): w = max(2, ceil(width*n)); the offset is the observer's
-    lasting error, from a stream keyed by (spy seat, target, facet, key) only (no turn, Shade or round)."""
+                 width: float, width_min: int = 2) -> list[int]:
+    """An honest interval [lo, hi] with the truth inside (2.4): w = max(width_min, ceil(width*n)) (width_min is
+    spy.intel.width_min, 2 before core 0.8.0); the offset is the observer's lasting error, from a stream keyed by
+    (spy seat, target, facet, key) only (no turn, Shade or round)."""
     n = max(0, int(n))
-    w = max(2, math.ceil(width * n - 1e-9))
+    w = max(int(width_min), math.ceil(width * n - 1e-9))
     u = stream(seed, 0, "spy.range", f"{spy_seat}|{target}|{facet}|{key}").random()
     r = math.floor(u * (min(w, n) + 1))
     lo = n - r
@@ -260,6 +265,8 @@ def order_problem(state: GameState, rs: Ruleset, seat: str, order: Order, others
                   key: StatKey) -> tuple[str, str] | None:
     """Why a hire_shade / spy / recall cannot be given (phase independent; resources are checked by orders.py)."""
     player = state.players[seat]
+    if order.kind == "ward":
+        return ward_problem(state, seat, order, others)
     if order.kind == "hire_shade":
         if cq.living_capital(state, seat) is None:
             return "NO_CAPITAL", "Тень нанимают только при своей полноценной стартовой столице"
@@ -311,7 +318,34 @@ def order_problem(state: GameState, rs: Ruleset, seat: str, order: Order, others
     return None
 
 
+def ward_problem(state: GameState, seat: str, order: Order, others: list[Order]) -> tuple[str, str] | None:
+    """Core 0.8.0 (docs/SPY_V2.md 4.6): a Ward stands in the seat's own full province, one per province."""
+    pid = order.province or ""
+    prov = state.provinces.get(pid)
+    if prov is None:
+        return "UNKNOWN_ID", f"неизвестная провинция {pid!r}"
+    if prov.owner != seat:
+        return "NOT_OWNER", f"{pid} — не твоя провинция: заставу ставят только в своей"
+    if cq.occupied(prov) is not None:
+        return "OCCUPIED", f"{pid} оккупирована: заставу ставят только в полноценной провинции"
+    if cq.is_ruined(prov, state.turn):
+        return "RUINED", f"{pid} — пепелище: заставу ставят только в полноценной провинции"
+    if any(o.kind == "ward" and o.province == pid for o in others):
+        return "INVALID", f"застава в {pid} уже в приказах (одна на провинцию)"
+    return None
+
+
+def ward_cost(rs: Ruleset, key: StatKey) -> dict[str, int]:
+    return _amounts(rs, "spy.ward.cost", key)
+
+
+def ward_bonus(rs: Ruleset, key: StatKey) -> int:
+    return _int(rs, "spy.ward.bonus", key)
+
+
 def order_cost(rs: Ruleset, key: StatKey, order: Order) -> dict[str, int]:
+    if order.kind == "ward":
+        return ward_cost(rs, key)
     if order.kind == "hire_shade":
         return shade_cost(rs, key)
     if order.kind == "spy":
@@ -338,9 +372,24 @@ def _book_entries(book: SeatOrders) -> list[tuple[dict[str, Any], bool, str]]:
     return sorted(items, key=lambda it: (it[0]["kind"], canonical_json(it[0])))
 
 
-def _observe(snap: GameState, rs: Ruleset, seed: int | str, spy: str, pid: str,
-             width: float) -> tuple[dict[str, Any], dict[str, Any]]:
+def planned_here(book: SeatOrders | None, pid: str) -> dict[str, Any]:
+    """Observation's block «в расчёте этого хода» (core 0.8.0, docs/SPY_V2.md 4.1): the recruits in this province and
+    whether it is fortified, from its owner's actions book. Never moves (they stay for Read Orders, decision 22)."""
+    recruit: Counter[str] = Counter()
+    fortify = False
+    for o in (book.orders if book is not None else ()):
+        if o.kind == "recruit" and o.province == pid and o.unit and isinstance(o.count, int) and o.count > 0:
+            recruit[o.unit] += o.count
+        elif o.kind == "fortify" and o.province == pid:
+            fortify = True
+    return {"recruit": dict(sorted(recruit.items())), "fortify": fortify}
+
+
+def _observe(snap: GameState, rs: Ruleset, seed: int | str, spy: str, pid: str, width: float,
+             mission: MissionDef | None = None, books: Mapping[str, SeatOrders] | None = None,
+             width_min: int = 2) -> tuple[dict[str, Any], dict[str, Any]]:
     prov = snap.provinces[pid]
+    params = mission.params if mission is not None else {}
     truth = {"province": pid, "owner": prov.owner, "units": {u: n for u, n in sorted(prov.units.items()) if n},
              "buildings": sorted(prov.buildings),
              "building_now": [[b.building, b.turns_left] for b in snap.pending_builds if b.province == pid],
@@ -350,13 +399,18 @@ def _observe(snap: GameState, rs: Ruleset, seed: int | str, spy: str, pid: str,
         entry = snap.discoveries.get(pid)
         d = rs.discoveries.get(entry["id"]) if entry else None
         truth["discovery"] = {"id": d.id, "name": d.name, "kind": d.kind} if d is not None else None
-    facts = {**truth, "units": {u: honest_range(seed, spy, pid, "units", u, n, width)
+    if params.get("planned"):
+        truth["planned"] = planned_here((books or {}).get(prov.owner or ""), pid)
+    if params.get("exact"):
+        return copy.deepcopy(truth), truth
+    facts = {**truth, "units": {u: honest_range(seed, spy, pid, "units", u, n, width, width_min)
                                 for u, n in truth["units"].items()}}
     return facts, truth
 
 
 def _ledger(snap: GameState, rs: Ruleset, seed: int | str, spy: str, target: str, book: SeatOrders,
-            width: float) -> tuple[dict[str, Any], dict[str, Any]]:
+            width: float, mission: MissionDef | None = None,
+            width_min: int = 2) -> tuple[dict[str, Any], dict[str, Any]]:
     from .orders import reserved_resources
     player = snap.players[target]
     key = stat_key(snap, rs, target)
@@ -370,9 +424,16 @@ def _ledger(snap: GameState, rs: Ruleset, seed: int | str, spy: str, target: str
         # the target's exact turn score by source, without its secret objective (SCORING.md 5, decision 24)
         from .scoring import score_parts
         truth["score_parts"] = score_parts(snap, rs)[target]
-    facts = {**truth, "stock": {r: honest_range(seed, spy, target, "stock", r, n, width) for r, n in stock.items()}}
+    if mission is not None and mission.params.get("army_total"):
+        # core 0.8.0 (docs/SPY_V2.md 4.2): the target's units in all its provinces at the close of actions
+        truth["army_total"] = sum(p.unit_total() for p in snap.owned(target))
+    facts = {**truth, "stock": {r: honest_range(seed, spy, target, "stock", r, n, width, width_min)
+                                for r, n in stock.items()}}
     if research:
-        facts["progress"] = honest_range(seed, spy, target, "research", research, truth["progress"], width)
+        facts["progress"] = honest_range(seed, spy, target, "research", research, truth["progress"], width,
+                                         width_min)
+    if "army_total" in truth:
+        facts["army_total"] = honest_range(seed, spy, target, "army", "total", truth["army_total"], width, width_min)
     return facts, truth
 
 
@@ -466,11 +527,18 @@ def recon(state: GameState, books_d: Mapping[str, SeatOrders | Mapping[str, Any]
                 res[r] = res.get(r, 0) - n
             return cost
 
-        for kind in ("hire_shade", "recall", "spy"):
+        wards: dict[str, int] = {}          # core 0.8.0 (docs/SPY_V2.md 4.6): province -> C_loc bonus this recon
+        for kind in ("hire_shade", "recall", "spy", "ward"):
             for seat in alive:
                 for o in (o for o in valid[seat] if o.kind == kind):
                     player = s.players[seat]
-                    if kind == "hire_shade":
+                    if kind == "ward":
+                        cost = pay(seat, o)
+                        bonus = ward_bonus(rs, keys[seat])
+                        wards[str(o.province)] = bonus
+                        rep.setdefault("wards", []).append({"seat": seat, "province": o.province, "bonus": bonus,
+                                                            "cost": cost})
+                    elif kind == "hire_shade":
                         cost = pay(seat, o)
                         player.spy_seq["shade"] = player.spy_seq.get("shade", 0) + 1
                         sid = f"s{player.spy_seq['shade']}"
@@ -491,13 +559,18 @@ def recon(state: GameState, books_d: Mapping[str, SeatOrders | Mapping[str, Any]
         active = sorted(((seat, sh) for seat in alive for sh in s.players[seat].shades
                          if is_active(sh) and sh["mission"]["first_turn"] <= turn),
                         key=lambda it: uid(it[0], it[1]["id"]))
+        places = _round_places(snap, rs, active)
         for seat, shade in active:
-            _round(s, snap, rs, seed, rep, books, seat, shade)
-        # core 0.7.0 (decision 27): points for successful missions against living rivals (scoring source `intel`)
+            _round(s, snap, rs, seed, rep, books, seat, shade, places, wards)
+        # core 0.7.0 (decision 27): points for successful missions against living rivals (scoring source `intel`);
+        # core 0.8.0: by the mission's `intel` kind, none against a pact partner (docs/SPY_V2.md 5.2)
         from .scoring import credit_intel
-        points = credit_intel(s, rs, rep["rounds"], rs.missions)
+        denied: list[dict[str, Any]] = []
+        points = credit_intel(s, rs, rep["rounds"], rs.missions, denied)
         if points:
             rep["intel_points"] = points
+        if denied:
+            rep["intel_denied"] = denied
     s.phase = P2
     rep["hash"] = sha256_json({k: v for k, v in rep.items() if k != "hash"})
     return s, rep
@@ -539,8 +612,33 @@ def _void(state: GameState, rs: Ruleset, seat: str, mission: MissionDef, target:
     return mission.target == "owned_province" and prov.owner is None
 
 
+def _round_places(snap: GameState, rs: Ruleset, active: Iterable[tuple[str, Mapping[str, Any]]]
+                  ) -> dict[str, tuple[str, str]] | None:
+    """Core 0.8.0 (docs/SPY_V2.md 3.2, spy.detect.repeat_on): the check place of every Shade playing a round in this
+    recon step, {uid: (seat, place)}; a void mission plays no round and is left out. None while R is off."""
+    if not int(rs.stat("spy.detect.repeat_on")):
+        return None
+    out: dict[str, tuple[str, str]] = {}
+    for seat, shade in active:
+        m = shade["mission"]
+        mission = rs.missions.get(m["type"])
+        place = None if mission is None else check_place(snap, rs, mission, m["target"])
+        if mission is not None and place is not None and not _void(snap, rs, seat, mission, m["target"]):
+            out[uid(seat, shade["id"])] = (seat, place)
+    return out
+
+
+def repeat_count(places: Mapping[str, tuple[str, str]] | None, seat: str, place: str, me: str) -> int:
+    """R of a round: the seat's other Shades checked at the same place in this recon step (another seat's never
+    count); 0 while R is off."""
+    if places is None:
+        return 0
+    return sum(1 for u, (st, pl) in places.items() if u != me and st == seat and pl == place)
+
+
 def _round(s: GameState, snap: GameState, rs: Ruleset, seed: int | str, rep: dict[str, Any],
-           books: Mapping[str, SeatOrders], seat: str, shade: dict[str, Any]) -> None:
+           books: Mapping[str, SeatOrders], seat: str, shade: dict[str, Any],
+           places: Mapping[str, tuple[str, str]] | None = None, wards: Mapping[str, int] | None = None) -> None:
     m = shade["mission"]
     turn = s.turn
     mission = rs.missions.get(m["type"])
@@ -554,12 +652,16 @@ def _round(s: GameState, snap: GameState, rs: Ruleset, seed: int | str, rep: dic
         return
     key = stat_key(snap, rs, seat)
     victim = snap.provinces[place].owner
-    S, C, D = whisper(rs, key), local_mirrors(snap, rs, place), difficulty(rs, m["type"], key)
-    V, K, R = int(shade.get("xp", 0)), min(m["played"], _int(rs, "spy.cover_max", key)), 0
+    ward = (wards or {}).get(place, 0)
+    S, C, D = whisper(rs, key), local_mirrors(snap, rs, place) + ward, difficulty(rs, m["type"], key)
+    V, K = int(shade.get("xp", 0)), min(m["played"], _int(rs, "spy.cover_max", key))
+    R = repeat_count(places, seat, place, shade_uid)
     p_ok, p_det = chances(rs, key, S=S, C=C, D=D, V=V, K=K, R=R)
     u_det = stream(seed, turn, "spy.detect", shade_uid).random()
     rec = {**base, "place": place, "victim": victim, "K": K, "R": R, "S": S, "C_loc": C, "V": V, "D": D,
            "p_det": p_det, "u_det": round(u_det, 6), "detected": u_det < p_det}
+    if ward:
+        rec["ward"] = ward
     if rec["detected"]:
         victim_key = stat_key(snap, rs, victim) if victim is not None else None
         p_a = attribution_chance(rs, victim_key, C, S)
@@ -590,7 +692,18 @@ def _round(s: GameState, snap: GameState, rs: Ruleset, seed: int | str, rep: dic
             effects = {k: mission.params[k] for k in ("deny_fortify", "defense_mul", "income_mul")
                        if k in mission.params}
             marks = list(cq.strike_marks(s.provinces[pid], turn))     # strikes of several Shades all stand
-            marks.append({"turn": turn, "by": seat, "shade": shade["id"], **effects})
+            mark = {"turn": turn, "by": seat, "shade": shade["id"], **effects}
+            # core 0.8.0 (docs/SPY_V2.md 4.5): the stop of a build and the revolt of an occupation, only when the
+            # pack gives them (older marks unchanged)
+            mark.update({k: copy.deepcopy(mission.params[k]) for k in STRIKE_EXTRA if k in mission.params})
+            if mission.intel == "effect":
+                # core 0.8.0 (docs/SPY_V2.md 5.2): what the end of the resolution needs to credit the strike's
+                # effect: the mission's uid (the first strike scores), the victim and a pact on the recon snapshot
+                from .diplomacy import pact_between
+                victim_now = snap.provinces[pid].owner
+                mark.update(uid=shade_uid, mission=m["type"], victim=victim_now,
+                            pact=pact_between(snap, seat, victim_now, turn) is not None)
+            marks.append(mark)
             s.provinces[pid].status["sabotaged"] = marks
             rep["strikes"].append({"seat": seat, "shade": shade["id"], "province": pid,
                                    "victim": snap.provinces[pid].owner, "effects": effects})
@@ -614,15 +727,17 @@ def _report(s: GameState, snap: GameState, rs: Ruleset, seed: int | str, books: 
     player.spy_seq["report"] = player.spy_seq.get("report", 0) + 1
     rid = f"r{player.spy_seq['report']}"
     width = rs.stat("spy.intel.width", key)
+    width_min = _int(rs, "spy.intel.width_min", key)
     target = m["target"]
     extra: dict[str, Any] = {}
     if mission.behavior == OBSERVE:
-        facts, truth = _observe(snap, rs, seed, seat, target, width)
+        facts, truth = _observe(snap, rs, seed, seat, target, width, mission, books, width_min)
         entry = s.discoveries.get(target) if facts.get("discovery") else None
         if entry is not None and seat not in entry.get("known", []):
             entry["known"] = sorted({*entry.get("known", []), seat})     # the find is known to the observer now
     elif mission.behavior == LEDGER:
-        facts, truth = _ledger(snap, rs, seed, seat, target, books.get(target, SeatOrders()), width)
+        facts, truth = _ledger(snap, rs, seed, seat, target, books.get(target, SeatOrders()), width, mission,
+                               width_min)
     elif mission.behavior == READ_OBJECTIVE:
         facts, truth = _objective(snap, rs, target)
     else:       # read_orders
@@ -726,6 +841,56 @@ class EspionageStep:
     def defense_mul(self, pid: str) -> float:
         return self.defense.get(pid, 1.0)
 
+    # -- after step 6 (core 0.8.0, docs/SPY_V2.md 5.2 p. 4): the points of strikes that did something
+    def effects(self) -> None:
+        """A loud `effect` mission scores only when its strike did something in this resolution: a battle in the
+        province where the victim defended and lost a unit or the province (any attacker), a build stopped
+        (`build_sabotaged`) or a revolt of the occupation (`occupation_revolt` by sabotage). One effect, one point: in
+        a province the first successful strike by mission uid that may score takes it; the spy always learns what its
+        strike did (`sabotage_effect`, private)."""
+        from . import scoring as sc_
+        events = self.r.events
+        for pid, prov in sorted(self.s.provinces.items()):
+            marks = sorted((mk for mk in cq.strike_marks(prov, self.turn) if mk.get("uid")),
+                           key=lambda mk: str(mk["uid"]))
+            if not marks:
+                continue
+            victim = marks[0].get("victim")
+            found = strike_effects(events, pid, victim)
+            taken = False
+            seen: set[tuple[str, Any, str]] = set()
+            for mk in marks:
+                seat, mission = mk.get("by"), str(mk.get("mission"))
+                out: dict[str, Any] = {"seat": seat, "shade": mk.get("shade"), "victim": victim, "effects": found}
+                for e in events:
+                    if e["kind"] == "build_sabotaged" and e.get("province") == pid:
+                        out["building"] = e.get("building")
+                        break
+                why = None
+                point = None
+                if not found:
+                    why = sc_.DENY_NO_EFFECT
+                elif taken:
+                    why = sc_.DENY_TAKEN
+                elif (seat, victim, mission) in seen:
+                    why = sc_.DENY_TAKEN
+                else:
+                    point, why = sc_.credit_intel_effect(self.s, self.rs, seat, victim, mission, bool(mk.get("pact")))
+                if point is not None:
+                    taken = True
+                    seen.add((seat, victim, mission))
+                    point["effect"] = found[0]
+                    point["effects"] = list(found)
+                    # `kind` would clash with the event's kind: the report event says `intel_kind` (the journal
+                    # entry `kind`, as at the recon step)
+                    self.r.ev("intel_point", [seat], pid, **{k: v for k, v in point.items() if k != "kind"},
+                              intel_kind=point["kind"])
+                if sc_.on(self.rs, "intel"):
+                    out["intel_point"] = point is not None
+                    if why is not None:
+                        out["reason"] = why
+                self.r.ev("sabotage_effect", [seat], pid, **out)
+
     # -- the end
     def end(self, eliminated: Iterable[str]) -> None:
         gone = set(eliminated)
@@ -741,6 +906,45 @@ class EspionageStep:
                     self.r.ev("mission_end", [seat], None, **_end(None, seat, shade, VOID))
         for prov in self.s.provinces.values():
             prov.status.pop("sabotaged", None)
+
+
+STRIKE_EFFECTS = ("battle", "stall", "revolt")
+# sabotage parameters a strike mark carries besides its effects on this resolution (docs/SPY_V2.md 4.5, 13)
+STRIKE_EXTRA = ("stall_build", "stall_max", "unrest_units", "revolt_garrison")
+
+
+def stall_mark(prov: Province, turn: int) -> Mapping[str, Any] | None:
+    """The first (by mission uid) of this turn's strike marks on the province that stops its builds, or None."""
+    marks = [mk for mk in cq.strike_marks(prov, turn) if mk.get("stall_build")]
+    return min(marks, key=lambda mk: str(mk.get("uid") or "")) if marks else None
+
+
+def unrest_in(rs: Ruleset) -> bool:
+    """A mission of the ruleset can make an occupation revolt: the public form of a revolt drops its reason (7)."""
+    return any("unrest_units" in m.params for m in rs.missions.values()) if rs.system(ESPIONAGE) else False
+
+
+def strike_effects(events: Iterable[Mapping[str, Any]], pid: str, victim: str | None) -> list[str]:
+    """What a strike on `pid` did in this resolution (docs/SPY_V2.md 5.2 p. 4), in STRIKE_EFFECTS order: `battle` —
+    the victim defended there and lost a unit or the province (an attack that costs the victim nothing does not
+    count); `stall` — a build there stopped by the sabotage; `revolt` — the occupation there revolted by it."""
+    out = set()
+    for e in events:
+        if e.get("province") != pid:
+            continue
+        kind = e["kind"]
+        if kind == "battle" and e.get("stage") == "defense":
+            for side in e.get("sides") or ():
+                if side.get("owner") == victim and victim is not None and (
+                        sum((side.get("losses") or {}).values()) > 0 or not side.get("won")):
+                    out.add("battle")
+        elif kind == "captured" and victim is not None and e.get("from") == victim:
+            out.add("battle")
+        elif kind == "build_sabotaged":
+            out.add("stall")
+        elif kind == "occupation_revolt" and e.get("reason") == "sabotage":
+            out.add("revolt")
+    return [k for k in STRIKE_EFFECTS if k in out]
 
 
 def upkeep(state: GameState, rs: Ruleset, seat: str, key: StatKey) -> dict[str, int]:
@@ -794,11 +998,73 @@ def sabotage_seen(event: Mapping[str, Any], seat: str) -> dict[str, Any]:
 
 # ---------------------------------------------------------------- estimate
 
+def report_defender(report: Mapping[str, Any], turn: int, rid: str | None = None,
+                    persists: bool = False) -> dict[str, Any]:
+    """estimate(defender="r3") (docs/SPY_V2.md 6.1) from an Observation report (the caller checks the kind): the
+    units (an older report's interval: its upper end) plus the recruits of its block «в расчёте этого хода», the
+    province, whether it fortifies, and the header of the answer. The server and the simulator's bots share it.
+    `persists` (combat.fortify_persists): the fortification the report shows («укр.») is kept while the owner holds
+    units there, so it counts as well as a fortify of the block."""
+    facts = report["facts"]
+    units: dict[str, int] = {}
+    ranged = False
+    for u, n in (facts.get("units") or {}).items():
+        if isinstance(n, list):            # an older Observation's interval: its upper end
+            n, ranged = n[-1], True
+        units[u] = units.get(u, 0) + int(n)
+    planned = facts.get("planned") or {}
+    for u, n in (planned.get("recruit") or {}).items():
+        units[u] = units.get(u, 0) + int(n)
+    age = turn - int(report["turn"])
+    kept = bool(persists and facts.get("fortified") and sum(units.values()) > 0)
+    fortified = bool(planned.get("fortify")) or kept
+    head = (f"по донесению {rid or report.get('id')}: состав конца Д хода {report['turn']} без подходов и уходов; "
+            + ("укрепление держится (укр. в донесении)" + ("" if age <= 0 else ", если войска не уходили")
+               if kept and not planned.get("fortify") else "в П2 возможны укрепление (1 ОК)")
+            + " и подход наспех")
+    if planned.get("recruit"):
+        head += "; найм этого хода учтён"
+    if ranged:
+        head += "; числа — верх интервалов"
+    if age > 0:
+        head += f"; устарело на {age} ход{'' if age == 1 else 'а' if age < 5 else 'ов'}"
+    return {"units": units, "province": facts["province"], "fortified": fortified, "header": head}
+
+
+def own_repeat(state: GameState, rs: Ruleset, seat: str, place: str | None, book: SeatOrders | None,
+               me: str | None) -> int:
+    """R as the engine will count it (docs/SPY_V2.md 3.2), from what the seat knows: its other Shades whose mission
+    (active, or a `spy` entry of this turn's book) is checked at `place`; Shades recalled in the book and the Shade
+    `me` itself do not count. 0 while R is off."""
+    if place is None or not int(rs.stat("spy.detect.repeat_on")):
+        return 0
+    player = state.players[seat]
+    orders = list(book.orders) if book is not None else []
+    recalled = {o.shade for o in orders if o.kind == "recall"}
+    found: set[str] = set()
+    for sh in player.shades:
+        if is_active(sh):
+            m = sh["mission"]
+            mission = rs.missions.get(m["type"])
+            if mission is not None and check_place(state, rs, mission, m["target"]) == place:
+                found.add(sh["id"])
+    for o in orders:
+        if o.kind == "spy" and o.shade:
+            mission = rs.missions.get(o.mission or "")
+            tgt = o.target or ""
+            if mission is not None and (mission.target != "seat" or tgt in state.players) \
+                    and check_place(state, rs, mission, tgt) == place:
+                found.add(o.shade)
+    return len(found - recalled - {me})
+
+
 def estimate_mission(state: GameState, rs: Ruleset, seat: str, mission_ref: Any, target: Any, rounds: Any,
-                     shade: Any = None, assume_mirrors: Any = None) -> dict[str, Any]:
+                     shade: Any = None, assume_mirrors: Any = None, book: SeatOrders | None = None) -> dict[str, Any]:
     """The exact chances of a mission (2.3; no Monte-Carlo): per round (success, detection), surviving the term and
     at least one report (a strike for a loud mission). Another seat's C is hidden: `assume_mirrors` (default: the
-    ruleset's base) stands for it; the army on the spot counts if seen, and is assumed when not seen."""
+    ruleset's base) stands for it; the army on the spot counts if seen, and is assumed when not seen. Core 0.8.0
+    (docs/SPY_V2.md 3.2, 5.3): R from the seat's own Shades at the same place (its `book` of this turn included) and
+    what a success would score, with the reason (`intel_points`, `intel_reason`)."""
     mid = resolve_mission_ref(rs, mission_ref)
     if mid is None:
         raise ValueError(f"неизвестная миссия {mission_ref!r}; миссии: {mission_list(rs)}")
@@ -845,10 +1111,11 @@ def estimate_mission(state: GameState, rs: Ruleset, seat: str, mission_ref: Any,
     else:
         C = 0
     S, D = whisper(rs, key), difficulty(rs, mid, key)
+    R = own_repeat(state, rs, seat, place, book, sh["id"] if sh else None)
     cover_max = _int(rs, "spy.cover_max", key)
     per, alive_clean, survive_caught, any_hit = [], 1.0, 0.0, 0.0
     for i in range(n):
-        p_ok, p_det = chances(rs, key, S=S, C=C, D=D, V=V, K=min(i, cover_max))
+        p_ok, p_det = chances(rs, key, S=S, C=C, D=D, V=V, K=min(i, cover_max), R=R)
         per.append((p_ok, p_det))
         any_hit += alive_clean * (1 - p_det) * p_ok
         survive_caught += alive_clean * p_det
@@ -859,27 +1126,42 @@ def estimate_mission(state: GameState, rs: Ruleset, seat: str, mission_ref: Any,
         survive = math.prod(1 - d for _, d in per)
     rounds_txt = ", ".join(f"{round(o * 100)}/{round(d * 100)}" for o, d in per)
     what = "удар" if mission.loud else "донесение"
-    text = (f"{mission.name} → {place or tgt}, S{S} против C_лок {C}, D{D}, V{V}: раунды (успех/поимка %): "
+    rr = f", R{R}" if R else ""
+    text = (f"{mission.name} → {place or tgt}, S{S} против C_лок {C}, D{D}, V{V}{rr}: раунды (успех/поимка %): "
             f"{rounds_txt}; дожить {round(survive * 100)}%, ≥1 {what} {round(any_hit * 100)}%")
-    points = intel_payoff(state, rs, seat, mission, tgt, place)
+    if mission.behavior == OBSERVE and mission.params.get("planned") and place in seen:
+        # G3: the province is in sight already
+        text += f"; {place} в твоём обзоре: войска видны и так, донесение добавит только найм и укрепление этого хода"
+    points = intel_payoff(state, rs, seat, mission, tgt, place, book, sh["id"] if sh else None)
     if points is not None:
-        text += (f"; успех: +{points[0]} очк. разведки (осталось {points[1]})" if points[0]
-                 else f"; очков разведки не даст ({points[2]})")
+        if points[0]:
+            text += f"; успех: +{points[0]} очк. разведки (осталось {points[1]})" + (
+                f", {points[2]}" if points[2] else "")
+        elif points[2].startswith("очко"):
+            text += f"; {points[2]}"
+        else:
+            text += f"; очков разведки не даст ({points[2]})"
     if notes:
         text += " (" + "; ".join(notes) + ")"
-    out = {"mission": mid, "target": tgt, "place": place, "rounds": n, "S": S, "C_loc": C, "D": D, "V": V,
+    out = {"mission": mid, "target": tgt, "place": place, "rounds": n, "S": S, "C_loc": C, "D": D, "V": V, "R": R,
            "per_round": [{"success": o, "detect": d} for o, d in per], "survive": round(survive, 4),
            "any": round(any_hit, 4), "text": text[:ESTIMATE_CHARS]}
     if points is not None:
         out["intel_points"] = points[0]
+        if points[2]:
+            out["intel_reason"] = points[2]
     return out
 
 
 def intel_payoff(state: GameState, rs: Ruleset, seat: str, mission: MissionDef, target: str,
-                 place: str | None) -> tuple[int, int, str] | None:
+                 place: str | None, book: SeatOrders | None = None,
+                 me: str | None = None) -> tuple[int, int, str] | None:
     """Core 0.7.0 (decision 27): what a success of this mission adds to the scoring source `intel`: (points, points
-    left, why none); None while the source is off. Only a living rival seat (the target seat, or the owner of the
-    target province) counts (scoring.credit_intel)."""
+    left, reason or condition); None while the source is off. Only a living rival seat (the target seat, or the owner
+    of the target province) counts (scoring.credit_intel). Core 0.8.0 (docs/SPY_V2.md 5.3, G3): by the mission's
+    `intel` kind; a loud `effect` mission promises its point only on condition, and none while the seat's other
+    scoring `spy` entries of this `book` (Shade `me` aside) fill what is left of the cap, or while its own strike with
+    a smaller uid hits the same province first."""
     from . import scoring as sc_
     if not sc_.on(rs, "intel"):
         return None
@@ -890,9 +1172,38 @@ def intel_payoff(state: GameState, rs: Ruleset, seat: str, mission: MissionDef, 
     player = state.players.get(rival) if rival is not None else None
     if player is None or rival == seat or not player.alive:
         return 0, left, "цель — не соперник"
-    if left <= 0:
-        return 0, 0, "предел очков разведки набран"
-    return min(left, int(rs.stat("score.intel.per_success", key))), left, ""
+    kind = sc_.intel_kind(mission)
+    if kind == sc_.NO_INTEL:
+        return 0, left, "не даёт очков (сведения)"
+    why = sc_.intel_block(state, rs, seat, rival, mission.id, kind, key)
+    short = mission.id.split(":")[-1]
+    texts = {sc_.DENY_PACT: "партнёр по пакту: очков не даст", sc_.DENY_ONCE: f"очко за {short} уже получено",
+             sc_.DENY_TARGET: f"очко за {short} против этого места уже получено"}
+    if why is not None:
+        return 0, left, texts.get(why, sc_.DENY_TEXT.get(why, why))
+    per = min(left, int(rs.stat("score.intel.per_success", key)))
+    if kind != sc_.EFFECT:
+        return per, left, ""
+    others = [o for o in (book.orders if book is not None else ()) if o.kind == "spy" and o.shade != me]
+    scoring = 0
+    for o in others:
+        m = rs.missions.get(o.mission or "")
+        k = sc_.intel_kind(m)
+        if m is None or k in (sc_.NO_INTEL, sc_.EFFECT):
+            continue
+        tgt = o.target if m.target == "seat" else (state.provinces[o.target].owner
+                                                   if o.target in state.provinces else None)
+        if isinstance(tgt, str) and tgt in state.players and tgt != seat \
+                and sc_.intel_block(state, rs, seat, tgt, m.id, k, key) is None:
+            scoring += 1
+    if scoring >= left:
+        return 0, left, "очко, если останется место в пределе (другие задания этого хода могут занять его раньше)"
+    mine = uid(seat, me) if me else None
+    if any(o.target == target and rs.missions.get(o.mission or "") is not None
+           and rs.missions[o.mission or ""].loud and (mine is None or uid(seat, o.shade or "") < mine)
+           for o in others):
+        return 0, left, "очко — первому удару по этой провинции (эффект засчитают ему)"
+    return per, left, "только если удар что-то сделает: бой с потерями жертвы, остановка стройки, бунт"
 
 
 # ---------------------------------------------------------------- texts (Russian, compact)
@@ -950,42 +1261,76 @@ def _entry_text(rs: Ruleset, state: GameState, e: Mapping[str, Any], me: str | N
         return f"политика {d.name.lower() if d else 'нет'}"
     if kind == "discover":
         return f"запись о находке в {e.get('province')}"
+    if kind == "ward":            # core 0.8.0 (docs/SPY_V2.md 4.6): seen in the book after the fact
+        return f"застава {e.get('province')}"
     return kind
 
 
 def _orders_body(rs: Ruleset, state: GameState, facts: Mapping[str, Any], me: str, full: bool) -> list[str]:
-    """read_orders: moves grouped by source, exposed false entries and moves at the reader's borders first."""
+    """read_orders (core 0.8.0, docs/SPY_V2.md 4.4, G4): first the pact breaks (moves with pact "break": «удар по
+    союзнику X без выхода (−3): …», «удар по тебе …» when the reader is the partner), then «НА ТЕБЯ:» the other
+    moves into the reader's provinces (or «ударов по тебе нет»), then the rest: moves grouped by source (exposed
+    false entries and moves at the reader's borders first), the other entries, the target's command points."""
+    from . import scoring as sc_
     mine = {p.id for p in state.owned(me)} if me in state.players else set()
     near = mine | {n for m in mine for n in rs.map.adjacency.get(m, ())}
+    fine = int(rs.stat("score.betrayal.per_break")) if sc_.betrayal_on(rs) else 0
+    breaks: list[str] = []
+    at_me: list[str] = []
     groups: dict[str, list[Mapping[str, Any]]] = {}
     others: list[str] = []
     for e in facts.get("entries", []):
-        if e["kind"] == "move":
-            groups.setdefault(e["from"], []).append(e)
-        else:
+        if e["kind"] != "move":
             others.append(_entry_text(rs, state, e, me))
+            continue
+        mark = " [ЛОЖНАЯ ЗАПИСЬ]" if e.get("exposed") else ""
+        if e.get("pact") == "break":
+            owner = state.provinces[e["to"]].owner if e["to"] in state.provinces else None
+            who = "по тебе" if owner == me else f"по союзнику {_nick(state, owner, me)}"
+            breaks.append(f"удар {who} без выхода{f' (−{fine})' if fine else ''}: {e['from']}→{e['to']} "
+                          f"{_units(rs, e['units'])}{mark}")
+        elif e["to"] in mine:
+            at_me.append(f"{e['from']}→{e['to']} {_units(rs, e['units'])}{mark}")
+        else:
+            groups.setdefault(e["from"], []).append(e)
     lines: list[tuple[int, str]] = []
     for src, moves in sorted(groups.items()):
         parts = []
         for i, mv in enumerate(moves):
             head = f"{src}→{mv['to']}" if i == 0 else f"→{mv['to']}"
             mark = " [ЛОЖНАЯ ЗАПИСЬ]" if mv.get("exposed") else ""
-            brk = " [break]" if mv.get("pact") == "break" else ""
-            parts.append(f"{head} {_units(rs, mv['units'])}{brk}{mark}")
+            parts.append(f"{head} {_units(rs, mv['units'])}{mark}")
         rank = 0 if any(mv.get("exposed") for mv in moves) else (1 if any(mv["to"] in near for mv in moves) else 2)
         lines.append((rank, ", ".join(parts)))
     lines.sort(key=lambda it: it[0])
+    out = []
+    if breaks:
+        out.append("НАРУШЕНИЕ ПАКТА: " + "; ".join(breaks))
+    if mine:
+        out.append("НА ТЕБЯ: " + "; ".join(at_me) if at_me else "ударов по тебе нет")
     items = [t for _, t in lines] + others
     shown = items if full else items[:COMPACT_ENTRIES]
-    out = ["; ".join(shown) if shown else "записей нет"]
-    if len(items) > len(shown):
-        out[0] += f"; +{len(items) - len(shown)} ещё"
+    if shown or not (breaks or at_me):
+        rest = "; ".join(shown) if shown else "записей нет"
+        if len(items) > len(shown):
+            rest += f"; +{len(items) - len(shown)} ещё"
+        out.append(rest)
     free = facts.get("free_at_borders") or {}
     tail = f"ОК хода {facts.get('command_points')}, новая атака {facts.get('new_attack_cp')} ОК"
     if free:
         tail += ". Свободны у твоих границ: " + "; ".join(f"{pid} {_units(rs, u)}" for pid, u in sorted(free.items()))
     out.append(tail)
     return out
+
+
+def planned_text(rs: Ruleset, planned: Mapping[str, Any]) -> str:
+    """«Найм здесь: штурм.×2; Укрепление: да», or «найма и укрепления нет»."""
+    parts = []
+    if planned.get("recruit"):
+        parts.append("Найм здесь: " + " ".join(f"{rs.short(u)}×{n}" for u, n in planned["recruit"].items()))
+    if planned.get("fortify"):
+        parts.append("Укрепление: да")
+    return "; ".join(parts) or "найма и укрепления нет"
 
 
 def _status_text(state: GameState, status: Mapping[str, Any], me: str | None) -> str:
@@ -1017,6 +1362,9 @@ def report_text(report: Mapping[str, Any], rs: Ruleset, state: GameState, me: st
             f"хода {report['turn']}")
     if behavior == READ_ORDERS:
         head += " (в П2 могли измениться)"
+    elif behavior == OBSERVE and "planned" in facts:
+        # core 0.8.0 (docs/SPY_V2.md 4.1): what the snapshot cannot show (CONCEPT 4: P2 fortify and hasty moves)
+        head += " без подходов и уходов; в П2 возможны укрепление (1 ОК) и подход наспех"
     lines = [head]
     if behavior == OBSERVE:
         body = f"{facts['province']} [{_nick(state, facts.get('owner'), me)}] {_units(rs, facts.get('units') or {})}"
@@ -1032,9 +1380,13 @@ def report_text(report: Mapping[str, Any], rs: Ruleset, state: GameState, me: st
         if "discovery" in facts:
             found = facts["discovery"]
             body += f"; находка «{found['name']}»" if found else "; находок нет"
+        if "planned" in facts:
+            body += "; в расчёте этого хода: " + planned_text(rs, facts["planned"])
         lines.append(body)
     elif behavior == LEDGER:
         body = f"запасы: {_res(rs, facts.get('stock') or {})}"
+        if "army_total" in facts:
+            body += f"; армия всего: {_span(facts['army_total'])}"
         techs = [rs.techs[t].name if t in rs.techs else t for t in facts.get("techs") or []]
         body += f"; тех. {len(techs)}" + (f": {', '.join(techs)}" if techs and full else "")
         research = facts.get("researching")

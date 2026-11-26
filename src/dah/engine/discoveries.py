@@ -402,6 +402,10 @@ class DiscoveryStep:
             out[seat] = SeatOrders([o for o in book.orders if o.kind != "discover"], book.cp_spent, dict(book.forfeit))
         for seat, book in books.items():
             out.setdefault(seat, book)
+        # core 0.8.0 (docs/TRADE.md 1.5.4): the choice in a province a pending trade gives away waits for the new
+        # holder: back to `site` now, after the battles it is the receiver's (as at a capture)
+        from .trade import promised
+        promised_now = set(promised(s)) if s.trades else set()
         for pid in sorted(s.discoveries):
             entry = s.discoveries[pid]
             if entry.get("state") != PENDING:
@@ -409,6 +413,13 @@ class DiscoveryStep:
             seat = entry["pending"]["seat"]
             d = self.rs.discoveries.get(entry["id"])
             prov = s.provinces[pid]
+            if pid in promised_now and prov.owner == seat:
+                entry["state"] = SITE
+                entry.pop("pending", None)
+                order = orders.get((seat, pid))
+                if order is not None:
+                    self.r.ev("order_rejected", [seat], None, order=order.to_dict(), reason="PROVINCE_PROMISED")
+                continue
             if d is None or seat not in alive or prov.owner != seat:
                 entry["state"] = SITE
                 entry.pop("pending", None)

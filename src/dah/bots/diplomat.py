@@ -27,6 +27,10 @@
   makes the provinces that advance it preferred targets (and keeps one unit in those held) or its branch first.
 - Stage 5 (docs/ABANDONED_LANDS.md 14.1, dah.bots.finds): Abandoned land that may hold a find only with 4 units or
   more; guards and a find's neutrals at estimate >= 0.75 (a lair >= 0.9); mixed finds by its rank.
+- Core 0.8.0 (docs/SPY_V2.md 10): one Shade reads the orders of its strongest neighbouring partner every
+  PARTNER_EVERY turns (no points against a partner: it reads for the pact-break line); the other works a rival (its
+  secret, its orders once for the point, then its ledger before a war or a pact). A break against it seen in
+  negotiation_2 gets the fortify and a public warning naming the breaker.
 """
 
 from __future__ import annotations
@@ -71,10 +75,12 @@ FOOD_TURNS = 3
 RECRUIT_UNIT = "assault"
 UNIQUE_PER_TURN = 1
 SHADE_FROM_TURN = 2
-SHADE_MIN_ALLOY = 35   # the second Shade and replacements; the first needs only its price, saved for (m6)
+SHADE_MIN_ALLOY = 28   # the second Shade and replacements (balance core 0.8.0: was 35); the first: its price (m6)
 MAX_SHADES = 2
 READ_ROUNDS = 3
 SECRET_ROUNDS = 2      # core 0.6.0: the secret objective mission (one report is enough)
+PARTNER_EVERY = 2      # core 0.8.0: the partner's orders are read every this many turns (1 round)
+LEDGER_ROUNDS = 1
 P2_FORTIFY_CP = 1   # registry: a fortify given in negotiation_2
 P2_RECALL_CP = 1    # registry default of p2.cost.recall
 MONUMENT = "monument"   # stage 4 (docs/SCORING.md 10)
@@ -86,6 +92,7 @@ LAIR_MARGIN = 0.25      # a lair: >= 0.9
 
 class DiplomatBot(Bot):
     name = "diplomat"
+    trade_policy = "diplomat"  # core 0.8.0 (docs/TRADE.md 12.1, dah.bots.trade)
     faction_style = ("synclite", "captains", "ash_choir", "litany", "growth")
     artifact_likes = ("seal_of_command", "tithe_chalice", "ore_vein", "trail_maps", "calm_banner")
     branch_priority = ("logistics", "industry", "mystery", "war")
@@ -197,20 +204,54 @@ class DiplomatBot(Bot):
                 alloy -= spy.shade_cost()
             else:
                 alloy -= spy.shade_savings(view, self.memory, from_turn=SHADE_FROM_TURN, alloy=alloy)
-            target = spy.strongest_neighbour(view, view.is_partner) or spy.rival_target(view)
-            busy = {str((sh.get("mission") or {}).get("target")) for sh in spy.active_shades(view)}
+            busy = spy.mission_targets(view)
             idle = spy.idle_shades(view)
-            if idle and target is not None and target not in busy and spy.can_start(view):
-                mission = "read_orders" if view.whisper >= spy.MISSIONS["read_orders"][0] else "ledger"
-                if spy.secret_wanted(view, self.memory, target):
-                    mission = spy.SECRET
-                got = spy.spy_order(view, idle[0], mission, target, SECRET_ROUNDS if mission == spy.SECRET
-                                    else READ_ROUNDS, alloy, food)
-                if got is not None:
-                    out.append(got[0])
-                    alloy -= got[1]
-                    food -= got[2]
+            esp = view.espionage or {}
+            slots = max(0, int(esp.get("active_limit", 0)) - len(spy.active_shades(view)))
+            for mission, target, rounds in self._mission_plan(view, busy):
+                if not idle or not slots:
+                    break
+                got = spy.spy_order(view, idle[0], mission, target, rounds, alloy, food)
+                if got is None:
+                    continue
+                out.append(got[0])
+                alloy -= got[1]
+                food -= got[2]
+                idle, slots = idle[1:], slots - 1
+                busy.add(target)
         return out, view.free_food() - food, view.resource(BUILD_RESOURCE) - alloy
+
+    def _mission_plan(self, view: StateView, busy: set[str]) -> list[tuple[str, str, int]]:
+        """(mission, target, rounds) for the free Shades, best first: the partner's orders every PARTNER_EVERY turns
+        (its secret objective first), then a rival: its secret, its orders while they still score, its ledger."""
+        read = "read_orders" in spy.MISSIONS and view.whisper >= spy.MISSIONS["read_orders"][0]
+        plans: list[tuple[str, str, int]] = []
+        partner = spy.strongest_neighbour(view, view.is_partner)
+        if partner is not None and partner not in busy:
+            if spy.secret_wanted(view, self.memory, partner):
+                plans.append((spy.SECRET, partner, SECRET_ROUNDS))
+            elif read and view.turn - self.memory.read_turn.get(partner, -PARTNER_EVERY) >= PARTNER_EVERY:
+                plans.append(("read_orders", partner, 1))
+        rival = spy.strongest_neighbour(view, lambda s: not view.is_partner(s)) or spy.rival_target(view)
+        if rival is not None and rival not in busy and rival != partner:
+            if spy.secret_wanted(view, self.memory, rival):
+                plans.append((spy.SECRET, rival, SECRET_ROUNDS))
+            elif read and rival not in self.memory.read_turn:
+                plans.append(("read_orders", rival, READ_ROUNDS))
+            else:
+                plans.append(("ledger", rival, LEDGER_ROUNDS))
+        return plans
+
+    def message(self, view: StateView) -> str | None:
+        """Core 0.8.0: in negotiation_2 a pact break against us that this turn's Read Orders shows is named in
+        public (the victim's warning; docs/SPY_V2.md 10)."""
+        if view.phase != "negotiation_2" or view.espionage is None:
+            return None
+        seen = spy.breaches(view, self.memory)
+        if not seen:
+            return None
+        parts = ", ".join(f"{seat} → {pid}" for seat, pid in seen[:3])
+        return f"Вижу удар в нарушение пакта: {parts}. Укрепляюсь; все видят, кто нарушает слово."
 
     @staticmethod
     def _liberate_to(view: StateView, prov: Province) -> str | None:
@@ -233,18 +274,7 @@ class DiplomatBot(Bot):
             if sabotage and target is not None and view.is_partner(target.owner) and cp_left >= P2_RECALL_CP:
                 out.append({"kind": "recall", "shade": sh["id"]})
                 cp_left -= P2_RECALL_CP
-        fortified = {str(o.get("province")) for o in current if o.get("kind") == "fortify"}
-        leaving = {str(o.get("from")) for o in current if o.get("kind") == "move" and not o.get("feint")}
-        for seat in sorted(view.players or ()):
-            for entry in self.memory.orders_of(seat, view.turn):
-                dst = str(entry.get("to"))
-                prov = view.provinces.get(dst)
-                if (entry.get("kind") != "move" or entry.get("exposed") or prov is None or not view.is_mine(prov)
-                        or dst in fortified or dst in leaving or cp_left < P2_FORTIFY_CP):
-                    continue
-                out.append({"kind": "fortify", "province": dst})
-                fortified.add(dst)
-                cp_left -= P2_FORTIFY_CP
+        out += spy.fortify_threatened(view, self.memory, current + out, cp_left)
         return out
 
     def _betrayal(self, view: StateView, estimate: Estimator) -> Order | None:

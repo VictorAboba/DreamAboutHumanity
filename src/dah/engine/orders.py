@@ -12,6 +12,7 @@ from typing import Any, Callable, Iterable, Mapping
 from . import conquest as cq
 from . import discoveries as disc
 from . import espionage as esp
+from . import trade as tr
 from .content import Ruleset, StatKey
 from .diplomacy import pact_between
 from .registry import ORDER_KINDS, ORDER_PHASE_RULES, ORDER_SYSTEMS
@@ -374,9 +375,9 @@ def parse_order(ruleset: Ruleset, data: Mapping[str, Any], order_id: str, phase:
         return _spy_order(ruleset, data, order_id, added)
     if kind == "recall":
         return Order(order_id, kind, added, shade=_shade_field(data, RECALL_EXAMPLE))
-    if kind in ORDER_SYSTEMS:     # ward: the outpost comes with stage 3b (SPY_AND_CONQUEST.md 2.8)
-        raise OrderRejected(NOT_AVAILABLE, f"приказ {kind} пока не поддерживается")
     province = _require_str(data, "province")
+    if kind == "ward":            # core 0.8.0 (docs/SPY_V2.md 4.6): the Ward, stage 3b (SPY_AND_CONQUEST.md 2.8)
+        return Order(order_id, kind, added, province=province)
     if kind == "recruit":
         unit = resolve_unit_ref(ruleset, _require_str(data, "unit"))
         if unit is None:
@@ -514,7 +515,7 @@ def order_cost(ruleset: Ruleset, faction: StatKey, order: Order, state: GameStat
         return Counter(ruleset.building_order_cost(order.building, faction))
     if order.kind == "dispose":
         return Counter(dispose_cost(ruleset, faction, order))
-    if order.kind in ("hire_shade", "spy"):
+    if order.kind in ("hire_shade", "spy", "ward"):
         return Counter(esp.order_cost(ruleset, faction, order))
     return Counter()
 
@@ -571,6 +572,9 @@ def _rules_problem(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrde
         return PHASE_LOCKED, "место выбыло из игры"
     others = [o for o in book.orders if exclude is None or o.id != exclude]
     key = stat_key(state, ruleset, seat)
+    promised = tr.order_problem(state, seat, order)     # core 0.8.0 (docs/TRADE.md 1.4, 1.5.8)
+    if promised:
+        return promised
     if order.kind in ruleset.gated_orders and f"order:{order.kind}" not in ruleset.unlocks(key):
         return NOT_AVAILABLE, f"приказ {order.kind} ещё не открыт (нужна технология или артефакт)"
     if order.kind == "research":
@@ -591,7 +595,7 @@ def _rules_problem(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrde
             return INVALID, f"судьба {order.province} уже задана (одна запись на провинцию): поправь или отмени её"
         problem = cq.dispose_problem(state, ruleset, seat, order)
         return problem or _resources_problem(state, ruleset, seat, book, order, others, key)
-    if order.kind in ("hire_shade", "spy", "recall"):
+    if order.kind in ("hire_shade", "spy", "recall", "ward"):
         problem = esp.order_problem(state, ruleset, seat, order, others, key)
         return problem or _resources_problem(state, ruleset, seat, book, order, others, key)
     if order.kind == "discover":
@@ -725,7 +729,8 @@ def _check(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders, orde
 
 def move_warnings(state: GameState, ruleset: Ruleset, seat: str, order: Order) -> str | None:
     """The warnings of an accepted order: a pact bounce or breach, a possible find in an Abandoned province."""
-    found = [w for w in (pact_warning(state, seat, order), disc.move_warning(state, ruleset, seat, order)) if w]
+    found = [w for w in (pact_warning(state, seat, order), disc.move_warning(state, ruleset, seat, order),
+                         tr.move_warning(state, seat, order)) if w]
     return "; ".join(found) or None
 
 

@@ -71,7 +71,8 @@ def _stage3_goal_lines(config: dict[str, Any]) -> list[str]:
         lines.append("В партии есть шпионаж: Тени (приказы hire_shade, spy, recall; свободную Тень покажет строка "
                      "ТЕНИ в get_state; dah.rules(topic=\"spying\")). "
                      "Донесения разведсреза приходят в начале П2: dah.get_intel(), Тени — dah.list_spies(), шансы "
-                     "задания — dah.estimate_mission().")
+                     "задания — dah.estimate_mission(). Наблюдение даёт точный состав и защитника провинции "
+                     "(dah.estimate(defender=\"r3\")), Чтение приказов — удары по тебе и нарушения пактов до расчёта.")
     if on.get("conquest"):
         lines.append("В партии есть завоевание: отнятая у игрока провинция — оккупация, её судьбу решают приказы "
                      "dispose и policy (dah.rules(topic=\"conquest\"); разделы ОККУПАЦИЯ, ПРИТЯЗАНИЯ в get_state).")
@@ -80,6 +81,10 @@ def _stage3_goal_lines(config: dict[str, Any]) -> list[str]:
                      "[руины] в get_state): вход любой армии запускает скрытую находку — плюшку или помеху (помеха "
                      "может стереть мелкую армию целиком); выбор смешанной — приказ discover по строке НАХОДКА; руины "
                      "охраняет стража с наградой (dah.rules(topic=\"discoveries\")).")
+    if on.get("trade"):
+        lines.append("В партии есть торговля: обмен «даю X за Y» (ресурсы, провинция, копия донесения) — "
+                     "dah.propose_trade(to, give, want), ответ — dah.respond_trade(id, accept|reject), свои сделки и "
+                     "обещания — dah.list_trades() (dah.rules(topic=\"trade\")).")
     return lines
 
 
@@ -90,6 +95,23 @@ SCORE_NAMES = {"territory": "земля", "science": "наука", "works": "в�
 _SOURCE_SYSTEMS = registry.SCORE_SOURCE_SYSTEMS
 
 
+def _intel_label(config: dict[str, Any]) -> str:
+    """The intel source in the goal: core 0.8.0 (decision 30, docs/SPY_V2.md 9.1) scores only the missions whose
+    `intel` is not `no`, named from the pack like the rules' ШПИОНАЖ line; older packs, every success."""
+    from dah.engine import scoring as sc_
+    from dah.game import game_ruleset
+    try:
+        rs = game_ruleset(config)
+    except Exception:          # a config the ruleset cannot be built from: the old wording
+        return SCORE_NAMES["intel"]
+    if all(sc_.intel_kind(m) == sc_.EACH_TURN for m in rs.missions.values()):
+        return SCORE_NAMES["intel"]
+    scoring = sorted((m for m in rs.missions.values() if sc_.intel_kind(m) != sc_.NO_INTEL),
+                     key=lambda m: (m.behavior != "read_objective", m.id))
+    cap = int(rs.stat("score.intel.cap"))
+    return f"разведка ({', '.join(m.id.rsplit(':', 1)[-1] for m in scoring)}; ≤{cap})"
+
+
 def _victory_goal_line(config: dict[str, Any]) -> str:
     """How the game is won (SCORING.md 8): the default line, or the sources this game's scoring counts."""
     systems = config.get("systems") or {}
@@ -98,7 +120,8 @@ def _victory_goal_line(config: dict[str, Any]) -> str:
     if not weights or {k: v for k, v in weights.items() if v} == {"territory": 1}:
         return ("Цель игры: к концу партии набрать больше всех очков (1 за провинцию, +3 за каждую столицу) "
                 "или остаться последним живым. Чужой счёт ты видишь только как «≥» (по видимым провинциям).")
-    names = " + ".join(SCORE_NAMES[src] + (f" ×{weights[src]}" if weights[src] != 1 else "")
+    labels = {**SCORE_NAMES, "intel": _intel_label(config)} if weights.get("intel") else SCORE_NAMES
+    names = " + ".join(labels[src] + (f" ×{weights[src]}" if weights[src] != 1 else "")
                        for src in SCORE_NAMES if weights.get(src))      # the config on disk has sorted keys
     where = "dah.get_setup() и dah.get_state()" if config.get("setup") else "dah.get_state()"
     spy = (" (узнать чужую можно Тенью, миссия secret)"
@@ -222,7 +245,7 @@ def cmd_game_create(args: argparse.Namespace) -> int:
                          artifacts=args.artifacts, artifact_offer=args.artifact_offer,
                          artifact_points=args.artifact_points,
                          systems={"espionage": _switch(args.espionage), "conquest": _switch(args.conquest),
-                                  "discoveries": _switch(args.discoveries)},
+                                  "discoveries": _switch(args.discoveries), "trade": _switch(args.trade)},
                          discoveries={"extra": args.discovery_extra} if args.discovery_extra is not None else None,
                          scoring=parse_scoring(args.scoring) if args.scoring else None, objectives=args.objectives,
                          objectives_salt=secrets.randbits(63))
@@ -238,7 +261,8 @@ def cmd_game_create(args: argparse.Namespace) -> int:
         print(f"Фаза старта: {config['phase_limits']['setup']} с; артефакты — {mode}; уникальные фракции: "
               f"{'да' if st['unique_factions'] else 'нет'}.")
     if config.get("systems"):
-        names = {"espionage": "шпионаж", "conquest": "завоевание", "discoveries": "Заброшенные земли"}
+        names = {"espionage": "шпионаж", "conquest": "завоевание", "discoveries": "Заброшенные земли",
+                 "trade": "торговля"}
         print("Системы: " + ", ".join(f"{names.get(k, k)} {'вкл' if v else 'выкл'}"
                                       for k, v in config["systems"].items()) + ".")
     if config.get("scoring"):
@@ -358,6 +382,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="завоевание в этой партии (по умолчанию — как в сценарии)")
     create.add_argument("--discoveries", choices=("on", "off"),
                         help="Заброшенные земли и находки (по умолчанию — как в сценарии)")
+    create.add_argument("--trade", choices=("on", "off"),
+                        help="торговля: обмен propose_trade/respond_trade (по умолчанию — как в сценарии)")
     create.add_argument("--discovery-extra", type=int,
                         help="сколько находок положить в обычные нейтральные провинции (0..20; по умолчанию — из "
                              "сценария)")

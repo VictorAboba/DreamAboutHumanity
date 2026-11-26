@@ -146,6 +146,15 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
     exposed), rejected missions, captures by mode, fates by disposition with their price and loot, revolts against
     the seat's occupations, claims it got, and policies it could not pay for. The rates of section 8 (accuracy,
     intel used, fooled by a feint) are 3b and stay offline.
+    Core 0.8.0 (docs/SPY_V2.md 11; only when the journal has Shade missions): `spy_v2` (dah.report_spy): per seat the
+    deep missions, missions after the intel cap, by turn bucket, idle Shades, needless Observations, intel points by
+    kind and target, denials, empty missions, informativeness, catches by C_loc and at Wards, expected against actual
+    catches, reports turned into decisions and the sabotage effects; per game the forewarned pact breaks and the builds
+    sabotage stopped; and the m10 criteria.
+    Core 0.8.0 (docs/TRADE.md 13; only when the journal has trade events): `trade` (dah.report_trade): per seat offers,
+    answers, settled and failed trades, accept rate, answer time, bargaining chains, provinces and report copies sold
+    and bought, value traded, terms_of_trade, promises (kept / partial / broken / void), reciprocity, kingmaking; per
+    game the rates, reference prices, transfers (recaptured, attacked), copies, manual swaps and the promises.
     Stage 5 (docs/ABANDONED_LANDS.md 14.2; only with Abandoned land): `discoveries` — the layout and per seat the finds
     set off, the value they realized (P), the luck against the mean of the seats, choices, the ruins' Treasury, and
     whether the luckiest seat won (see `_discoveries`).
@@ -360,6 +369,14 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
     finds = _discoveries(events, report)
     if finds is not None:
         report["discoveries"] = finds
+    from dah.report_spy import spy_v2
+    spy = spy_v2(events, list(report["seats"]))     # core 0.8.0 (docs/SPY_V2.md 11); only with Shade missions
+    if spy is not None:
+        report["spy_v2"] = spy
+    from dah.report_trade import trade_report
+    trade = trade_report(events, list(report["seats"]))     # core 0.8.0 (docs/TRADE.md 13); only with trade events
+    if trade is not None:
+        report["trade"] = trade
     in_game_s = round(over_ts - first_open_ts, 3) if over_ts is not None and first_open_ts is not None else None
     report["in_game_s"] = in_game_s
     for seat, totals in report["totals"].items():
@@ -812,6 +829,12 @@ def render_report(report: dict[str, Any]) -> str:
         lines.append("ШПИОНАЖ И ЗАВОЕВАНИЕ:")
         for seat, t in report["stage3"].items():
             lines.append(f"{seat} {nick.get(seat, seat)}: " + _stage3_line(t))
+        if report.get("spy_v2"):
+            from dah.report_spy import spy_v2_lines
+            lines += spy_v2_lines(report["spy_v2"], nick)
+    if report.get("trade"):
+        from dah.report_trade import trade_lines
+        lines += trade_lines(report["trade"], nick)
     lines += _score_lines(report, nick)
     lines += _discovery_lines(report, nick)
     lines.append("")

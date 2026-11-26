@@ -22,7 +22,8 @@ ORDER_KINDS: tuple[str, ...] = ("move", "recruit", "build", "fortify", "research
 # Switchable subsystems of stage 3 (scenario `systems`, `dah game create --espionage/--conquest`). A system that is
 # off leaves no trace: its order kinds are NOT_AVAILABLE, its stats are not in any table, its content is hidden.
 # Stage 5 (docs/ABANDONED_LANDS.md 1): `discoveries` - free starts become Abandoned lands with hidden finds.
-SYSTEMS: tuple[str, ...] = ("espionage", "conquest", "discoveries")
+# Core 0.8.0 (docs/TRADE.md 8): `trade` - offers «даю X за Y» answered by the other seat (engine/trade.py).
+SYSTEMS: tuple[str, ...] = ("espionage", "conquest", "discoveries", "trade")
 ORDER_SYSTEMS: dict[str, str] = {"hire_shade": "espionage", "spy": "espionage", "recall": "espionage",
                                  "ward": "espionage", "dispose": "conquest", "policy": "conquest",
                                  "discover": "discoveries"}
@@ -51,16 +52,33 @@ ORDER_PHASE_RULES: dict[str, dict[str, Any]] = {
 
 # Behaviours the engine knows; packs name them in missions and dispositions (several pack entries may share one
 # behaviour with other numbers). name -> {param: (kind, lo, hi, default)}; missions also say whether they are loud.
+# A parameter whose default is None is new (core 0.8.0, docs/SPY_V2.md 4): left out unless the pack gives it, so a
+# mission of an older pack keeps its parameters (and its hash) and its behaviour of 0.7.x.
 MISSION_BEHAVIORS: dict[str, dict[str, Any]] = {
-    "observe_province": {"loud": False, "params": {}},
-    "read_ledger": {"loud": False, "params": {}},
+    # exact: units as exact numbers; planned: recruits and fortify of this province from its owner's actions book
+    "observe_province": {"loud": False, "params": {"exact": (bool, 0, 1, None), "planned": (bool, 0, 1, None)}},
+    # army_total: «армия всего: lo–hi», the target's units in all its provinces
+    "read_ledger": {"loud": False, "params": {"army_total": (bool, 0, 1, None)}},
     "read_orders": {"loud": False, "params": {}},
     # core 0.6.0 (decision 26): the target's secret objectives (SCORING.md 5, SPY_AND_CONQUEST.md 2.2)
     "read_objective": {"loud": False, "params": {}},
     "sabotage": {"loud": True, "params": {"deny_fortify": (bool, 0, 1, True),
                                           "defense_mul": (float, 0.1, 1.0, 0.85),
-                                          "income_mul": (float, 0.0, 1.0, 0.0)}},
+                                          "income_mul": (float, 0.0, 1.0, 0.0),
+                                          # core 0.8.0 (docs/SPY_V2.md 4.5): a build in the province does not advance
+                                          # this turn (stall_max: stops of one build a game, 0 = no limit); an
+                                          # occupation with <= unrest_units units revolts and keeps revolt_garrison
+                                          # {unit: count} without an owner
+                                          "stall_build": (bool, 0, 1, None),
+                                          "stall_max": (int, 0, 10, None),
+                                          "unrest_units": (int, 0, 10, None),
+                                          "revolt_garrison": (dict, 1, 50, None)}},
 }
+# How a mission's success scores (core 0.8.0, docs/SPY_V2.md 5.1): each_turn (the 0.7.0 rule, the default), once a
+# game per spy, once per (spy, target seat), effect (a loud mission: only when its strike did something, credited at
+# the end of the resolution) or no (information only).
+INTEL_KINDS: tuple[str, ...] = ("each_turn", "once", "once_per_target", "effect", "no")
+INTEL_DEFAULT = "each_turn"
 # What a mission's `target` names: any province (not the spy's own), a province of another seat, or another seat.
 MISSION_TARGETS: tuple[str, ...] = ("province", "owned_province", "seat")
 DISPOSITION_BEHAVIORS: dict[str, dict[str, tuple[type, float, float, Any]]] = {
@@ -166,6 +184,11 @@ STAGE3_STATS: tuple[StatSpec, ...] = (
       for k, v in (("base", .50), ("skill", .15), ("min", .10), ("max", .95))),
     *(_s3(f"spy.feint_expose.{k}", float, 0.0, 1.0, v, _E) for k, v in (("base", .25), ("skill", .15), ("max", .90))),
     _s3("spy.intel.width", float, 0.0, 1.0, 0.30, _E),
+    # core 0.8.0 (docs/SPY_V2.md 4.2): the least width of an honest interval (2 = as before)
+    _s3("spy.intel.width_min", int, 0, 5, 2, _E),
+    # core 0.8.0 (docs/SPY_V2.md 3.2): 1 = R of a round counts the spy's other Shades checked at the same place in
+    # this recon step; 0 = R is always 0 (as before)
+    _s3("spy.detect.repeat_on", int, 0, 1, 0, _E),
     _s3("spy.xp_max", int, 0, 10, 3, _E),
     _s3("spy.cover_max", int, 0, 10, 3, _E),
     _s3("spy.ward.bonus", int, 0, 5, 2, _E),
@@ -180,6 +203,12 @@ STAGE3_STATS: tuple[StatSpec, ...] = (
     _s3("conquest.claim_turns", int, 0, 20, 10, _C),
     _s3("conquest.claim_bonus", float, 0.0, 1.0, 0.25, _C),
     _s3("conquest.loot_cooldown", int, 0, 20, 4, _C),
+    # core 0.8.0 (docs/TRADE.md 8): trade; never seeded, so rulesets without trade hash as before
+    _s3("trade.provinces_per_turn", int, 0, 5, 1, "trade"),
+    _s3("trade.province_max_value", int, 0, 5, 5, "trade"),
+    _s3("trade.reports", int, 0, 1, 1, "trade"),
+    _s3("trade.later", int, 0, 1, 1, "trade"),
+    _s3("trade.show_promises", int, 0, 1, 0, "trade"),
 )
 STATS = STATS + STAGE3_STATS
 
@@ -201,11 +230,14 @@ SCORING_SYSTEMS: tuple[str, ...] = tuple(f"scoring.{src}" for src in SCORE_SOURC
 SCORING_ANY = "scoring"
 
 # Kinds of secret objectives (SCORING.md 2.5): behaviour in engine/scoring.py, numbers in the pack.
-# kind -> {"params": {name: "province_type" | "branch" | "count"}, "target": "none" | "seat"}
+# kind -> {"params": {name: "province_type" | "branch" | "count"}, "optional"?: {name: (allowed words, the first the
+# default)}, "target": "none" | "seat"}
 OBJECTIVE_KINDS: dict[str, dict[str, Any]] = {
     "hold_type": {"params": {"type": "province_type", "count": "count"}, "target": "none"},
     "hold_count": {"params": {"count": "count"}, "target": "none"},
-    "hold_foreign": {"params": {"count": "count"}, "target": "none"},
+    # core 0.8.0 (docs/TRADE.md 6.3): `via: capture` counts only land not got without a battle (a trade, a release);
+    # optional, default `any`, kept (and hashed) only as `capture`
+    "hold_foreign": {"params": {"count": "count"}, "optional": {"via": ("any", "capture")}, "target": "none"},
     "capital_other": {"params": {"count": "count"}, "target": "none"},
     "techs_branch": {"params": {"branch": "branch", "count": "count"}, "target": "none"},
     "great_work": {"params": {"count": "count"}, "target": "none"},

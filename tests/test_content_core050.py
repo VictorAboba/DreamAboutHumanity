@@ -34,7 +34,7 @@ POOL = {
     "mechanicus": ("techs_branch", {"branch": "core:war", "count": 4}, SMALL, None),
     "treasurer": ("techs_branch", {"branch": "core:industry", "count": 3}, SMALL, None),
     "architect": ("great_work", {"count": 1}, (), None),
-    "conqueror": ("hold_foreign", {"count": 1}, (), None),
+    "conqueror": ("hold_foreign", {"via": "capture", "count": 1}, (), None),     # core 0.8.0: via (TRADE.md 6.3)
     "kingbreaker": ("rival_capital_taken", {}, (), 3),
 }
 TIERS = {"forge_lord": "medium", "granary": "medium", "shrine_keeper": "easy", "dominion": "medium",
@@ -48,7 +48,7 @@ def _seats(n: int) -> list[dict]:
 
 
 def test_pack_version_and_validation():
-    assert "version: 0.7.1" in (Path(default_pack_dirs()[0]) / "pack.yaml").read_text(encoding="utf-8")
+    assert "version: 0.8.0" in (Path(default_pack_dirs()[0]) / "pack.yaml").read_text(encoding="utf-8")
     assert "version: 0.5.0" in (LEGACY_PACKS_DIR / "core-0.5.0" / "pack.yaml").read_text(encoding="utf-8")
     assert validate_packs(default_pack_dirs()) == ([], [])
     for sid in SCORED + PLAIN:
@@ -210,7 +210,8 @@ def test_game_rules_with_scoring_are_never_cut(tmp_path, scenario, seats, artifa
     game = Game.create(gdir, FakeClock())
     text = game.rules()
     assert len(text) <= 6000 and "сокращено" not in text, len(text)
-    assert "тайная цель" in text and "rules('victory')" in text
+    # core 0.8.0 (docs/SPY_V2.md 9.1): the gloss «secret — чужая тайная цель» went to the topic
+    assert "secret" in text and "rules('victory')" in text
     topic = game.rules("victory")
     assert "Шпиль Сна" in topic and "Цареубийца" in topic
 

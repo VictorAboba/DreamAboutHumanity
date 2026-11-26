@@ -9,6 +9,7 @@ from typing import Any, Mapping, Sequence, Union
 
 from . import conquest as cq
 from . import diplomacy as dip
+from . import trade
 from . import discoveries as disc
 from . import espionage as esp
 from . import scoring as sc_
@@ -277,6 +278,10 @@ class _Resolution:
             if event is not None:
                 self.events.append(event)
         self.start_pacts()
+        if s.trades:
+            # 0: unanswered trade offers lapse, old terminal trades leave the state (docs/TRADE.md 1.1, 1.2)
+            for t in trade.lapse(s, self.turn):
+                self.ev("trade_lapsed", [t["a"], t["b"]], None, trade=t["id"], sender=t["a"])
         if self.discoveries is not None:
             books = self.discoveries.choose(alive, books)   # 1: mixed finds' choices, before the books' snapshot
         moves, fortify = self.apply_orders(alive, books)
@@ -298,6 +303,8 @@ class _Resolution:
             # 4b: fates of captures, decisions, claims; then retreats, revolts, refunds, the builds filter
             self.conquest.run()
             self.set_fortified(fortified, holding, owners_before)
+            for pid in self.conquest.transferred:     # core 0.8.0: a province a trade gave keeps no fortification
+                s.provinces[pid].fortified = False
             changes = self.conquest.changes
         else:
             self.apply_retreats()
@@ -323,6 +330,8 @@ class _Resolution:
                 if prov.fortified and not prov.unit_total():
                     prov.fortified = False
         self.builds()
+        if self.espionage is not None:
+            self.espionage.effects()              # 6b (core 0.8.0): points of strikes that did something
         self.research(alive)
         if self.discoveries is not None:
             self.discoveries.timers()             # lairs grow, then the statuses' timers
@@ -340,9 +349,11 @@ class _Resolution:
         parts = sc_.score_parts(s, self.rs) if not self.rs.default_scoring else {}
         self.finish(sc)
         seen_after = {seat: visible_provinces(s, self.rs, seat) for seat in alive}
-        by_seat = {seat: [_as_seen(e, seat) for e in self.events
+        hide_revolt = esp.unrest_in(self.rs)     # core 0.8.0 (docs/SPY_V2.md 7): a revolt's cause is not public
+        by_seat = {seat: [_as_seen(e, seat, hide_revolt) for e in self.events
                           if seat in e["seats"] or e["kind"] in _PUBLIC_KINDS
                           or (e["kind"] == "captured" and "mode" in e)      # conquest: public, without its mode
+                          or e["kind"] == trade.TRANSFERRED      # trade: to the others a plain change of owner
                           or (_seen_at(e) in seen_before[seat] | seen_after[seat]
                               and e["kind"] not in _PRIVATE_KINDS)]
                    for seat in alive}
@@ -351,8 +362,10 @@ class _Resolution:
                   "diplomacy": public_diplomacy}
         if self.conquest is not None:
             # public forms (SPY_AND_CONQUEST.md 2.7): captures, fates, revolts, claims, ruins; no prices or sources
-            public["conquest"] = [cq.public_event(e) for e in self.events
-                                  if e["kind"] in cq.PUBLIC_KINDS or e["kind"] == "captured"]
+            public["conquest"] = [cq.public_event(e, hide_revolt) if e["kind"] != trade.TRANSFERRED else
+                                  _as_seen(e, "")
+                                  for e in self.events
+                                  if e["kind"] in cq.PUBLIC_KINDS or e["kind"] in ("captured", trade.TRANSFERRED)]
             public["claims"] = [dict(c) for c in s.claims]
         if self.rs.techs:
             public["techs_count"] = tech_counts(s, self.rs)   # public: how many (not which; no artifact grants)
@@ -754,6 +767,9 @@ class _Resolution:
         this turn, `build_stalled` to the owner with what is missing) and stays, to go on once a later turn pays."""
         still = []
         for b in self.s.pending_builds:
+            if self.sabotage_stall(b):
+                still.append(b)
+                continue
             if b.cost and not self.pay_share(b):
                 still.append(b)
                 continue
@@ -769,18 +785,52 @@ class _Resolution:
                         ready_turn=self.turn)
         self.s.pending_builds = still
 
-    def pay_share(self, b: PendingBuild) -> bool:
-        """The share due at this build step of a build paid in parts: True when paid (or already paid with the order
-        this turn); False when the owner's stock falls short (nothing is taken, the build is stalled)."""
+    def sabotage_stall(self, b: PendingBuild) -> bool:
+        """Core 0.8.0 (docs/SPY_V2.md 4.5a): a sabotage strike with `stall_build` on the build's province stops it
+        this turn: no progress, its share not taken (the share of the order's own turn stays paid), `build_sabotaged`
+        to the owner (never the author). Only a real stop: not when the share is not covered (the usual
+        `build_stalled` follows), not on the turn after a stop (`sabotage_immune_turn`), not once the build has
+        `stall_max` stops (0: no limit). Several strikes on one province give one stop."""
+        if self.espionage is None:
+            return False
+        mark = esp.stall_mark(self.s.provinces[b.province], self.turn)
+        if mark is None:
+            return False
+        limit = int(mark.get("stall_max") or 0)
+        if limit and b.sabotage_stalls >= limit or b.sabotage_immune_turn == self.turn:
+            return False
+        index, shares, due, missing = self.share_due(b)
+        if missing:
+            return False
+        # `stalled` means «the share was not paid» (views say «нет доли»): the share is covered, so it is not; the
+        # stop itself is told by the event
+        b.stalled = False
+        b.sabotage_stalls += 1
+        b.sabotage_immune_turn = self.turn + 1
+        self.ev("build_sabotaged", [b.seat], b.province, seat=b.seat, building=b.building, share=index + 1,
+                shares=shares, turns_left=b.turns_left)
+        return True
+
+    def share_due(self, b: PendingBuild) -> tuple[int, int, dict[str, int] | None, dict[str, int]]:
+        """(shares paid so far, shares, the share due at this build step, what the owner's stock misses of it); the
+        due share is None when none is due (a build paid in full, or its first share paid with the order)."""
         bdef = self.rs.buildings.get(b.building)
         shares = bdef.build_turns if bdef is not None else 1
         index = shares - b.turns_left          # shares paid so far = turns of progress so far
-        if index <= 0 or index >= shares:
-            b.stalled = False
-            return True
+        if not b.cost or index <= 0 or index >= shares:
+            return index, shares, None, {}
         due = split_cost(b.cost, shares, index)
         stock = self.s.players[b.seat].resources
-        missing = {r: n - stock.get(r, 0) for r, n in sorted(due.items()) if stock.get(r, 0) < n}
+        return index, shares, due, {r: n - stock.get(r, 0) for r, n in sorted(due.items()) if stock.get(r, 0) < n}
+
+    def pay_share(self, b: PendingBuild) -> bool:
+        """The share due at this build step of a build paid in parts: True when paid (or already paid with the order
+        this turn); False when the owner's stock falls short (nothing is taken, the build is stalled)."""
+        index, shares, due, missing = self.share_due(b)
+        if due is None:
+            b.stalled = False
+            return True
+        stock = self.s.players[b.seat].resources
         if missing:
             b.stalled = True
             self.ev("build_stalled", [b.seat], b.province, seat=b.seat, building=b.building, due=due,
@@ -835,7 +885,7 @@ _PRIVATE_KINDS = frozenset({"order_rejected", "economy", "starvation", "build_st
 _PUBLIC_KINDS = dip.PUBLIC_KINDS | cq.PUBLIC_KINDS | sc_.PUBLIC_KINDS
 
 
-def _as_seen(event: dict[str, Any], seat: str) -> dict[str, Any]:
+def _as_seen(event: dict[str, Any], seat: str, hide_revolt: bool = False) -> dict[str, Any]:
     """A public event loses its private fields for a seat that is not a side: gift amounts and pact ids, a fate's
     price, loot and source, a capture's mode."""
     if event["kind"] == "sabotage":
@@ -846,6 +896,10 @@ def _as_seen(event: dict[str, Any], seat: str) -> dict[str, Any]:
         return event if event.get("seat") == seat else cq.public_event(event)
     if event["kind"] == "captured" and "mode" in event:
         return event if event.get("to") == seat else cq.public_event(event)
+    if event["kind"] == trade.TRANSFERRED and seat not in event["seats"]:
+        # core 0.8.0 (docs/TRADE.md 16а): the others see the change of owner as any change, never that a trade did it
+        return {"kind": "captured", "seats": event["seats"], "province": event["province"], "from": event["from"],
+                "to": event["to"], "status": cq.STATUS_FULL if event.get("status") == "return" else cq.STATUS_OCCUPIED}
     if event["kind"] in disc.FOG_KINDS and seat not in event["seats"]:
         return disc.public_event(event)
     if seat in event["seats"]:
@@ -853,7 +907,7 @@ def _as_seen(event: dict[str, Any], seat: str) -> dict[str, Any]:
     if event["kind"] in dip.PUBLIC_KINDS:
         return dip.public_event(event)
     if event["kind"] in cq.PUBLIC_KINDS:
-        return cq.public_event(event)
+        return cq.public_event(event, hide_revolt)
     return event
 
 

@@ -50,8 +50,10 @@ DEFAULT_MESSAGE_LIMITS: dict[str, Any] = {
     "negotiation_2": {"per_recipient": 10, "private": 10, "public": 1},
     "max_chars": 800,
 }
-# Per seat and per negotiation phase: gifts sent and pact proposals made (scenario `diplomacy_limits`).
-DEFAULT_DIPLOMACY_LIMITS: dict[str, int] = {"gifts_per_phase": 3, "pact_proposals_per_phase": 3}
+# Per seat and per negotiation phase: gifts sent and pact proposals made (scenario `diplomacy_limits`); core 0.8.0
+# (docs/TRADE.md 8): trade proposals made. Game settings, not hashed; a config without a key gets the default.
+DEFAULT_DIPLOMACY_LIMITS: dict[str, int] = {"gifts_per_phase": 3, "pact_proposals_per_phase": 3,
+                                            "trade_proposals_per_phase": 3}
 
 _SUSPICIOUS = re.compile(r"ignore|игнорируй|system|токен|https?://|www\.", re.IGNORECASE)
 _DURATION_UNITS = {"s": 1, "m": 60, "h": 3600}
@@ -241,6 +243,8 @@ class MissionDef:
     params: dict[str, Any]                 # the behaviour's parameters, defaults filled in
     loud: bool                             # a loud mission strikes in the resolution (sabotage)
     description: str = ""
+    # core 0.8.0 (docs/SPY_V2.md 5.1): how a success scores (registry.INTEL_KINDS); hashed only when not each_turn
+    intel: str = registry.INTEL_DEFAULT
 
 
 @dataclass(frozen=True)
@@ -610,6 +614,9 @@ class Ruleset:
             data["scenario"].pop("objectives", None)
         if not data["objectives"]:
             data.pop("objectives")
+        for entry in (data.get("missions") or {}).values():
+            if entry.get("intel") == registry.INTEL_DEFAULT:
+                entry.pop("intel")       # core 0.8.0: missions of older packs hash as before
         if "espionage" in data and not data["espionage"].get("shade_free"):
             data["espionage"].pop("shade_free", None)
         for entry in (data.get("objectives") or {}).values():
@@ -1072,11 +1079,21 @@ class _Builder:
             given = dict(d.get("params") or {})
             params: dict[str, Any] = {}
             ok = True
+            optional = spec.get("optional") or {}
             for name in given:
-                if name not in spec["params"]:
+                if name not in spec["params"] and name not in optional:
                     self.err(raw, ["params", name], f"kind {d['kind']!r} has no parameter {name!r}; known: "
-                                                    f"{', '.join(spec['params']) or 'none'}")
+                                                    f"{', '.join([*spec['params'], *optional]) or 'none'}")
                     ok = False
+            for name, words in optional.items():
+                value = given.get(name)
+                if value is None:
+                    continue
+                if value not in words:
+                    self.err(raw, ["params", name], f"{name} must be one of {', '.join(words)}, got {value!r}")
+                    ok = False
+                elif value != words[0]:
+                    params[name] = value        # the default is left out (and so out of the hash)
             for name, kind in spec["params"].items():
                 value = given.get(name)
                 if value is None:
@@ -1269,12 +1286,21 @@ class _Builder:
                 continue
             params = behavior_params(self, raw, spec["params"], d.get("params") or {})
             requires = d.get("requires") or {}
+            intel = d.get("intel", registry.INTEL_DEFAULT)
+            if intel is False:           # YAML 1.1 reads a bare `no` as false
+                intel = "no"
+            if intel not in registry.INTEL_KINDS:
+                self.err(raw, ["intel"], f"intel {intel!r}: one of {', '.join(registry.INTEL_KINDS)}")
+                continue
+            if intel == "effect" and not spec["loud"]:
+                self.err(raw, ["intel"], "intel 'effect' is only for a loud mission (its strike's effect scores)")
+                continue
             out[fid] = MissionDef(fid, self.name(d), self.name_en(d), d["behavior"], d["target"], d["difficulty"],
                                   lo, hi, requires.get("whisper", 0),
                                   self.refs(raw, "tech", requires.get("tech", []), ["requires", "tech"]),
                                   self.amounts(raw, d.get("cost", {}), "cost"),
                                   self.amounts(raw, d.get("cost_per_round", {}), "cost_per_round"), params,
-                                  bool(spec["loud"]), d.get("description", ""))
+                                  bool(spec["loud"]), d.get("description", ""), intel)
         return out
 
     def espionage(self) -> EspionageDef | None:
@@ -1497,6 +1523,11 @@ def behavior_params(b: _Builder, raw: _Raw, spec: Mapping[str, tuple[type, float
             b.err(raw, ["params", name], f"unknown parameter {name!r}; known: {', '.join(spec) or 'none'}")
             continue
         kind, lo, hi, _ = spec[name]
+        if kind is dict:         # {unit: count} (core 0.8.0 revolt_garrison): qualified unit ids, counts lo..hi
+            units = _unit_counts(b, raw, name, value, int(lo), int(hi))
+            if units is not None:
+                out[name] = units
+            continue
         if kind is bool:
             ok = isinstance(value, bool)
         elif kind is int:
@@ -1508,7 +1539,24 @@ def behavior_params(b: _Builder, raw: _Raw, spec: Mapping[str, tuple[type, float
             continue
         out[name] = float(value) if kind is float else value
     for name, (_, _, _, default) in spec.items():
-        out.setdefault(name, default)
+        if default is not None:          # None: a newer parameter, absent unless given (older packs hash as before)
+            out.setdefault(name, default)
+    return dict(sorted(out.items()))
+
+
+def _unit_counts(b: _Builder, raw: _Raw, name: str, value: Any, lo: int, hi: int) -> dict[str, int] | None:
+    if not isinstance(value, Mapping) or not value:
+        b.err(raw, ["params", name], f"parameter {name!r}: {{unit: count}}, got {value!r}")
+        return None
+    out: dict[str, int] = {}
+    for unit, n in value.items():
+        full = b.ref(raw, "unit", str(unit), ["params", name, unit])
+        if full is None:
+            return None
+        if not isinstance(n, int) or isinstance(n, bool) or not lo <= n <= hi:
+            b.err(raw, ["params", name, unit], f"a count is {lo}..{hi}, got {n!r}")
+            return None
+        out[full] = n
     return dict(sorted(out.items()))
 
 

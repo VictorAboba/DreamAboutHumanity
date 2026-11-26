@@ -78,10 +78,11 @@
 - id: conqueror
   name: {ru: Завоеватель, en: Conqueror}
   kind: hold_foreign
-  params: {count: 1}
+  # core 0.8.0 (docs/TRADE.md 6.3): land got by a trade or a release does not count until taken in battle
+  params: {count: 1, via: capture}
   points: 5
   difficulty: medium
-  description: Держи к концу провинцию из старта другого места.
+  description: Держи к концу провинцию из старта другого места, взятую боем.
 - id: kingbreaker
   name: {ru: Цареубийца, en: Kingbreaker}
   kind: rival_capital_taken

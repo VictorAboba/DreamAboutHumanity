@@ -183,7 +183,8 @@ def test_goal_text_names_intel_only_with_espionage():
     seats = [{"seat": s, "nick": n, "kind": "agent"} for s, n in (("A", "Альфа"), ("B", "Бета"), ("C", "Гамма"))]
     on = make_config(game_id="i", scenario="core:quad4", seats=seats, seed=1, pack_dirs=real)
     line = next(x for x in goal_text(on, "A").splitlines() if x.startswith("Цель игры"))
-    assert "война + разведка (успешные задания Тени) + твоя тайная цель" in line
+    # core 0.8.0 (decision 30): the scoring missions named from the pack
+    assert "война + разведка (secret, read_orders, sabotage; ≤3) + твоя тайная цель" in line
     off = make_config(game_id="o", scenario="core:quad4", seats=seats, seed=1, pack_dirs=real,
                       systems={"espionage": False})
     line = next(x for x in goal_text(off, "A").splitlines() if x.startswith("Цель игры"))

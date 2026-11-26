@@ -230,6 +230,20 @@ def leave_pact(game: Game, seat: str, request: Request, body: dict[str, Any]) ->
     return game.leave_pact(seat, request.path_params["pact_id"])
 
 
+def list_trades(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.trades(seat)
+
+
+def propose_trade(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.propose_trade(seat, body.get("to"), body.get("give"), body.get("want"), body.get("later"),
+                              body.get("reply_to"), body.get("replaces"), body.get("fulfils"))
+
+
+def respond_trade(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    decision = body.get("decision", body.get("accept"))
+    return game.respond_trade(seat, request.path_params["trade_id"], decision)
+
+
 def ready(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
     return game.set_ready(seat, body.get("confirm_hash"))
 
@@ -287,6 +301,9 @@ SEAT_ROUTES: list[tuple[str, str, Handler]] = [
     ("POST", "/v1/pacts", propose_pact),
     ("POST", "/v1/pacts/{pact_id}/respond", respond_pact),
     ("POST", "/v1/pacts/{pact_id}/leave", leave_pact),
+    ("GET", "/v1/trades", list_trades),
+    ("POST", "/v1/trades", propose_trade),
+    ("POST", "/v1/trades/{trade_id}/respond", respond_trade),
     ("POST", "/v1/ready", ready),
     ("POST", "/v1/unready", unready),
     ("GET", "/v1/history", history),

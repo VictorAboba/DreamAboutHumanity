@@ -10,6 +10,7 @@ from . import diplomacy as dip
 from . import discoveries as disc
 from . import registry
 from . import scoring as sc_
+from . import trade as tr
 from .content import Ruleset, split_cost
 from .model import GameState, SeatOrders
 from .orders import cp_left as _cp_left
@@ -143,6 +144,14 @@ def view_state(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders |
     if disc.on(ruleset):
         out["abandoned"] = list(state.abandoned)                 # public (ABANDONED_LANDS.md 11)
         out["discoveries_pending"] = disc.pending_json(ruleset, state, seat)
+    if tr.on(ruleset):
+        # core 0.8.0 (docs/TRADE.md 9, 16а): the seat's own offers and trades only; nobody else's are ever shown
+        out["trades"] = [tr.trade_json(t, seat, lambda x: state.players[x].nick) for t in tr.mine(state, seat)]
+        held = tr.escrow_of(state, seat)
+        if held:
+            you["escrow"] = held        # resources of pending trades: out of the treasury until step 4b
+        if ruleset.stat("trade.show_promises"):
+            out["promises"] = tr.promises(state, seat)      # only for the «memory vs honesty» series (TRADE.md 3)
     return out
 
 
@@ -239,6 +248,8 @@ def _treasury(ruleset: Ruleset, view: Mapping[str, Any]) -> str:
     you = view["you"]
     line = "Казна: " + " ".join(f"{ruleset.resources[r].name} {you['resources'].get(r, 0)} "
                                 f"({you['net_income'][r]:+d})" for r in ruleset.resources)
+    if you.get("escrow"):       # core 0.8.0 (docs/TRADE.md 9): resources of pending trades, out of the treasury
+        line += f"; в залоге: {tr.escrow_text(ruleset, you['escrow'])} (обмен, до расчёта)"
     if ruleset.techs and ruleset.research_resource:
         active = you.get("researching")
         now = (f"исследуется «{ruleset.techs[active['tech']].name}» {active['progress']}/{active['cost']}"
@@ -289,6 +300,13 @@ def render_state_text(state: GameState, ruleset: Ruleset, seat: str, deadline_in
         lines.append(_result_line(state, seat))
     entries = view["provinces"]
     pacts = _pacts_line(state, seat, view)
+    trades = tr.state_line(state, ruleset, seat, lambda x: _owner_tag(state, seat, x)) if tr.on(ruleset) else ""
+    if trades:
+        pacts = "\n".join(x for x in (pacts, trades) if x)
+    if tr.on(ruleset) and ruleset.stat("trade.show_promises"):
+        promised = tr.promises_line(state, ruleset, seat, lambda x: _owner_tag(state, seat, x))
+        if promised:
+            pacts = "\n".join(x for x in (pacts, promised) if x)
     conquest = _conquest_lines(state, ruleset, seat, view) + disc.pending_lines(ruleset, state, seat)
     if since_turn is not None and since_state is not None:
         old = {e["id"]: e for e in view_state(since_state, ruleset, seat)["provinces"]}
@@ -427,7 +445,8 @@ def _changes_line(state: GameState, ruleset: Ruleset, seat: str, since_turn: int
                                "retreat_lost", "order_rejected", "fortify_broken", "pact_bounce", "pact_joint",
                                "pact_broken", "pact_expired", "pact_ended", "pact_lapsed", "gift", "pact_signed",
                                "pact_renewed", "pact_leave", "tech_completed", "work_started", "work_completed",
-                               "build_stalled", "war_points",
+                               "build_stalled", "war_points", "sabotage_effect", "build_sabotaged",
+                               tr.TRANSFERRED, "trade_settled", "trade_failed",
                                *CONQUEST_EVENT_TEXT, *disc.DISCOVERY_EVENT_TEXT):
                 starving |= e["kind"] == "starvation"
                 items.append(event_text(e, ruleset, state, seat))
@@ -557,6 +576,7 @@ _DIPLOMACY_TEXT = {
     "pact_rejected": lambda e, rs, who: f"пакт {e['pact']} отклонён ({_pair(e, who)})",
     "pact_withdrawn": lambda e, rs, who: f"предложение пакта {e['pact']} отозвано ({_pair(e, who)})",
     "pact_lapsed": lambda e, rs, who: f"предложение пакта {e['pact']} не принято до конца хода ({_pair(e, who)})",
+    **tr.EVENT_TEXT,      # core 0.8.0 (docs/TRADE.md 11): private to the two seats
 }
 
 
@@ -591,10 +611,21 @@ def _disp_name(ruleset: Ruleset, did: Any) -> str:
     return ruleset.dispositions[did].name.lower() if did in ruleset.dispositions else "нет"
 
 
+def _revolt_text(e: Mapping[str, Any], rs: Ruleset, who: Any) -> str:
+    """A revolt of an occupation: the empty one (no_garrison), by sabotage (core 0.8.0, its side only) or the public
+    form of a ruleset where sabotage can raise one (no cause)."""
+    reason = e.get("reason")
+    if reason == "sabotage":
+        return (f"бунт в {e['province']}: саботаж, {who(e['seat'])} её потерял ({_units_text(rs, e.get('lost') or {})}"
+                f" сняты), провинция нейтральна, повстанцы {_units_text(rs, e.get('rebels') or {})}")
+    if reason is None:
+        return f"бунт в {e['province']}: {who(e['seat'])} её потерял, провинция нейтральна"
+    return f"бунт в {e['province']}: без гарнизона {who(e['seat'])} её потерял, провинция нейтральна"
+
+
 CONQUEST_EVENT_TEXT = {
     "disposition": _fate_text,
-    "occupation_revolt": lambda e, rs, who: f"бунт в {e['province']}: без гарнизона {who(e['seat'])} её потерял, "
-                                            "провинция нейтральна",
+    "occupation_revolt": lambda e, rs, who: _revolt_text(e, rs, who),
     "claim_created": lambda e, rs, who: f"притязание {who(e['seat'])} на {e['province']} до хода {e['until_turn']}",
     "claim_ended": lambda e, rs, who: (f"притязание {who(e['seat'])} на {e['province']} снято ("
                                        + {"returned": "провинция возвращена", "expired": "срок истёк",
@@ -644,8 +675,31 @@ _MISSION_END = {"done": "срок вышел", "empty": "вернулась ни
 
 # Report events of espionage (SPY_AND_CONQUEST.md 2.6, 2.9, 8): only their sides see them (resolve._PRIVATE_KINDS);
 # `who` names a seat (a mission's target may be a province: it is shown as is).
+_EFFECT_TEXT = {"battle": "бой с потерями", "stall": "стройка стоит", "revolt": "бунт"}
+
+
+def _sabotage_effect_text(e: Mapping[str, Any], rs: Ruleset, who: Any) -> str:
+    """Core 0.8.0 (docs/SPY_V2.md 5.2): what the spy's strike did and whether it scored."""
+    from . import scoring as sc_
+    done = ", ".join(_EFFECT_TEXT.get(k, k) for k in e.get("effects") or ())
+    # no effect: none of the countable ones (the strike's own penalties of the turn still applied)
+    text = f"удар Тени {e.get('shade')} по {e['province']}: " + (done or "без счётного эффекта (бой/стройка/бунт)")
+    if e.get("intel_point"):
+        text += " — +1 очко разведки"
+    elif "intel_point" in e:
+        reason = e.get("reason")
+        text += " — очка нет" + ("" if reason == sc_.DENY_NO_EFFECT and not done
+                                 else f" ({sc_.DENY_TEXT.get(reason, reason)})")
+    return text
+
+
 ESPIONAGE_EVENT_TEXT = {
     "sabotage": _sabotage_text,
+    "sabotage_effect": _sabotage_effect_text,
+    # core 0.8.0 (docs/SPY_V2.md 7): to the build's owner; the author is never known (a caught Shade strikes nothing)
+    "build_sabotaged": lambda e, rs, who: (f"стройка «{_building_name(rs, e['building'])}» в {e['province']} стоит "
+                                           "этот ход: саботаж; исполнитель не установлен"),
+    "intel_point": lambda e, rs, who: f"разведка +{e.get('points')} очк. ({e.get('total')} всего)",
     "strike_cancelled": lambda e, rs, who: f"удар Тени {e.get('shade')} по {e['province']} отменён: Тень отозвана",
     "feint": lambda e, rs, who: (f"ложная запись {e.get('from')}→{e.get('to')} не исполнялась: "
                                  f"{_units_text(rs, e.get('units') or {})} остались дома"),

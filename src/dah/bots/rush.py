@@ -23,13 +23,21 @@ province gets a small bonus over a neutral one. Its objective makes the province
 Stage 5 (docs/ABANDONED_LANDS.md 14.1, dah.bots.finds): it enters Abandoned land that may hold a find only with a real
 army (3 units or more); an empty such province gets a small bonus on turns 1-5; the ruins' guard and a find's
 neutrals need estimate >= 0.7 (a lair >= 0.85). Mixed finds: by its rank on the visible score.
+Core 0.8.0 (docs/SPY_V2.md 10): it holds a second Shade; with S >= 2 its sabotage goes first at a rival's great work
+under construction next to its land or at its own former land occupied with 1 unit (attacked the same turn: such a
+target gets a small bonus), the other Shade observes the target of its least sure attack. In negotiation_2 it asks
+estimate(defender="rN") by that report: below CANCEL_BELOW the attack is cancelled (1 CP); at SURE_MARGIN or more,
+even fortified, a hasty attack elsewhere is allowed besides it. A free Shade observes its attack targets. With
+espionage on it researches «Завеса шёпота» (S2) right after its two war techs.
 """
 
 from __future__ import annotations
 
+from typing import Any
+
 from dah.bots import conquest as cq
 from dah.bots import finds, score, spy
-from dah.bots.base import Bot, Estimator, Order
+from dah.bots.base import Bot, Estimator, Order, ReportEstimator
 from dah.bots.tactics import (
     Reserved,
     advance,
@@ -52,6 +60,7 @@ from dah.bots.view import (
     Province,
     StateView,
     farm_site,
+    short_id,
 )
 
 WIN_THRESHOLD = 0.6
@@ -61,7 +70,7 @@ GARRISONS = (0, 1, 2)  # units the capital keeps: one of these per bot (its seed
 P2_NEW_ATTACK_CP = 2  # registry default of p2.cost.new_attack
 UNIQUE_PER_TURN = 2  # unique units recruited per turn at most
 SHADE_FROM_TURN = 2
-SHADE_MIN_ALLOY = 35  # a replacement Shade; the first needs only its price, saved for (m6: 35 was never reached)
+SHADE_MIN_ALLOY = 28  # a replacement Shade (balance core 0.8.0: was 35); the first needs only its price (m6)
 OBSERVE_ROUNDS = 2
 SABOTAGE_ROUNDS = 2
 FEINT_CHANCE = 0.3
@@ -71,12 +80,19 @@ WINDOW_WIN = 0.5  # a hasty attack into a struck province needs this estimate (t
 FIND_ARMY = 3
 GUARD_MARGIN = 0.1      # the ruins' guard and a find's neutrals: estimate >= 0.7
 LAIR_MARGIN = 0.25      # a lair that grows: >= 0.85
+# core 0.8.0 (docs/SPY_V2.md 10)
+MAX_SHADES = 2          # the second Shade observes the attack target
+SABOTAGE_SITE_BONUS = 0.1   # a sabotage target (rival great work, weak occupation of own land) is attacked sooner
+CANCEL_BELOW = 0.45     # P2: an attack whose chance by the report (its fortify counted) is below this is cancelled
+SURE_MARGIN = 0.85      # P2: a chance this sure even if fortified allows a hasty attack besides it
+SABOTAGE_TECH = "whisper_veil"  # S2 (sabotage): researched after its war techs in games with espionage
 
 __all__ = ["RushBot", "advance", "best_attack", "distance_to_foreign"]
 
 
 class RushBot(Bot):
     name = "rush"
+    trade_policy = "rush"  # core 0.8.0 (docs/TRADE.md 12.1, dah.bots.trade)
     faction_style = ("captains", "growth", "synclite", "ash_choir", "litany")
     artifact_likes = ("mercenary_band", "mercenary_contract", "calm_banner", "war_codex", "seal_of_command")
     branch_priority = ("war", "logistics", "industry", "mystery")
@@ -85,16 +101,24 @@ class RushBot(Bot):
     def __init__(self, seat: str, seed: int) -> None:
         super().__init__(seat, seed)
         self.garrison = self.rng.choice(GARRISONS)
+        self._sure = False      # core 0.8.0: this P2 report showed an attack sure even if fortified
+
+    def research_order(self, view: StateView, techs: dict[str, Any]) -> Order | None:
+        """Core 0.8.0: with espionage on, «Завеса шёпота» (S2, sabotage) right after its war techs."""
+        self.tech_first = (*RushBot.tech_first, SABOTAGE_TECH) if view.espionage is not None else RushBot.tech_first
+        return super().research_order(view, techs)
 
     def action_orders(self, view: StateView, estimate: Estimator) -> list[Order]:
         keep = merge_reserved(garrison(capital_of(view), self.garrison), score.objective_garrison(view))
         if view.conquest:
             keep = merge_reserved(keep, cq.occupation_garrison(view))
+        site = self._sabotage_site(view)
         bonus = finds.merge_bonus(score.attack_bonus(view, war=True),
-                                  finds.attack_bonus(view, self.finds, GUARD_MARGIN, LAIR_MARGIN))
+                                  finds.attack_bonus(view, self.finds, GUARD_MARGIN, LAIR_MARGIN),
+                                  {site.id: SABOTAGE_SITE_BONUS} if site is not None else {})
         moves = plan_moves(view, estimate, WIN_THRESHOLD, self.rng, keep, bonus=bonus,
                            army_ok=finds.army_ok(self.finds, FIND_ARMY))
-        extra, food, alloy = self._stage3(view, moves, keep)
+        extra, food, alloy = self._stage3(view, moves, keep, site, estimate)
         plan = spy.food_view(view, food, alloy)
         works: list[Order] = []
         saving = None
@@ -108,7 +132,8 @@ class RushBot(Bot):
                                 unique_max=UNIQUE_PER_TURN, food_cap=cap)
         return works + orders + moves + fortify_orders(view, moves) + extra
 
-    def _stage3(self, view: StateView, moves: list[Order], keep: Reserved) -> tuple[list[Order], int, int]:
+    def _stage3(self, view: StateView, moves: list[Order], keep: Reserved, site: Province | None = None,
+                estimate: Estimator | None = None) -> tuple[list[Order], int, int]:
         """Conquest and espionage orders of the actions phase: (orders, provisions held, alloy held)."""
         out: list[Order] = []
         food, alloy = view.free_food(), view.resource(BUILD_RESOURCE)
@@ -119,13 +144,12 @@ class RushBot(Bot):
             policy = cq.policy_order(view, food)
             out += directives + fates + ([policy] if policy else [])
         if view.espionage is not None:
-            hire = spy.hire_order(view, self.memory, from_turn=SHADE_FROM_TURN, max_shades=1, alloy=alloy,
+            hire = spy.hire_order(view, self.memory, from_turn=SHADE_FROM_TURN, max_shades=MAX_SHADES, alloy=alloy,
                                   min_alloy=0 if spy.first_shade(view, self.memory) else SHADE_MIN_ALLOY)
             if hire is not None:
                 out.append(hire)
                 alloy -= spy.shade_cost()
-            mission = self._mission(view, moves, alloy, food)
-            if mission is not None:
+            for mission in self._missions(view, moves, alloy, food, site, estimate):
                 out.append(mission[0])
                 alloy -= mission[1]
                 food -= mission[2]
@@ -138,26 +162,92 @@ class RushBot(Bot):
                     out.append(feint)
         return out, view.free_food() - food, view.resource(BUILD_RESOURCE) - alloy
 
-    def _mission(self, view: StateView, moves: list[Order], alloy: int, food: int) -> tuple[Order, int, int] | None:
-        idle = spy.idle_shades(view)
-        if not idle or not spy.can_start(view):
+    def _sabotage_site(self, view: StateView) -> Province | None:
+        """Core 0.8.0: with S >= 2 and a Shade free to start, a rival's great work under construction next to our
+        land, else our former land occupied with 1 unit (a revolt)."""
+        if (view.espionage is None or "sabotage" not in spy.MISSIONS or view.whisper < spy.MISSIONS["sabotage"][0]
+                or not spy.idle_shades(view) or not spy.can_start(view)):
             return None
 
         def enemy(p: Province) -> bool:
             return not view.is_partner(p.owner)
 
-        if view.whisper >= spy.MISSIONS["sabotage"][0]:
-            attacked = [view.provinces[str(m["to"])] for m in moves if str(m["to"]) in view.provinces]
-            target = next((p for p in attacked if p.owner is not None and not view.is_mine(p) and enemy(p)), None)
-            target = target or spy.enemy_target(view, enemy)
-            if target is not None:
+        return spy.rival_work_site(view, enemy, self.memory) or spy.weak_occupation(view, enemy)
+
+    def _missions(self, view: StateView, moves: list[Order], alloy: int, food: int, site: Province | None,
+                  estimate: Estimator | None) -> list[tuple[Order, int, int]]:
+        """Up to two missions: a sabotage (S >= 2) and an Observation of the target of the least sure attack."""
+        idle = spy.idle_shades(view)
+        esp = view.espionage or {}
+        slots = max(0, int(esp.get("active_limit", 0)) - len(spy.active_shades(view)))
+        out: list[tuple[Order, int, int]] = []
+
+        def enemy(p: Province) -> bool:
+            return not view.is_partner(p.owner)
+
+        attacked = [view.provinces[str(m["to"])] for m in moves if str(m["to"]) in view.provinces]
+        attacked = [p for p in attacked if p.owner is not None and not view.is_mine(p) and enemy(p)]
+        busy = spy.mission_targets(view)
+        if idle and slots and "sabotage" in spy.MISSIONS and view.whisper >= spy.MISSIONS["sabotage"][0]:
+            target = site or next((p for p in attacked if p.id not in busy), None) or spy.enemy_target(view, enemy)
+            if target is not None and target.id not in busy:
                 got = spy.spy_order(view, idle[0], "sabotage", target.id, SABOTAGE_ROUNDS, alloy, food)
                 if got is not None:
-                    return got
-        target = spy.hidden_target(view, enemy) or spy.enemy_target(view, enemy)
-        if target is None:
-            return None
-        return spy.spy_order(view, idle[0], "observe", target.id, OBSERVE_ROUNDS, alloy, food)
+                    out.append(got)
+                    idle, slots, alloy, food = idle[1:], slots - 1, alloy - got[1], food - got[2]
+                    busy.add(target.id)
+        if not idle or not slots:
+            return out
+        watch = [p for p in self._least_sure(view, moves, estimate) if p.id not in busy]
+        got = spy.info_mission(view, idle[0], alloy, food, attacks=watch, ledger_of=None)
+        if got is None:     # nothing to watch before an attack: a hidden rival province (a capital first)
+            target = spy.hidden_target(view, enemy) or spy.enemy_target(view, enemy)
+            if target is not None and target.id not in busy:
+                got = spy.spy_order(view, idle[0], "observe", target.id, OBSERVE_ROUNDS, alloy, food)
+        if got is not None:
+            out.append(got)
+        return out
+
+    @staticmethod
+    def _least_sure(view: StateView, moves: list[Order], estimate: Estimator | None) -> list[Province]:
+        """The provinces of other seats our moves attack, the least sure first (the estimate by the army seen)."""
+        scored: list[tuple[float, str]] = []
+        for m in moves:
+            target = view.provinces.get(str(m["to"]))
+            if target is None or target.owner is None or view.is_mine(target):
+                continue
+            win = 0.5
+            if estimate is not None:
+                units = {short_id(u): n for u, n in (m.get("units") or {}).items()}
+                win = estimate(units, target.units or {}, target.type, target.fortified, False)
+            scored.append((win, target.id))
+        return [view.provinces[pid] for _, pid in sorted(set(scored))]
+
+    def p2_review(self, view: StateView, current: list[Order], cp_left: int,
+                  by_report: ReportEstimator) -> list[str]:
+        """Core 0.8.0 (docs/SPY_V2.md 10): an attack whose target this turn's Observation report shows too strong
+        (its chance below CANCEL_BELOW, the planned fortify counted) is cancelled (1 CP each); one sure even if
+        fortified (SURE_MARGIN) frees a hasty attack elsewhere in `p2_orders`."""
+        self._sure = False
+        cancels: list[str] = []
+        for o in current:
+            if o.get("kind") != "move" or o.get("feint") or o.get("phase_added") == "negotiation_2":
+                continue
+            rid = self.memory.report_on(str(o.get("to")), view.turn)
+            if rid is None:
+                continue
+            got = by_report(dict(o.get("units") or {}), rid, False)
+            if not got:
+                continue
+            win = float(got.get("win_prob", 0.0))
+            worst = min(win, float(got.get("win_prob_if_fortified", win)))
+            if win < CANCEL_BELOW and cp_left >= 1 and o.get("id"):
+                cancels.append(str(o["id"]))
+                cp_left -= 1
+                self.memory.decisions["cancel"] += 1
+            elif worst >= SURE_MARGIN:
+                self._sure = True
+        return cancels
 
     def p2_orders(self, view: StateView, current: list[Order], cp_left: int, estimate: Estimator) -> list[Order]:
         if cp_left < P2_NEW_ATTACK_CP:
@@ -165,9 +255,13 @@ class RushBot(Bot):
         window = self._window_attack(view, current, estimate)
         if window is not None:
             return [window]
-        if any(o.get("kind") == "move" and not o.get("feint") for o in current):
+        sure = self._sure
+        self._sure = False
+        if not sure and any(o.get("kind") == "move" and not o.get("feint") for o in current):
             return []
         attack = self._best_attack(view, reserved_by_orders(current), estimate, hasty=True)
+        if attack is not None and sure:
+            self.memory.decisions["hasty"] += 1
         return [attack] if attack is not None else []
 
     def _window_attack(self, view: StateView, current: list[Order], estimate: Estimator) -> Order | None:

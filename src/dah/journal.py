@@ -8,6 +8,11 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+# core 0.8.0 (docs/TRADE.md 11): trade, private to its two seats (`seats`) until game_over
+TRADE_TYPES = ("trade_proposed", "trade_accepted", "trade_rejected", "trade_withdrawn", "trade_replaced",
+               "trade_countered", "trade_lapsed", "trade_settled", "trade_failed", "promise_made",
+               # trade step B: a province passed by a trade, a report copy bought (both private to the two seats)
+               "province_transferred", "intel_copied")
 EVENT_TYPES = frozenset({
     "game_created", "seat_info", "phase_open", "phase_close", "recon", "call", "first_call_in_phase",
     "orders_validated", "orders_submitted", "order_edit", "order_edit_p2", "ready", "unready", "ready_cleared",
@@ -24,6 +29,10 @@ EVENT_TYPES = frozenset({
     # espionage (private to their seats; full level only)
     "shade_hired", "mission_started", "spy_round", "intel_report", "intel_read", "shade_captured", "mission_end",
     "sabotage", "strike_cancelled", "feint", "feint_exposed", "mission_rejected",
+    # core 0.8.0 (docs/SPY_V2.md 5.2, 7): what a strike did, successes that scored nothing and why
+    "sabotage_effect", "intel_denied", "build_sabotaged", "ward_set",
+    # core 0.8.0 (docs/SPY_V2.md 11): the report's «донесение → решение»
+    "orders_summary", "estimate_report",
     # stage 4 (SCORING.md 9): objectives (private to the seat until game_over), war credit (to the fight's sides),
     # great works (public), the reveal at the end
     "objectives_dealt", "war_credit", "work_started", "work_completed", "objectives_revealed",
@@ -32,6 +41,9 @@ EVENT_TYPES = frozenset({
     "discovery_units", "discovery_pending", "order_clipped", "guard_cleared", "lair_grew",
     # core 0.7.0 (decision 27, to their seat): war points per province, intel points, the shares of works paid in parts
     "war_points", "intel_point", "build_paid", "build_stalled",
+    *TRADE_TYPES,
+    # core 0.8.0 (docs/TRADE.md 13.2, to its seat): a move into a promised province dropped at step 1
+    "order_rejected",
 })
 
 # Visibility of scoring events in a non-admin view of the journal (view_events)
@@ -40,7 +52,13 @@ _SEAT_PRIVATE = {"objectives_dealt": ("seat",), "war_credit": ("killer", "victim
                  "discovery_found": ("seats",), "discovery_chosen": ("seat",), "discovery_units": ("seat",),
                  "discovery_pending": ("seat",), "order_clipped": ("seat",),
                  # core 0.7.0
-                 "war_points": ("seat",), "intel_point": ("seat",), "build_paid": ("seat",), "build_stalled": ("seat",)}
+                 "war_points": ("seat",), "intel_point": ("seat",), "build_paid": ("seat",), "build_stalled": ("seat",),
+                 # core 0.8.0
+                 "sabotage_effect": ("seat",), "intel_denied": ("seat",), "build_sabotaged": ("seat",),
+                 "ward_set": ("seat",), "orders_summary": ("seat",), "estimate_report": ("seat",),
+                 **{kind: ("seats",) for kind in TRADE_TYPES}, "order_rejected": ("seat",)}
+# core 0.8.0 (docs/SPY_V2.md 7): a revolt journaled with `cause_private` shows its cause only to its side
+_REVOLT_PRIVATE = ("reason", "lost", "rebels", "cause_private")
 # the layout of finds: nobody but the admin until game_over
 _ADMIN_ONLY = frozenset({"discoveries_placed", "discoveries_unfair", "fair_mirror_skipped"})
 
@@ -70,6 +88,11 @@ def view_events(events: list[dict[str, Any]], *, seat: str | None = None, admin:
             sides = [x for f in _SEAT_PRIVATE[kind] for x in (e.get(f) if isinstance(e.get(f), list) else [e.get(f)])]
             if spectator or seat is None or seat not in sides:
                 continue
+        elif kind == "ready_cleared" and e.get("reason") == "trade_proposed":
+            if spectator or seat is None or seat != e.get("seat"):
+                continue        # an offer is private (docs/TRADE.md 16а): nobody else learns that one was made
+        elif kind == "occupation_revolt" and e.get("cause_private"):
+            e = {k: v for k, v in e.items() if k not in _REVOLT_PRIVATE} if spectator or seat != e.get("seat") else                 {k: v for k, v in e.items() if k != "cause_private"}
         elif kind == "turn_resolved" and not spectator:
             e = dict(e)
             for field in ("scores", "score_parts"):

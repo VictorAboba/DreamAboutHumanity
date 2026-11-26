@@ -350,11 +350,11 @@ def test_state_hash_ignores_empty_stage2_fields(rs):
     data = st.to_dict()
     data.pop("seq")
     data.pop("pacts")
-    for key in ("claims", "origins", "abandoned", "discoveries"):    # stages 3 and 5, empty: not hashed either
+    for key in ("claims", "origins", "abandoned", "discoveries", "trades", "trade_seq"):    # stages 3, 5, trade
         data.pop(key)
     for p in data["players"].values():
         for key in ("techs", "research", "researching", "artifacts", "home", "shades", "spy_seq", "conquest_policy",
-                    "tally", "objectives"):        # stage 4 (SCORING.md 3), empty: not hashed either
+                    "tally", "objectives", "intel_copies"):        # stage 4 (SCORING.md 3), empty: not hashed either
             p.pop(key)
     for prov in data["provinces"].values():
         prov.pop("status")

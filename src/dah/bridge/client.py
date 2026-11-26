@@ -101,12 +101,14 @@ class GameClient:
     def amend_order(self, order_id: str, patch: dict[str, Any]) -> dict[str, Any]:
         return self.request("PATCH", f"/v1/orders/{order_id}", body=patch)
 
-    def estimate(self, attacker: Any, defender: Any, province_type: Any, fortified: Any = False,
-                 hasty: Any = False, side: Any = None, opponent: Any = None) -> dict[str, Any]:
-        """Arguments go as given: the server checks them and explains a refusal with a correct example."""
-        body = {"attacker": attacker, "defender": defender, "province_type": province_type,
-                "fortified": fortified, "hasty": hasty}
-        body.update({k: v for k, v in (("side", side), ("opponent", opponent)) if v is not None})
+    def estimate(self, attacker: Any, defender: Any, province_type: Any, fortified: Any = None,
+                 hasty: Any = None, side: Any = None, opponent: Any = None) -> dict[str, Any]:
+        """Arguments go as given: the server checks them and explains a refusal with a correct example. The flags
+        are sent only when the caller gives them: an omitted `fortified` lets estimate(defender="r3") take the
+        report's fortification (docs/SPY_V2.md 6.1)."""
+        body = {"attacker": attacker, "defender": defender, "province_type": province_type}
+        body.update({k: v for k, v in (("fortified", fortified), ("hasty", hasty), ("side", side),
+                                       ("opponent", opponent)) if v is not None})
         return self.request("POST", "/v1/estimate", body=body)
 
     def list_spies(self) -> dict[str, Any]:
@@ -156,6 +158,18 @@ class GameClient:
 
     def leave_pact(self, pact_id: str) -> dict[str, Any]:
         return self.request("POST", f"/v1/pacts/{quote(str(pact_id), safe='')}/leave", body={})
+
+    def list_trades(self) -> dict[str, Any]:
+        return self.request("GET", "/v1/trades")
+
+    def propose_trade(self, to: Any, give: Any = None, want: Any = None, later: Any = None, reply_to: Any = None,
+                      replaces: Any = None, fulfils: Any = None) -> dict[str, Any]:
+        body = {"to": to, "give": give, "want": want, "later": later, "reply_to": reply_to, "replaces": replaces,
+                "fulfils": fulfils}
+        return self.request("POST", "/v1/trades", body={k: v for k, v in body.items() if v is not None})
+
+    def respond_trade(self, trade_id: str, decision: Any) -> dict[str, Any]:
+        return self.request("POST", f"/v1/trades/{quote(str(trade_id), safe='')}/respond", body={"decision": decision})
 
     def ready(self, confirm_hash: str | None) -> dict[str, Any]:
         """`confirm_hash` may be None in the setup phase and in negotiation_1 (no orders there)."""

@@ -55,6 +55,14 @@ class SpyApi(Api, Protocol):
 
     def intel(self) -> dict[str, Any]: ...
 
+    # core 0.8.0 (docs/SPY_V2.md 6.1, 10): estimate(defender="r3") and a P2 cancel
+    def estimate_report(self, attacker: dict[str, int], report_id: str, hasty: bool) -> dict[str, Any]: ...
+    def cancel_order(self, order_id: str) -> dict[str, Any]: ...
+
+
+# (attacker units with full ids, own Observation report id, hasty) -> the estimate answer, None when refused
+ReportEstimator = Callable[[dict[str, int], str, bool], "dict[str, Any] | None"]
+
 
 class DiplomacyApi(Api, Protocol):
     """Gifts and pacts (only the bots that override `Bot.diplomacy` use these)."""
@@ -63,6 +71,10 @@ class DiplomacyApi(Api, Protocol):
     def propose_pact(self, to: str, turns: int | None) -> dict[str, Any]: ...
     def respond_pact(self, pact_id: str, decision: str) -> dict[str, Any]: ...
     def leave_pact(self, pact_id: str) -> dict[str, Any]: ...
+    # core 0.8.0 (docs/TRADE.md 9)
+    def propose_trade(self, to: str, give: dict[str, Any] | None = None, want: dict[str, Any] | None = None,
+                      **extra: Any) -> dict[str, Any]: ...
+    def respond_trade(self, trade_id: str, decision: str) -> dict[str, Any]: ...
 
 
 def seat_seed(game_id: str, seat: str) -> int:
@@ -92,6 +104,7 @@ class Bot:
     branch_priority: tuple[str, ...] = ()  # tech branch short ids, first researched first
     tech_first: tuple[str, ...] = ()  # techs taken before the branch order whenever available
     decides_finds = True  # stage 5: gives a `discover` order for its pending mixed finds (dah.bots.finds)
+    trade_policy: str | None = None  # core 0.8.0 (docs/TRADE.md 12.1, dah.bots.trade): builder | diplomat | rush
 
     def __init__(self, seat: str, seed: int) -> None:
         self.seat = seat
@@ -101,6 +114,11 @@ class Bot:
         self.memory = SpyMemory()       # stage 3: what the bot keeps of its reports and of Shades caught at it
         from dah.bots.finds import FindMemory
         self.finds = FindMemory()       # stage 5: Abandoned provinces some seat has held (their find has gone off)
+        from dah.bots.trade import TradeMemory
+        self.trade_mem = TradeMemory()  # core 0.8.0: promises paid, offers made
+        # its own generator, so a game with trade leaves the other decisions' draws as they were
+        self.trade_rng = random.Random(seed ^ 0x7AD3)
+        self.margin = self.trade_rng.uniform(0.05, 0.25)    # added to what its offers ask for
 
     # --- decision hooks (overridden by concrete bots) ---
 
@@ -110,6 +128,19 @@ class Bot:
 
     def diplomacy(self, view: StateView, api: DiplomacyApi) -> None:
         """Gifts and pact moves in a negotiation phase (called before `message`); none by default."""
+
+    def trade(self, view: StateView, api: DiplomacyApi) -> None:
+        """Core 0.8.0: answer offers, pay promises, make offers (dah.bots.trade by `trade_policy`)."""
+        if self.trade_policy is not None and view.trades is not None:
+            from dah.bots import trade as bt
+            bt.play(self, view, api)
+
+    def answer_trades(self, view: StateView, api: DiplomacyApi) -> int:
+        """Answer the offers made to this seat (after a proposal cleared its ready; the simulator's reply passes)."""
+        if self.trade_policy is None or view.trades is None:
+            return 0
+        from dah.bots import trade as bt
+        return bt.answer(self, view, api)
 
     def answer_pacts(self, view: StateView, api: DiplomacyApi) -> None:
         """Answer pact proposals made to this seat; called again when a proposal arrives after the bot pressed
@@ -145,6 +176,12 @@ class Bot:
 
     def p2_orders(self, view: StateView, current: list[Order], cp_left: int, estimate: Estimator) -> list[Order]:
         """Extra orders for negotiation_2 (submitted with mode append)."""
+        return []
+
+    def p2_review(self, view: StateView, current: list[Order], cp_left: int,
+                  by_report: ReportEstimator) -> list[str]:
+        """Core 0.8.0 (docs/SPY_V2.md 10): ids of own orders to cancel in negotiation_2 (1 CP each) after reading
+        this turn's reports; called before `p2_orders`. None by default."""
         return []
 
     def setup_choices(self, setup: dict[str, Any]) -> tuple[list[str] | None, list[str] | None]:
@@ -233,6 +270,8 @@ class Bot:
                 self.answer_pacts(parse_state(api.state(), me), api)  # type: ignore[arg-type]
             except ApiError as exc:
                 log.info("bot %s: pact answer rejected: %s", self.seat, exc)
+        if phase in NEGOTIATION_PHASES and self.trade_policy is not None:
+            self.answer_trades(parse_state(api.state(), me), api)  # type: ignore[arg-type]
         api.ready(api.orders().get("orders_hash", ""))
 
     def read_intel(self, api: Api, view: StateView, phase: str) -> StateView:
@@ -264,6 +303,9 @@ class Bot:
                 except ApiError as exc:  # a refused gift or pact is not worth failing the phase over
                     log.info("bot %s: diplomacy rejected: %s", self.seat, exc)
                 view = parse_state(api.state(), me)
+            if self.trade_policy is not None and view.trades is not None:
+                self.trade(view, api)  # type: ignore[arg-type]
+                view = parse_state(api.state(), me)
             text = self.message(view)
             if text:
                 try:
@@ -286,6 +328,16 @@ class Bot:
             confirm_hash = api.submit_orders(orders, "replace_all").get("orders_hash")
         elif phase == "negotiation_2":
             current = api.orders()
+            if type(self).p2_review is not Bot.p2_review and view.espionage is not None:
+                cancels = self.p2_review(view, list(current.get("orders", [])), int(current.get("cp_left", 0)),
+                                         _report_estimator(api))
+                for oid in cancels:
+                    try:
+                        api.cancel_order(oid)  # type: ignore[attr-defined]
+                    except (ApiError, AttributeError) as exc:
+                        log.info("bot %s: cancel of %s refused: %s", self.seat, oid, exc)
+                if cancels:
+                    current = api.orders()
             confirm_hash = current.get("orders_hash")
             extra = self.p2_orders(view, list(current.get("orders", [])), int(current.get("cp_left", 0)), estimate)
             if extra:
@@ -293,6 +345,17 @@ class Bot:
         if confirm_hash is None:
             confirm_hash = api.orders().get("orders_hash", "")
         api.ready(confirm_hash)
+
+
+def _report_estimator(api: Api) -> ReportEstimator:
+    def by_report(attacker: dict[str, int], report_id: str, hasty: bool) -> dict[str, Any] | None:
+        try:
+            return api.estimate_report(attacker, report_id, hasty)  # type: ignore[attr-defined]
+        except (ApiError, AttributeError) as exc:
+            log.info("estimate by report %s refused: %s", report_id, exc)
+            return None
+
+    return by_report
 
 
 def _qualified_estimator(api: Api, view: StateView) -> Estimator:

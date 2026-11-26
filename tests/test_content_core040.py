@@ -57,7 +57,7 @@ def key(rs, **kw):
 # ---------------------------------------------------------------- version, freeze, switches
 
 def test_version_and_clean_validation():
-    assert "version: 0.7.1" in (CORE / "pack.yaml").read_text(encoding="utf-8")
+    assert "version: 0.8.0" in (CORE / "pack.yaml").read_text(encoding="utf-8")
     assert "version: 0.5.0" in (CORE050 / "pack.yaml").read_text(encoding="utf-8")
     assert "version: 0.4.0" in (CORE040 / "pack.yaml").read_text(encoding="utf-8")
     assert "version: 0.3.0" in (CORE030 / "pack.yaml").read_text(encoding="utf-8")
@@ -142,7 +142,7 @@ def test_scenario_switches():
     raw = {s["id"]: s for s in yaml.safe_load((CORE / "scenarios" / "scenarios.yaml").read_text(encoding="utf-8"))}
     assert all("systems" in s for s in raw.values())                 # every scenario states its switches
     for scenario in ("slice3", "slice2", "quad4"):           # core 0.6.0: Abandoned lands in slice3 and quad4
-        expected = {"espionage", "conquest"} | ({"discoveries"} if scenario != "slice2" else set())
+        expected = {"espionage", "conquest", "trade"} | ({"discoveries"} if scenario != "slice2" else set())   # trade: 0.8.0
         assert set(build_ruleset(None, scenario).scenario.systems) == expected
     assert raw["blitz_test"]["systems"] == {"espionage": False, "conquest": False}
     assert build_ruleset(None, "blitz_test").scenario.systems == ()
@@ -153,9 +153,9 @@ def test_scenario_switches():
     seats = SEATS
     assert "systems" not in make_config(game_id="b", scenario="core:blitz_test", seats=seats, seed=1)
     assert make_config(game_id="s", scenario="core:slice2", seats=seats, seed=1)["systems"] == \
-        {"espionage": True, "conquest": True}
+        {"espionage": True, "conquest": True, "trade": True}       # core 0.8.0: trade on in slice2
     off_cfg = make_config(game_id="o", scenario="core:slice2", seats=seats, seed=1, systems=OFF)
-    assert off_cfg["systems"] == {"espionage": False, "conquest": False}
+    assert off_cfg["systems"] == {"espionage": False, "conquest": False, "trade": True}
 
 
 def test_a_core_030_game_replays_and_loads_with_the_frozen_pack(tmp_path):
@@ -189,10 +189,10 @@ def test_a_core_030_game_replays_and_loads_with_the_frozen_pack(tmp_path):
 # ---------------------------------------------------------------- espionage
 
 MISSIONS = {   # id: (behavior, target, D, rounds, S needed, once, per round, loud)
-    "observe": ("observe_province", "province", 1, (1, 5), 1, {}, {FOOD: 1}, False),
+    "observe": ("observe_province", "province", 0, (1, 5), 1, {}, {FOOD: 1}, False),     # core 0.8.0: was D1
     "ledger": ("read_ledger", "seat", 1, (1, 3), 1, {}, {FOOD: 1}, False),
     "secret": ("read_objective", "seat", 1, (1, 3), 1, {}, {FOOD: 2}, False),      # core 0.6.0
-    "read_orders": ("read_orders", "seat", 3, (1, 3), 2, {}, {FOOD: 2}, False),
+    "read_orders": ("read_orders", "seat", 2, (1, 3), 1, {}, {FOOD: 2}, False),     # core 0.8.0: was D3 at S2
     "sabotage": ("sabotage", "owned_province", 3, (1, 4), 2, {ALLOY: 8}, {FOOD: 1}, True),
 }
 
@@ -211,21 +211,26 @@ def test_espionage_config_and_missions(on, off):
             (behavior, target, d, rounds, s), mid
         assert (m.cost, m.cost_per_round, m.loud, m.requires_tech) == (once, per, loud, ()), mid
         assert m.name and m.name_en and m.description, mid
-    assert on.missions["core:sabotage"].params == {"deny_fortify": True, "defense_mul": 0.85, "income_mul": 0}
+    assert on.missions["core:sabotage"].params == {"deny_fortify": True, "defense_mul": 0.85, "income_mul": 0,
+                                                   # core 0.8.0 (docs/SPY_V2.md 4.5)
+                                                   "stall_build": True, "stall_max": 1, "unrest_units": 1,
+                                                   "revolt_garrison": {"core:militia": 2}}
     assert esp.mission_cost(on, "core:sabotage", 4) == {ALLOY: 8, FOOD: 4}
     assert esp.mission_cost(on, "core:read_orders", 3) == {FOOD: 6}
     assert off.espionage is None and not off.missions
 
 
 def test_concept_example_with_core_numbers(on):
-    """2.3: Read Orders S2 against C_loc 2, D3, V0 -> 45/20, 50/16, 55/12; survive 59%, a report 63%."""
+    """2.3: Read Orders S2 against C_loc 2, D3, V0 -> 45/20, 50/16, 55/12; survive 59%, a report 63% (catch base 5%).
+    Balance core 0.8.0 (docs/SPY_V2.md «Баланс core 0.8.0»): the espionage scenarios catch from 6%, +1 point every
+    round: 45/21, 50/17, 55/13, survive 57%."""
     per = [esp.chances(on, None, S=2, C=2, D=3, V=0, K=k) for k in range(3)]
-    assert per == [(0.45, 0.2), (0.5, 0.16), (0.55, 0.12)]
-    survive = (1 - .2) * (1 - .16) * (1 - .12)
-    assert round(survive * 100) == 59
+    assert per == [(0.45, 0.21), (0.5, 0.17), (0.55, 0.13)]
+    survive = (1 - .21) * (1 - .17) * (1 - .13)
+    assert round(survive * 100) == 57
     assert [esp.chances(on, None, S=1, C=1, D=1, V=0, K=k) for k in range(3)] == \
-        [(0.55, 0.1), (0.6, 0.06), (0.65, 0.03)]                  # observe, no army, C1
-    assert [esp.chances(on, None, S=2, C=4, D=3, V=0, K=k)[1] for k in range(3)] == [0.44, 0.4, 0.36]
+        [(0.55, 0.11), (0.6, 0.07), (0.65, 0.03)]                 # observe, no army, C1
+    assert [esp.chances(on, None, S=2, C=4, D=3, V=0, K=k)[1] for k in range(3)] == [0.45, 0.41, 0.37]
 
 
 # ---------------------------------------------------------------- conquest
@@ -269,7 +274,8 @@ def test_mystery_spy_techs(on, off):
     k = key(on, techs=["core:dream_lore", "core:whisper_veil", "core:long_leash"])
     assert (esp.whisper(on, base), on.stat("spy.shades_max", base), on.stat("spy.rounds_bonus", base)) == (1, 2, 0)
     assert (esp.whisper(on, k), on.stat("spy.shades_max", k), on.stat("spy.rounds_bonus", k)) == (3, 4, 1)
-    assert esp.max_rounds(on, "core:observe", k) == 6 and esp.active_limit(on, k) == 2
+    # core 0.8.0: spy.active_base 2 (was 1)
+    assert esp.max_rounds(on, "core:observe", k) == 6 and esp.active_limit(on, k) == 3
 
 
 def test_mirrors_branch_and_hall(on, off):

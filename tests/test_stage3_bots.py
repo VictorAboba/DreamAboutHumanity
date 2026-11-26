@@ -223,14 +223,20 @@ def test_mission_styles_of_the_bots():
     obs = [o for o in rush1 if o["kind"] == "spy"]
     assert obs and obs[0]["mission"] == "observe" and obs[0]["target"] == "P08"     # the hidden capital first
     builder = BuilderBot("A", 2).action_orders(parse_state(make_state(shades=idle), ME), estimate_all(0.0))
+    # core 0.8.0 (docs/SPY_V2.md 10): the builder reads the orders of the seat with troops at its borders
     assert [o for o in builder if o["kind"] == "spy"] == [
-        {"kind": "spy", "shade": "s1", "mission": "ledger", "target": "B", "rounds": 2}]
+        {"kind": "spy", "shade": "s1", "mission": "read_orders", "target": "B", "rounds": 2}]
+    later = BuilderBot("A", 2)
+    later.memory.read_turn["B"] = 3
+    out = later.action_orders(parse_state(make_state(turn=4, shades=idle), ME), estimate_all(0.0))
+    assert [o["mission"] for o in out if o["kind"] == "spy"] == ["ledger"]      # read again only after READ_EVERY
     diplomat = DiplomatBot("A", 2).action_orders(parse_state(make_state(shades=idle, whisper=2), ME),
                                                  estimate_all(0.0))
     read = [o for o in diplomat if o["kind"] == "spy"]
     assert read and read[0]["mission"] == "read_orders" and read[0]["rounds"] == 3
     weak = DiplomatBot("A", 2).action_orders(parse_state(make_state(shades=idle, whisper=1), ME), estimate_all(0.0))
-    assert [o["mission"] for o in weak if o["kind"] == "spy"] == ["ledger"]
+    # core 0.8.0 (decision 30): Read Orders opens at S1, so the diplomat reads even without S2
+    assert [o["mission"] for o in weak if o["kind"] == "spy"] == ["read_orders"]
 
 
 def test_feint_and_window_attack_of_rush():

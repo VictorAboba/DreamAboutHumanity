@@ -44,10 +44,16 @@ PUBLIC_KINDS = frozenset({"disposition", "occupation_revolt", "claim_created", "
 _PUBLIC_DROP = {"captured": ("mode",), "disposition": ("cost", "loot", "loot_reason", "source", "disposition")}
 
 
-def public_event(event: Mapping[str, Any]) -> dict[str, Any]:
+# core 0.8.0 (docs/SPY_V2.md 7): in a ruleset where sabotage can raise a revolt, the public revolt tells no cause
+_REVOLT_DROP = ("reason", "rebels", "lost")
+
+
+def public_event(event: Mapping[str, Any], hide_revolt: bool = False) -> dict[str, Any]:
     """The form of a conquest event a seat that is not its side sees: no prices, loot or source (a directive or a
-    policy would tell that the taker had the price free), a capture without its `mode`."""
-    return {k: v for k, v in event.items() if k not in _PUBLIC_DROP.get(event["kind"], ())}
+    policy would tell that the taker had the price free), a capture without its `mode`; with `hide_revolt` (a
+    ruleset with sabotage `unrest_units`) a revolt without its reason, rebels and lost units."""
+    drop = _REVOLT_DROP if hide_revolt and event["kind"] == "occupation_revolt" else _PUBLIC_DROP.get(event["kind"], ())
+    return {k: v for k, v in event.items() if k not in drop}
 
 
 # ---------------------------------------------------------------- statuses
@@ -72,6 +78,12 @@ def is_full(prov: Province, turn: int) -> bool:
 def buildings_work(prov: Province, turn: int) -> bool:
     """Its buildings act (income, province and owner modifiers, recruitment): only in a full province."""
     return is_full(prov, turn)
+
+
+def unrest_mark(prov: Province, turn: int) -> Mapping[str, Any] | None:
+    """This turn's strike mark with the highest `unrest_units` (core 0.8.0 sabotage), the first by uid; or None."""
+    marks = [mk for mk in strike_marks(prov, turn) if mk.get("unrest_units") is not None]
+    return min(marks, key=lambda mk: (-int(mk["unrest_units"]), str(mk.get("uid") or ""))) if marks else None
 
 
 def strike_marks(prov: Province, turn: int) -> list[Mapping[str, Any]]:
@@ -254,6 +266,15 @@ def disposition_list(ruleset: Ruleset) -> str:
     return ", ".join(f"{k.split(':')[-1]} ({d.name})" for k, d in ordered_dispositions(ruleset))
 
 
+# core 0.8.0 (docs/TRADE.md 6.3): Province.status mark {from, to, turn} of land got without a battle (a trade, a
+# release), written only when an objective reads it (`hold_foreign` with `via: capture`); a capture removes it
+TRANSFER_MARK = "transferred"
+
+
+def transfer_marked(ruleset: Ruleset) -> bool:
+    return any(o.kind == "hold_foreign" and o.params.get("via") == "capture" for o in ruleset.objectives.values())
+
+
 # ---------------------------------------------------------------- resolution step 4b
 
 class ConquestStep:
@@ -271,6 +292,7 @@ class ConquestStep:
         self.held: dict[str, list[tuple[Order, Counter[str]]]] = {}
         self.used: set[tuple[str, str]] = set()          # (seat, order id) of dispose orders carried out
         self.changes: list[dict[str, Any]] = []          # public ownership changes, from explicit events
+        self.transferred: set[str] = set()               # core 0.8.0: provinces a trade gave in this resolution
 
     # -- step 1
     def hold(self, seat: str, order: Order, paid: Counter[str]) -> None:
@@ -293,6 +315,9 @@ class ConquestStep:
         for pid in sorted(self.captures):
             self.fresh(pid, self.captures[pid])
         self.decisions()
+        if self.s.trades:
+            from . import trade     # core 0.8.0 (docs/TRADE.md 1.5): pending trades pass before the retreats
+            trade.settle_all(self)
         self.r.apply_retreats()
         self.revolts()
         self.refunds()
@@ -368,6 +393,8 @@ class ConquestStep:
 
     def captured(self, pid: str, frm: str | None, by: str | None, mode: str, status: str | None) -> None:
         """The capture event (full form: with `mode`); its status is filled in when the fate is known."""
+        # a capture ends the mark «получено не боем» (docs/TRADE.md 6.3): the province now counts as taken
+        self.s.provinces[pid].status.pop(TRANSFER_MARK, None)
         self.r.ev("captured", [frm, by], pid, **{"from": frm, "to": by}, mode=mode, status=status)
         self.changes.append({"province": pid, "from": frm, "to": by, "status": status})
         self._last = (self.r.events[-1], self.changes[-1])
@@ -431,6 +458,9 @@ class ConquestStep:
             prov.units = {}
             if owner_after is not None:
                 self.drop_claims(owner_after, pid, "returned")
+            if d.behavior == RELEASE and owner_after is not None and transfer_marked(self.rs):
+                # core 0.8.0 (docs/TRADE.md 6.3): a release to another seat is land got without a battle too
+                prov.status[TRANSFER_MARK] = {"from": seat, "to": owner_after, "turn": self.turn}
         status = DISPOSITION_STATUS[d.behavior]
         if source != "decision":
             self._set_capture_status({ANNEX: STATUS_FULL, RAZE: STATUS_RUINED}.get(d.behavior, STATUS_RETURNED))
@@ -485,10 +515,24 @@ class ConquestStep:
             self.execute(pid, seat, order.disposition, "decision", order.to, paid, occ_from, None)
 
     def revolts(self) -> None:
-        """An occupation held since before this resolution with no troops of the occupant left becomes neutral."""
+        """An occupation held since before this resolution with no troops of the occupant left becomes neutral.
+        Core 0.8.0 (docs/SPY_V2.md 4.5b): a sabotage strike there with `unrest_units` makes it revolt with up to that
+        many units left after the battles; they are lost (no war points for them) and the strike's
+        `revolt_garrison` stays as rebels without an owner (a revolt with no units at all is the old empty one)."""
         for pid, prov in sorted(self.s.provinces.items()):
             occ = occupied(prov)
             if occ is None or occ.get("by") != prov.owner or occ.get("since", self.turn) >= self.turn:
+                continue
+            mark = unrest_mark(prov, self.turn) if self.r.espionage is not None else None
+            if mark is not None and 0 < prov.unit_total() <= int(mark["unrest_units"]):
+                seat = prov.owner
+                lost = dict(sorted((u, n) for u, n in prov.units.items() if n))
+                rebels = dict(mark.get("revolt_garrison") or {})
+                prov.owner = None
+                prov.units = rebels
+                prov.status.pop("occupied", None)
+                self.r.ev("occupation_revolt", [seat], pid, seat=seat, reason="sabotage", lost=lost, rebels=rebels)
+                self.changes.append({"province": pid, "from": seat, "to": None, "status": "revolt"})
                 continue
             if prov.unit_total() == 0:
                 seat = prov.owner
