@@ -494,10 +494,16 @@ def _victory_detail(rs: Ruleset, core: str) -> str:
         lines.append(f"- Разведка: +{int(st('score.intel.per_success'))} за успешное задание Тени (донесение или удар, "
                      f"любая миссия) против живого соперника, не больше {int(st('score.intel.cap'))} за партию; одна "
                      "и та же цель и миссия — раз за ход. Сколько даст успех — estimate_mission.")
-    if sc_.betrayal_on(rs):
-        lines.append(f"- Разрыв пакта: −{int(st('score.betrayal.per_break'))} к счёту за каждый пакт, который ты "
-                     "нарушил (move с \"pact\":\"break\"), и на последнем ходу тоже; выход leave_pact — без штрафа. "
-                     "Нарушения публичны, поэтому этот штраф виден всем.")
+    if sc_.betrayal_on(rs) or sc_.leave_penalty_on(rs):
+        # core 0.8.3 (decision 34): an early leave costs per_leave, in the same line («разрыв» of the score line)
+        brk = (f"−{int(st('score.betrayal.per_break'))} к счёту за каждый пакт, который ты нарушил (move с "
+               "\"pact\":\"break\"), и на последнем ходу тоже" if sc_.betrayal_on(rs) else "без штрафа")
+        leave = (f"досрочный выход leave_pact (пакт кончается раньше срока; бессрочный — всегда) — "
+                 f"−{int(st('score.betrayal.per_leave'))}, в той же строке «разрыв»; выход, когда срок и так "
+                 "кончается, и истёкший или непродлённый пакт — без штрафа; пакт, разорванный ударом, — только "
+                 "разрыв" if sc_.leave_penalty_on(rs) else "выход leave_pact — без штрафа")
+        public = "Нарушения и выходы публичны" if sc_.leave_penalty_on(rs) else "Нарушения публичны"   # 0.8.2 text
+        lines.append(f"- Разрыв пакта: {brk}; {leave}. {public}, поэтому этот штраф виден всем.")
     if sc_.on(rs, "objectives"):
         dealt = rs.scenario.objectives.get("dealt", 1)
         pool = "; ".join(f"«{o.name}» +{o.points * rs.weight('objectives')}"
@@ -529,6 +535,16 @@ def _victory_detail(rs: Ruleset, core: str) -> str:
     return "\n".join(lines)
 
 
+def _leave_cost(rs: Ruleset) -> str:
+    """Core 0.8.3 (decision 34): the price of an early leave in the pacts topic ('' while it is free)."""
+    if not sc_.leave_penalty_on(rs):
+        return ""
+    brk = f" (удар без выхода — −{int(rs.stat('score.betrayal.per_break'))})" if sc_.betrayal_on(rs) else ""
+    return (f" Выход до конца срока пакта (из бессрочного — всегда) стоит вышедшему "
+            f"−{int(rs.stat('score.betrayal.per_leave'))} к счёту{brk}; выход из П2 последнего хода срока и "
+            "истёкший пакт — бесплатно.")
+
+
 def _pacts(rs: Ruleset) -> Section:
     dl = rs.scenario.diplomacy_limits
     core = (
@@ -538,7 +554,7 @@ def _pacts(rs: Ruleset) -> Section:
         f"turns — бессрочно; ≤{dl['pact_proposals_per_phase']} за фазу) → respond_pact(id, accept|reject) до конца "
         "хода. Пакт действует сразу после принятия; кто с кем в пакте — видят все (get_state, list_pacts). "
         "leave_pact(id) — выход, объявляется всем: из П1 пакт не действует уже в расчёте этого хода, из П2 — со "
-        "следующего.\n"
+        "следующего." + _leave_cost(rs) + "\n"
         "Продление: пока пакт со сроком действует и выход не объявлен, любой из двоих может предложить продлить его — "
         "propose_pact(to=партнёр, turns=N) → respond_pact(id, accept). Принятое продление добавляет N ходов сразу "
         "после нынешнего срока (без разрыва и наложения), ID пакта прежний; что пакт продлён, видят все. Бессрочный "
@@ -552,7 +568,9 @@ def _pacts(rs: Ruleset) -> Section:
         "нарушен — этот ход бьётся как без пакта, а прочие встречи двоих в этом расчёте защищены (ходы жертвы к "
         "нарушителю возвращаются); затем пакт разорван, и все узнают, кто нарушил.")
     short = ("ДИПЛОМАТИЯ (только П1 и П2): send_gift(to, resources) — подношение свободных ресурсов; "
-             "propose_pact(to, turns) → respond_pact(id, accept|reject); leave_pact(id). Пакт: армии сторон не "
+             "propose_pact(to, turns) → respond_pact(id, accept|reject); leave_pact(id)"
+             + (f" (до срока −{int(rs.stat('score.betrayal.per_leave'))})" if sc_.leave_penalty_on(rs) else "")
+             + ". Пакт: армии сторон не "
              'сражаются (ход к союзнику вернётся); move с "pact":"break" нарушает пакт публично. ')
     if rs.system("trade"):
         # core 0.8.0 (docs/TRADE.md 10.1, 16а): the renewal phrase goes to the topic to make room for ОБМЕН; the

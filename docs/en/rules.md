@@ -288,7 +288,8 @@ deceiving is up to the player.
   so the phase does not close before it can answer.
 - `leave_pact(id)`: leaving, announced to everyone at once. Left in N1: the pact no longer protects in this turn's
   resolution; left in N2: it still protects in this resolution and ends before the next turn's. `leave_pact` on
-  one's own unanswered proposal withdraws it.
+  one's own unanswered proposal withdraws it. In scored games (core 0.8.3) leaving before the pact's term ends (an indefinite pact:
+  always) costs the leaver 1 point; leaving in N2 of the term's last turn and a pact that expires are free.
 - **Renewal.** While a pact with a fixed end is in force and nobody has given notice, either side may propose to
   renew it: `propose_pact(to=partner, turns=N)` makes a renewal proposal (its own id, `renews` = the pact's id); the
   partner answers `respond_pact(id, "accept" | "reject")`, the proposer may withdraw it with `leave_pact(id)`, an
@@ -490,7 +491,9 @@ line. `format=json` gives the same view as JSON.
     by difficulty if met at the end: easy +3 (a ready great work, three Industry techs, two shrines), medium +5, hard
     +7 (a rival's capital, the named rival's capital). Revealed only at game over;
   - **pact break**: −3 per pact the seat broke with a `"pact": "break"` move (on the last turn too; `leave_pact` costs
-    nothing); breaks are public, so everyone knows the penalty.
+    nothing in frozen packs); core 0.8.3: in the same line −1 per early `leave_pact` (before the pact's term ends,
+    always for an indefinite pact; a pact that ended broken counts only as a break); breaks and leaves are public, so
+    everyone knows the penalty.
 - The turn score is not public (decision 24): a seat sees its own in full and only a lower bound «≥» of the others'
   (the land it sees, the public great works, the pact-break penalty); a spy's «Счётная книга» mission reads a rival's
   exact breakdown, its «Тайная цель» mission the rival's secret objective.

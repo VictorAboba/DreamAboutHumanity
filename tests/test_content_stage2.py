@@ -38,11 +38,11 @@ def unique_units(rs, faction):
 
 
 def test_pack_version_and_clean_validation():
-    assert "version: 0.8.2" in (CORE / "pack.yaml").read_text(encoding="utf-8")
+    assert "version: 0.8.3" in (CORE / "pack.yaml").read_text(encoding="utf-8")
     assert validate_packs(default_pack_dirs()) == ([], [])
     for scenario in SCENARIOS:
         built = build_ruleset(None, scenario)
-        assert built.warnings == () and built.packs == {"core": "0.8.2"}
+        assert built.warnings == () and built.packs == {"core": "0.8.3"}
     assert len({build_ruleset(None, s).hash for s in SCENARIOS}) == len(SCENARIOS)
 
 

@@ -77,7 +77,7 @@ class Clock:
 # ---------------------------------------------------------------- a) the freeze of core 0.8.0
 
 def test_core_080_is_frozen_exactly_with_its_hashes():
-    assert "version: 0.8.2" in (CORE / "pack.yaml").read_text(encoding="utf-8")
+    assert "version: 0.8.3" in (CORE / "pack.yaml").read_text(encoding="utf-8")
     head = (CORE080 / "pack.yaml").read_text(encoding="utf-8")
     assert "version: 0.8.0" in head and "Frozen copy of core 0.8.0" in head and "Do not edit" in head
     for sid, prefix in CORE080_HASHES.items():

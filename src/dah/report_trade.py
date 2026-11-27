@@ -373,7 +373,8 @@ def _promises(promises: list[dict[str, Any]], flows: list[tuple[int, str, str, d
                                                                     str | None]],
               transfers: list[dict[str, Any]], last_turn: int, per: dict[str, dict[str, Any]],
               out_turn: dict[str, int] | None = None) -> list[dict[str, Any]]:
-    """13.3.1: each promised part of `later` -> kept | partial | broken | void (+ early). Resources: the promiser's
+    """13.3.1: each promised part of `later` -> kept | partial | broken | void (+ early; `owed`: the part not
+    delivered, {resources?, provinces?}). Resources: the promiser's
     one-sided transfers to the same seat in [answered turn, by_turn] and both parts of trades marked `fulfils` this
     trade; overlapping promises of a pair take them first due, first served. Provinces: a transfer from the promiser to
     the promised seat in the window. Void: due after the last turn played, or not kept and either side was
@@ -420,6 +421,11 @@ def _promises(promises: list[dict[str, Any]], flows: list[tuple[int, str, str, d
             status = "broken"
         row = {"trade": p.get("trade_id"), "from": giver, "to": taker, "by_turn": due, "status": status,
                "early": status == "kept" and when < due, "last_turns": bool(last_turn) and due > last_turn - LAST_TURNS}
+        # core 0.8.3 (decision 34, dah.report_end): the part never delivered, in the journal's own goods form
+        owed_res = {r: int(n) - got[_short(r)] for r, n in ((goods.get("resources") or {}).items())
+                    if int(n) - got[_short(r)] > 0}
+        owed_prov = [x for x in provs if x not in {t["province"] for t in passed}]
+        row["owed"] = {k: v for k, v in (("resources", owed_res), ("provinces", owed_prov)) if v}
         rows.append(row)
         t = per.setdefault(giver, _seat())
         t["promises_made"] += 1

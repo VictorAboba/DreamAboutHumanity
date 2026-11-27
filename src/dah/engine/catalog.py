@@ -53,6 +53,7 @@ _STAT_TEXT = {
     "score.war.cap_per_victim": "предел очков войны с одного соперника",
     "score.war.cap": "предел очков войны", "score.war.defense_pct": "доля очков войны в обороне, %",
     "score.betrayal.per_break": "штраф очков за нарушенный пакт",
+    "score.betrayal.per_leave": "штраф очков за досрочный выход из пакта",
     # core 0.7.0 (decision 27)
     "score.war.province_cap": "предел очков войны с одной провинции",
     "score.war.hold_turns": "ходов удержания за +1 очко войны",

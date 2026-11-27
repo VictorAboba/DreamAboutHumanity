@@ -36,6 +36,9 @@
 # Core 0.8.1 (decision 32, measurement m10): the deep missions (secret, read_orders) score against a pact partner too
 # (score.intel.pact_deep 1); a sabotage against a partner still scores nothing. Espionage never breaks a pact
 # (SPY_V2.md 8), sabotage included.
+# Core 0.8.3 (decision 34, measurement m12: the only war began with a free leave and a strike in the same turn): a
+# leave announced before the pact's term ends costs the leaver 1 point (score.betrayal.per_leave, the same line as
+# the break's -3); the leave still takes effect at once. A pact that lapses or is not renewed costs nothing.
 - id: slice3
   name: Срез на троих
   map: mirror3
@@ -69,6 +72,7 @@
     - {type: modify, target: score.war.province_total, op: set, value: 8}
     - {type: modify, target: score.war.no_reclaim, op: set, value: 1}
     - {type: modify, target: score.betrayal.per_break, op: set, value: 3}
+    - {type: modify, target: score.betrayal.per_leave, op: set, value: 1}
     - {type: modify, target: score.intel.pact_deep, op: set, value: 1}
     - {type: modify, target: spy.active_base, op: set, value: 2}
     - {type: modify, target: spy.intel.width_min, op: set, value: 1}
@@ -94,6 +98,7 @@
     - {type: modify, target: score.war.province_total, op: set, value: 8}
     - {type: modify, target: score.war.no_reclaim, op: set, value: 1}
     - {type: modify, target: score.betrayal.per_break, op: set, value: 3}
+    - {type: modify, target: score.betrayal.per_leave, op: set, value: 1}
     - {type: modify, target: score.intel.pact_deep, op: set, value: 1}
     - {type: modify, target: spy.active_base, op: set, value: 2}
     - {type: modify, target: spy.intel.width_min, op: set, value: 1}
@@ -136,6 +141,7 @@
     - {type: modify, target: score.war.province_total, op: set, value: 8}
     - {type: modify, target: score.war.no_reclaim, op: set, value: 1}
     - {type: modify, target: score.betrayal.per_break, op: set, value: 3}
+    - {type: modify, target: score.betrayal.per_leave, op: set, value: 1}
     - {type: modify, target: score.intel.pact_deep, op: set, value: 1}
     - {type: modify, target: spy.active_base, op: set, value: 2}
     - {type: modify, target: spy.intel.width_min, op: set, value: 1}
@@ -189,6 +195,7 @@
     - {type: modify, target: score.war.province_total, op: set, value: 8}
     - {type: modify, target: score.war.no_reclaim, op: set, value: 1}
     - {type: modify, target: score.betrayal.per_break, op: set, value: 3}
+    - {type: modify, target: score.betrayal.per_leave, op: set, value: 1}
     - {type: modify, target: score.intel.pact_deep, op: set, value: 1}
     - {type: modify, target: spy.active_base, op: set, value: 2}
     - {type: modify, target: spy.intel.width_min, op: set, value: 1}
@@ -223,6 +230,7 @@
     - {type: modify, target: score.war.province_total, op: set, value: 8}
     - {type: modify, target: score.war.no_reclaim, op: set, value: 1}
     - {type: modify, target: score.betrayal.per_break, op: set, value: 3}
+    - {type: modify, target: score.betrayal.per_leave, op: set, value: 1}
     - {type: modify, target: score.intel.pact_deep, op: set, value: 1}
     - {type: modify, target: spy.active_base, op: set, value: 2}
     - {type: modify, target: spy.intel.width_min, op: set, value: 1}
@@ -248,6 +256,7 @@
     - {type: modify, target: score.war.province_total, op: set, value: 8}
     - {type: modify, target: score.war.no_reclaim, op: set, value: 1}
     - {type: modify, target: score.betrayal.per_break, op: set, value: 3}
+    - {type: modify, target: score.betrayal.per_leave, op: set, value: 1}
     - {type: modify, target: score.intel.pact_deep, op: set, value: 1}
     - {type: modify, target: spy.active_base, op: set, value: 2}
     - {type: modify, target: spy.intel.width_min, op: set, value: 1}

@@ -1,0 +1,23 @@
+- id: forge
+  name: Кузнечный мир
+  short: кузн.
+  income: {alloy: 4}
+- id: agri
+  name: Агромир
+  short: агро
+  income: {provisions: 4}
+- id: waste
+  name: Пустошь
+  short: пуст.
+  income: {alloy: 1, provisions: 1}
+  defense_mul: 1.1
+- id: capital
+  name: Столица
+  short: столица
+  income: {alloy: 3, provisions: 2, creed: 3}
+  defense_mul: 1.25
+  conquest_value: 3     # stage 3: fates of a captured capital cost and yield x3
+- id: shrine
+  name: {ru: Святыня, en: Shrine}
+  short: свят.
+  income: {creed: 3, provisions: 1}

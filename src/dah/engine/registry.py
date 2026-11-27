@@ -287,6 +287,10 @@ SCORING_STATS: tuple[StatSpec, ...] = (
     # core 0.6.0 (decision 26): points a seat loses per pact it broke (a penalty line `betrayal` of the turn score
     # under a non-default scoring); 0 (the default) = no penalty, so older packs score as before
     StatSpec("score.betrayal.per_break", int, 0, 10, 0, seeded=False, system=SCORING_ANY),
+    # core 0.8.3 (decision 34, measurement m12): points a seat loses per pact it left early (an announced leave_pact
+    # that ends the pact before its term: a pact without a fixed end counts too), in the same `betrayal` line; a pact
+    # that ends broken counts only as a break. 0 (the default, older packs) = a leave is free, as before
+    StatSpec("score.betrayal.per_leave", int, 0, 10, 0, seeded=False, system=SCORING_ANY),
 )
 STATS = STATS + SCORING_STATS
 

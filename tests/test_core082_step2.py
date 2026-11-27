@@ -300,7 +300,7 @@ def _copy(src: Path, tmp_path: Path) -> Path:
     return dst
 
 
-@pytest.mark.parametrize("name", ["m7", "m8", "m9", "m10", "m11"])
+@pytest.mark.parametrize("name", ["m7", "m8", "m9", "m10", "m11", "m12"])
 def test_old_journals_keep_their_spend_report(tmp_path, name):
     """Before core 0.8.2 the server refused an eliminated seat's after-game figures: no old journal has one, so no
     seat of a measured game gets the new elimination split (m11's Гамма keeps «после game_over $0.12, 0.0с»)."""

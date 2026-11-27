@@ -186,8 +186,11 @@ def _parse_turns(turns: Any) -> int | None:
     return turns
 
 
-def make_proposal(state: GameState, seat: str, to: Any, turns: Any, phase: str) -> dict[str, Any]:
-    """A new pact proposal; to the partner of an active pact with a fixed end, a proposal to renew it (`renews`)."""
+def make_proposal(state: GameState, seat: str, to: Any, turns: Any, phase: str,
+                  leave_price: Any = None) -> dict[str, Any]:
+    """A new pact proposal; to the partner of an active pact with a fixed end, a proposal to renew it (`renews`).
+    `leave_price(pact)` -> points a leave of that pact would cost the seat now (core 0.8.3, decision 34: the game
+    passes scoring.leave_cost); a refusal that advises a leave names the price."""
     _require_turn(state, seat, phase)
     recipient = _living_other(state, seat, to)
     n = _parse_turns(turns)
@@ -204,9 +207,11 @@ def make_proposal(state: GameState, seat: str, to: Any, turns: Any, phase: str) 
                                                     "продлить его нельзя; новый пакт можно предложить с хода "
                                                     f"{p['ends_before_turn']}")
             if p["until_turn"] is None:
+                fine = leave_price(dict(p, leaving=seat, ends_before_turn=state.turn)) if leave_price else 0
+                price = f"; выход из бессрочного пакта — −{fine} к твоему счёту" if fine else ""
                 raise DiplomacyError("PACT_EXISTS", f"пакт с {nick} ({p['id']}) бессрочный: продлевать нечего, он "
                                                     "действует, пока кто-то не выйдет. Другие условия — выйди "
-                                                    f"(leave_pact(id=\"{p['id']}\")) и предложи новый")
+                                                    f"(leave_pact(id=\"{p['id']}\")) и предложи новый{price}")
             renewal = pending_renewal(state, p["id"])
             if renewal is not None:
                 if renewal["a"] == seat:

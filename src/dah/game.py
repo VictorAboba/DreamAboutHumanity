@@ -30,7 +30,7 @@ from dah.engine import espionage as esp
 from dah.engine.view import army_presence
 from dah.engine import scoring as sc_
 from dah.engine import trade as tr
-from dah.engine.content import ContentError, legacy_pack_sets
+from dah.engine.content import ContentError, legacy_pack_sets, split_cost
 from dah.engine.catalog import KIND_LABELS
 from dah.engine.content import DEFAULT_DIPLOMACY_LIMITS, DEFAULT_SETUP_LIMIT
 from dah.engine.model import as_int, canonical_json, sha256_json
@@ -670,7 +670,8 @@ class Game:
         for f in rep["feints"]:
             j("feint", turn=turn, **f)
         for h in rep["hired"]:
-            j("shade_hired", seat=h["seat"], shade=h["shade"], turn=turn)
+            # core 0.8.3 (decision 34): the price paid, journal only (the report's «заплачено и потеряно из-за конца»)
+            j("shade_hired", seat=h["seat"], shade=h["shade"], turn=turn, cost=dict(h.get("cost") or {}))
         for w in rep.get("wards") or []:             # core 0.8.0 (docs/SPY_V2.md 4.6)
             j("ward_set", turn=turn, **w)
         for m in rep["started"]:
@@ -680,6 +681,9 @@ class Game:
                 # core 0.8.0 (docs/SPY_V2.md 11): an Observation of a province the seat sees at the close of actions
                 # (the report's «лишние наблюдения»); self.state is still that close
                 extra["in_sight"] = m["target"] in visible_provinces(self.state, self.ruleset, m["seat"])
+            if md is not None:
+                # core 0.8.3 (decision 34): the price paid for the whole term and the price of a round (journal only)
+                extra.update(cost=dict(m.get("cost") or {}), round_cost=dict(md.cost_per_round))
             j("mission_started", seat=m["seat"], shade=m["shade"], mission=m["mission"], target=m["target"],
               rounds=m["rounds"], phase=m["phase"], first_turn=m["first_turn"], turn=turn, **extra)
         for r in rep["rounds"]:
@@ -796,6 +800,12 @@ class Game:
                 self._journal_conquest(e, turn)
             elif e["kind"] in ESPIONAGE_JOURNAL:
                 data = {k: v for k, v in e.items() if k not in ("kind", "seats")}
+                md = self.ruleset.missions.get(data.get("mission")) if e["kind"] == "mission_started" else None
+                if md is not None and "round_cost" not in data:
+                    # core 0.8.3 (decision 34): a mission given in П2 carries its prices too, as one from the Actions
+                    # (the term's price is not stat-keyed: espionage.mission_cost); journal only
+                    data.update(cost=esp.mission_cost(self.ruleset, data["mission"], data.get("rounds")),
+                                round_cost=dict(md.cost_per_round))
                 self.journal.append(e["kind"], turn=turn, **data)
             elif e["kind"] in DISCOVERY_JOURNAL:
                 data = {k: v for k, v in e.items() if k != "kind"}
@@ -843,6 +853,9 @@ class Game:
                                             counted=bool(o["met"] and new_state.players[seat].alive),
                                             evidence={"have": have, "need": need}, turn=turn)
             extra = {k: result[k] for k in ("score_parts", "objectives", "winners_open") if k in result}
+            # core 0.8.3 (decision 34): what stayed paid and unfinished at the end (the report's «заплачено и потеряно
+            # из-за конца»; {} when nothing did); journal only, the game is over when it appears
+            extra["unfinished"] = self._unfinished(new_state)
             self.journal.append("game_over", winners=result.get("winners", []), reason=result.get("reason"),
                                 scores=result.get("scores", {}), turn=turn, **extra)
             self.polled_at_open = {s for s, n in self.player_polls.items() if n > 0}
@@ -855,6 +868,36 @@ class Game:
         else:
             self.gdir.save_turn("states", new_state.turn, new_state.to_dict())
             self._open_phase()
+
+    def _unfinished(self, state: GameState) -> dict[str, Any]:
+        """Core 0.8.3 (decision 34): per seat, the builds still in progress at the end with what was paid for them
+        (the shares paid of a build paid in parts, else its whole price) and the research points put into techs not
+        finished; seats with nothing are left out."""
+        rs = self.ruleset
+        out: dict[str, Any] = {}
+        for b in state.pending_builds:
+            if b.building not in rs.buildings:
+                continue
+            shares = rs.building_shares(b.building)
+            if b.cost:
+                done = max(0, min(shares, shares - b.turns_left))
+                paid: dict[str, int] = {}
+                for i in range(done):
+                    for r, n in split_cost(b.cost, shares, i).items():
+                        paid[r] = paid.get(r, 0) + n
+            else:
+                done = shares
+                paid = dict(rs.building_cost(b.building, stat_key(state, rs, b.seat)))
+            out.setdefault(b.seat, {}).setdefault("builds", []).append(
+                {"province": b.province, "building": b.building, "paid": paid, "shares_paid": done, "shares": shares,
+                 "turns_left": b.turns_left, "great": bool(rs.buildings[b.building].score)})
+        res = rs.research_resource
+        for seat, p in sorted(state.players.items()):
+            progress = {t: int(n) for t, n in sorted(p.research.items()) if n and t not in p.techs}
+            if progress and res is not None:
+                out.setdefault(seat, {})["research"] = progress
+                out[seat]["research_resource"] = res
+        return out
 
     def _journal_conquest(self, e: dict[str, Any], turn: int) -> None:
         """Conquest events of a resolution in their full form (SPY_AND_CONQUEST.md 8), for offline metrics."""
@@ -1945,8 +1988,12 @@ class Game:
         self._require_active(seat)
         self._count(seat, "pact_proposals")
         example = 'propose_pact(to="Ник", turns=3) или propose_pact(to="Ник") — бессрочно'
+
+        def price(pact: dict[str, Any]) -> int:      # core 0.8.3 (decision 34): a refusal that advises a leave
+            return sc_.leave_cost(self.state, self.ruleset, seat, pact)
+
         done = self._diplomacy(seat, lambda: dip.make_proposal(self.state, seat, self._seat_ref(to), turns,
-                                                               self.phase), example)
+                                                               self.phase, leave_price=price), example)
         op, pact = done["op"], done["pact"]
         self._bump(seat, "pact_proposals")
         recipient = op["recipient"]
@@ -2030,7 +2077,7 @@ class Game:
                          "pact_renewed")
             return {"pact": self._pact_view(current, seat),
                     "text": f"продление {pact['id']} принято: пакт {current['id']} действует "
-                            f"{self._pact_terms(current)}"}
+                            f"{self._pact_terms(current)}{self._pact_costs(seat)}"}
         self.journal.append("pact_accepted" if accepted else "pact_rejected", seat=seat, pact_id=pact["id"],
                             seats=sorted((pact["a"], pact["b"])), turns=pact["turns"],
                             until_turn=pact["until_turn"], turn=self.state.turn, phase=self.phase)
@@ -2050,7 +2097,18 @@ class Game:
         else:
             self._notice([pact["a"]], f"{self._nick(seat)} отклонил пакт {pact['id']}.", "pact_rejected")
         verdict = "заключён" if accepted else "отклонён"
-        return {"pact": self._pact_view(pact, seat), "text": f"пакт {pact['id']} {verdict}"}
+        return {"pact": self._pact_view(pact, seat),
+                "text": f"пакт {pact['id']} {verdict}" + (self._pact_costs(seat) if accepted else "")}
+
+    def _pact_costs(self, seat: str) -> str:
+        """Core 0.8.3 (decision 34): what ending an accepted pact costs, in the reply to the seat that accepted it."""
+        items = []
+        if sc_.leave_penalty_on(self.ruleset):
+            fine = int(self.ruleset.stat("score.betrayal.per_leave", stat_key(self.state, self.ruleset, seat)))
+            items.append(f"выход leave_pact до конца срока −{fine}")
+        if sc_.betrayal_on(self.ruleset):
+            items.append(f"удар без выхода (\"pact\":\"break\") −{self._break_fine(seat)}")
+        return f"; конец пакта по своей воле: {', '.join(items)} к своему счёту" if items else ""
 
     def leave_pact(self, seat: str, pact_id: Any) -> dict[str, Any]:
         self._require_active(seat)
@@ -2073,14 +2131,37 @@ class Game:
             self._notice([partner], f"{self._nick(seat)} отозвал предложение пакта {pact['id']}.", "pact_withdrawn")
             text = f"предложение {pact['id']} отозвано"
         else:
+            # core 0.8.3 (decision 34): a leave before the pact's term ends costs the leaver per_leave points (public:
+            # the leave and every pact's terms are announced to all); the leave takes effect at once, as before
+            fine = sc_.leave_cost(self.state, self.ruleset, seat, pact)
+            extra = {"early": sc_.early_leave(pact), "penalty": fine} if sc_.leave_penalty_on(self.ruleset) else {}
             self.journal.append("pact_left", seat=seat, pact_id=pact["id"], seats=sorted((pact["a"], pact["b"])),
-                                ends_before_turn=pact["ends_before_turn"], turn=self.state.turn, phase=self.phase)
+                                ends_before_turn=pact["ends_before_turn"], turn=self.state.turn, phase=self.phase,
+                                **extra)
+            # the pact still protects this turn's resolution (a notice in П2): a strike in it makes the pact end broken,
+            # and a broken pact costs only its break (scoring.pacts_left_early), the leaver's point is dropped
+            unless = (" (если в расчёте этого хода пакт будет разорван ударом — только разрыв, выход не в счёт)"
+                      if fine and pact["ends_before_turn"] > self.state.turn else "")
+            early = f" Досрочный выход: {self._nick(seat)} −{fine} к счёту{unless}." if fine else ""
             self._notice("all", f"{self._nick(seat)} выходит из пакта с {self._nick(partner)}: пакт перестаёт "
-                                f"действовать перед расчётом хода {pact['ends_before_turn']}.", "pact_left")
+                                f"действовать перед расчётом хода {pact['ends_before_turn']}.{early}", "pact_left")
+            cost = ""
+            if fine:
+                cost = f"; досрочный выход (до конца срока пакта): −{fine} к твоему счёту{unless}"
+                if sc_.betrayal_on(self.ruleset):
+                    cost += f" (удар без выхода, \"pact\":\"break\", стоил бы −{self._break_fine(seat)})"
+            elif extra:
+                cost = "; срок пакта и так кончается — выход без штрафа"
             text = (f"выход из пакта {pact['id']} объявлен всем; пакт действует до расчёта хода "
-                    f"{pact['ends_before_turn']} (не включая его)"
+                    f"{pact['ends_before_turn']} (не включая его){cost}"
                     + (f"; предложение продления {cancelled['id']} отменено" if cancelled else ""))
+            if extra:
+                return {"pact": self._pact_view(pact, seat), "text": text, "penalty": fine}
         return {"pact": self._pact_view(pact, seat), "text": text}
+
+    def _break_fine(self, seat: str) -> int:
+        """Points a broken pact costs the seat (score.betrayal.per_break for its stat key)."""
+        return int(self.ruleset.stat("score.betrayal.per_break", stat_key(self.state, self.ruleset, seat)))
 
     def _pact_view(self, pact: dict[str, Any], seat: str) -> dict[str, Any]:
         nick = self.state.players

@@ -15,7 +15,8 @@ Sources (registry.SCORE_SOURCES, weights in `Ruleset.scenario.scoring`, 0 = off)
 
 `score_parts` holds *weighted* points per source (they sum to the score); a source with weight 0 is not in it. Core
 0.6.0 (decision 26): `betrayal`, a penalty line (<= 0) of `score.betrayal.per_break` per pact the seat broke, joins
-the parts of a seat that broke one while that stat is > 0 (never under the default scoring). The turn
+the parts of a seat that broke one while that stat is > 0 (never under the default scoring); core 0.8.3 (decision
+34): the same line holds `score.betrayal.per_leave` per pact the seat left before its term ended. The turn
 score leaves objectives out; the final total (`final_scores`, at game over only) adds them for living seats. With the
 default scoring ({territory: 1}) `scores` is the slice's 1 per province + 3 per capital, bit for bit.
 """
@@ -460,18 +461,56 @@ def betrayal_on(rs: Ruleset) -> bool:
                                           for f in (None, *rs.scenario.factions))
 
 
+def leave_penalty_on(rs: Ruleset) -> bool:
+    """Core 0.8.3 (decision 34): an early leave costs points — a non-default scoring and score.betrayal.per_leave > 0
+    for some faction of the scenario (0 in every frozen pack: a leave stays free there)."""
+    return not rs.default_scoring and any(_stat(rs, "score.betrayal.per_leave", f) > 0
+                                          for f in (None, *rs.scenario.factions))
+
+
 def pacts_broken(state: GameState, seat: str) -> int:
     """Pacts the seat broke (status broken, the seat among `broken_by`): public, every seat knows them."""
     return sum(1 for p in state.pacts if p.get("status") == "broken" and seat in (p.get("broken_by") or ()))
 
 
+def early_leave(pact: Mapping[str, Any]) -> bool:
+    """Core 0.8.3 (decision 34): the pact's notice cuts its term — the leave takes effect (`ends_before_turn`) at or
+    before the last resolution the pact would protect (`until_turn`, renewals included), or the pact has no fixed end.
+    A leave from П2 of the term's last turn ends nothing early (the pact expires after that resolution anyway)."""
+    end = pact.get("ends_before_turn")
+    if not pact.get("leaving") or end is None:
+        return False
+    return pact.get("until_turn") is None or end <= pact["until_turn"]
+
+
+def pacts_left_early(state: GameState, seat: str) -> int:
+    """Pacts the seat left early (it gave the notice, early_leave): public, the leave is announced to all and the
+    terms of every pact are public. A pact that ended broken counts only as a break (no double penalty for its
+    breaker, nothing for a leave announced in it); a pact that lapsed, expired or was never accepted costs nothing."""
+    return sum(1 for p in state.pacts if p.get("leaving") == seat and p.get("status") in ("active", "left", "ended")
+               and early_leave(p))
+
+
+def leave_cost(state: GameState, rs: Ruleset, seat: str, pact: Mapping[str, Any]) -> int:
+    """Points (>= 0) the seat's leave of `pact` costs it now (core 0.8.3): per_leave for an early leave of an active
+    pact, 0 when the penalty is off or the leave ends nothing early. Before the leave, pass the pact as it will be."""
+    if not leave_penalty_on(rs) or not early_leave(pact):
+        return 0
+    return _stat(rs, "score.betrayal.per_leave", stat_key(state, rs, seat))
+
+
 def betrayal(state: GameState, rs: Ruleset, seat: str, key: StatKey = ...) -> int:
-    """The penalty line (<= 0): -score.betrayal.per_break per pact the seat broke; 0 when the penalty is off."""
-    if not betrayal_on(rs):
+    """The penalty line (<= 0): -score.betrayal.per_break per pact the seat broke and (core 0.8.3, decision 34)
+    -score.betrayal.per_leave per pact it left early; 0 when both are off."""
+    breaks, leaves = betrayal_on(rs), leave_penalty_on(rs)
+    if not (breaks or leaves):
         return 0
     if key is ...:
         key = stat_key(state, rs, seat)
-    return -_stat(rs, "score.betrayal.per_break", key) * pacts_broken(state, seat)
+    out = -_stat(rs, "score.betrayal.per_break", key) * pacts_broken(state, seat) if breaks else 0
+    if leaves:
+        out -= _stat(rs, "score.betrayal.per_leave", key) * pacts_left_early(state, seat)
+    return out
 
 
 def score_parts(state: GameState, rs: Ruleset) -> dict[str, dict[str, int]]:
@@ -818,7 +857,7 @@ def score_known(state: GameState, rs: Ruleset, viewer: str, seat: str) -> dict[s
         else:
             parts[src] = None
     penalty = betrayal(state, rs, seat, key)
-    if penalty:         # pact breaks are public events: every seat knows the penalty exactly
+    if penalty:         # pact breaks and leaves are public events: every seat knows the penalty exactly
         parts[BETRAYAL] = penalty
     out = {"exact": False, "score": sum(v for v in parts.values() if v is not None), "parts": parts}
     if not rs.default_scoring:
@@ -843,7 +882,8 @@ def hidden_bound(state: GameState, rs: Ruleset, viewer: str, seat: str) -> dict[
     - war, intel: their caps for the seat's faction, 0 before the first recon step and resolution;
     - objectives: the best points in the deal pool per objective the seat holds (0 for an eliminated seat).
     Score stats are read for the seat's faction (public); in the core only factions modify score.* stats (pinned by
-    tests). Works and the pact-break penalty are known exactly, so they add nothing."""
+    tests). Works and the pact penalty (breaks; core 0.8.3: early leaves, both announced to all) are known
+    exactly, so they add nothing."""
     from .resolve import visible_provinces      # resolve imports this module
     from .techs import public_techs
     player = state.players[seat]

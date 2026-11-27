@@ -84,7 +84,7 @@ def _rounds(*items):
 # ---------------------------------------------------------------- freeze and the pack
 
 def test_core_071_is_frozen_exactly_with_its_hashes():
-    assert "version: 0.8.2" in (CORE / "pack.yaml").read_text(encoding="utf-8")
+    assert "version: 0.8.3" in (CORE / "pack.yaml").read_text(encoding="utf-8")
     head = (CORE071 / "pack.yaml").read_text(encoding="utf-8")
     assert "version: 0.7.1" in head and "Frozen copy of core 0.7.1" in head and "Do not edit" in head
     for sid, prefix in CORE071_HASHES.items():

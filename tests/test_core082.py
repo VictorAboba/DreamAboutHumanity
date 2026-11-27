@@ -36,6 +36,8 @@ from dah.waker.text import wake_text
 ROOT = Path(__file__).resolve().parents[1]
 CORE = DEFAULT_PACKS_DIR / "core"
 CORE081 = LEGACY_PACKS_DIR / "core-0.8.1"
+# core 0.8.3 froze 0.8.2: the 0.8.1 -> 0.8.2 step is checked on the copy (test_core083.py checks the next one)
+CORE082 = LEGACY_PACKS_DIR / "core-0.8.2"
 # ruleset hashes of the frozen core 0.8.1, as core 0.8.1 itself built them at b6cf22d (measurement m11: quad4)
 CORE081_HASHES = {"slice3": "ca89d9469d0c", "slice2": "9790719be215", "quad4": "5d0ca0d8a69f",
                   "blitz_test": "a138b8a8f75e", "blitz_spy": "1571531b7e03", "blitz_score": "8efc9ce96be1",
@@ -80,7 +82,7 @@ def copy_game(src: Path, tmp_path: Path) -> Path:
 # ---------------------------------------------------------------- a) the freeze of core 0.8.1
 
 def test_core_081_is_frozen_exactly_with_its_hashes():
-    assert "version: 0.8.2" in (CORE / "pack.yaml").read_text(encoding="utf-8")
+    assert "version: 0.8.2" in (CORE082 / "pack.yaml").read_text(encoding="utf-8")
     head = (CORE081 / "pack.yaml").read_text(encoding="utf-8")
     assert "version: 0.8.1" in head and "Frozen copy of core 0.8.1" in head and "Do not edit" in head
     for sid, prefix in CORE081_HASHES.items():
@@ -112,12 +114,12 @@ def test_only_the_version_and_the_scenarios_moved_from_the_frozen_copy():
     for path in CORE081.rglob("*"):
         rel = path.relative_to(CORE081).as_posix()
         if path.is_file() and rel not in changed:
-            assert path.read_bytes().replace(b"\r\n", b"\n") == (CORE / rel).read_bytes().replace(b"\r\n", b"\n"), rel
+            assert path.read_bytes().replace(b"\r\n", b"\n") == (CORE082 / rel).read_bytes().replace(b"\r\n", b"\n"), rel
 
 
 @pytest.mark.parametrize("sid", sorted(CORE081_HASHES))
 def test_the_scenarios_change_only_the_end_of_quad4(sid):
-    new, old = build_ruleset(None, sid), build_ruleset([str(CORE081)], sid)
+    new, old = build_ruleset([str(CORE082)], sid), build_ruleset([str(CORE081)], sid)
     a, b = old.to_dict(), new.to_dict()
     assert (a.pop("packs"), b.pop("packs")) == ({"core": "0.8.1"}, {"core": "0.8.2"})
     if sid == "quad4":
@@ -131,7 +133,8 @@ def test_the_scenarios_change_only_the_end_of_quad4(sid):
     assert a == b
 
 
-@pytest.mark.parametrize("name,frozen", [("games-m11/m11", "core-0.8.1"), ("games-m10/m10", "core-0.8.0"),
+@pytest.mark.parametrize("name,frozen", [("games-m12/m12", "core-0.8.2"), ("games-m11/m11", "core-0.8.1"),
+                                         ("games-m10/m10", "core-0.8.0"),
                                          ("games-m9/m9", "core-0.7.0"), ("games-m8/m8", "core-0.6.0"),
                                          ("games-m7/m7", "core-0.5.0")])
 def test_measured_games_replay_with_their_frozen_packs(tmp_path, name, frozen):

@@ -45,7 +45,7 @@ def _seats(n: int) -> list[dict]:
 # ---------------------------------------------------------------- freeze
 
 def test_core_050_is_frozen_with_its_hashes():
-    assert "version: 0.8.2" in (CORE / "pack.yaml").read_text(encoding="utf-8")
+    assert "version: 0.8.3" in (CORE / "pack.yaml").read_text(encoding="utf-8")
     head = (CORE050 / "pack.yaml").read_text(encoding="utf-8")
     assert "version: 0.5.0" in head and "Frozen copy of core 0.5.0" in head and "Do not edit" in head
     for sid, prefix in CORE050_HASHES.items():

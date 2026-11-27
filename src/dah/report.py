@@ -163,6 +163,11 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
     Stage 5 (docs/ABANDONED_LANDS.md 14.2; only with Abandoned land): `discoveries` — the layout and per seat the finds
     set off, the value they realized (P), the luck against the mean of the seats, choices, the ruins' Treasury, and
     whether the luckiest seat won (see `_discoveries`).
+    Core 0.8.3 (decision 34; only after game_over): `lost_at_end` (dah.report_end) — per seat what it paid and lost to
+    the end: unfinished builds with their paid shares, Shades hired and never used, mission rounds paid for turns
+    after the end, research points in unfinished techs; apart (`owed`) the undelivered part of promises due after
+    the end; an eliminated seat's losses at
+    its elimination apart (`at_elimination`). The report's only; no seat sees it.
     """
     report: dict[str, Any] = {"game_id": None, "scenario": None, "rules_chars": None, "seats": {}, "phases": [],
                               "turns": [], "totals": {}, "result": None, "setup": None}
@@ -393,6 +398,10 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
     trade = trade_report(events, list(report["seats"]))     # core 0.8.0 (docs/TRADE.md 13); only with trade events
     if trade is not None:
         report["trade"] = trade
+    from dah.report_end import end_losses
+    lost = end_losses(events, report)       # core 0.8.3 (decision 34); only after game_over
+    if lost is not None:
+        report["lost_at_end"] = lost
     in_game_s = round(over_ts - first_open_ts, 3) if over_ts is not None and first_open_ts is not None else None
     report["in_game_s"] = in_game_s
     for seat, totals in report["totals"].items():
@@ -865,6 +874,9 @@ def render_report(report: dict[str, Any]) -> str:
         from dah.report_trade import trade_lines
         lines += trade_lines(report["trade"], nick)
     lines += _score_lines(report, nick)
+    if report.get("lost_at_end"):
+        from dah.report_end import end_lines
+        lines += end_lines(report["lost_at_end"], nick)
     lines += _discovery_lines(report, nick)
     lines.append("")
     lines.append("ФАЗЫ (до первого вызова / первой принятой подачи / ready; вызовы; правки):")

@@ -251,7 +251,8 @@ only (1 per province, +3 per capital) and hashes as before.
   the branch researchable by every faction, a great work every faction can build on the map, ...).
 - **Stats** (only while their source is on): `score.territory.province|capital`, `score.science.tier1..4`,
   `score.science.branch`, `score.war.per_point|cap_per_victim|cap|defense_pct`, `score.betrayal.per_break` (0..10,
-  points lost per pact the seat broke; works under any non-default scoring). `rules(topic="victory")` shows a
+  points lost per pact the seat broke; works under any non-default scoring), `score.betrayal.per_leave` (0..10, core
+  0.8.3: points lost per pact the seat left before its term ended). `rules(topic="victory")` shows a
   match's numbers.
 
 ## Stage-5 content: Abandoned lands and finds

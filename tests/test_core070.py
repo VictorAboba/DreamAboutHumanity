@@ -50,7 +50,7 @@ def _kinds(rep) -> list[str]:
 # ---------------------------------------------------------------- 6. freeze
 
 def test_core_060_is_frozen_exactly_with_its_hashes():
-    assert "version: 0.8.2" in (CORE / "pack.yaml").read_text(encoding="utf-8")
+    assert "version: 0.8.3" in (CORE / "pack.yaml").read_text(encoding="utf-8")
     head = (CORE060 / "pack.yaml").read_text(encoding="utf-8")
     assert "version: 0.6.0" in head and "Frozen copy of core 0.6.0" in head and "Do not edit" in head
     for sid, prefix in CORE060_HASHES.items():
@@ -68,9 +68,10 @@ def test_with_the_new_rules_off_only_the_version_changes(sid):
     off = {"espionage": False, "conquest": False, "discoveries": False, "trade": False}
     a = build_ruleset([str(CORE060)], sid, off, scoring={"territory": 1}).to_dict()
     b = build_ruleset(None, sid, off, scoring={"territory": 1}).to_dict()
-    assert (a.pop("packs"), b.pop("packs")) == ({"core": "0.6.0"}, {"core": "0.8.2"})
+    assert (a.pop("packs"), b.pop("packs")) == ({"core": "0.6.0"}, {"core": "0.8.3"})
     for d in (b["stats"], *b["faction_stats"].values()):
         d.pop("fog.army_presence", None)
+        d.pop("score.betrayal.per_leave", None)     # core 0.8.3 (decision 34): an override of the scenarios
     assert a == b
 
 
