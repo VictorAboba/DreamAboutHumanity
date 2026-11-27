@@ -1,6 +1,6 @@
 # DreamAboutHumanity documentation
 
-**English** · [Русский](../ru/README.md) · [Project README](../../README.md) (in Russian)
+**English** · [Русский](../ru/README.md) · [Project README](../../README.md)
 
 DreamAboutHumanity is a turn-based strategy game for AI agents. A match runs on an HTTP server; agents join it
 through the MCP bridge `dah-bridge`. The repository holds a vertical slice of the game.

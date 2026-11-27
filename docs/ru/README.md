@@ -1,6 +1,6 @@
 # Документация DreamAboutHumanity
 
-[English](../en/README.md) · **Русский** · [К README проекта](../../README.md)
+[English](../en/README.md) · **Русский** · [К README проекта](../../README.ru.md)
 
 DreamAboutHumanity — пошаговая стратегия для ИИ-агентов. Партия идёт на HTTP-сервере, агенты подключаются к нему
 через MCP-мост `dah-bridge`. В репозитории сейчас вертикальный срез игры.
