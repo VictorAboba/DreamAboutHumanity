@@ -5,7 +5,8 @@
 These are the rules as the engine implements them: the vertical slice plus stage 2 (techs, the setup phase,
 factions and artifacts). The exact contracts are in the [slice specification](../SLICE.md) and the
 [stage-2 specification](../TECH_AND_SETUP.md) (both in Russian); the [full concept](../CONCEPT.md) (in Russian)
-describes the game the slice grows towards. Numbers below are the defaults of the `core` pack, version 0.8.0 (espionage and conquest of stage 3a, the scoring of stage 4 with the decision-27 changes: great works paid in parts, intel points, war per province, army fog; 0.7.1: no war points for taking back one's own land, decision 28; 0.8.0: espionage v2, decision 30 and [SPY_V2.md](../SPY_V2.md); both on by default in `slice3`, `slice2` and `quad4`; the Abandoned lands of stage 5 are described [below](#abandoned-lands-and-finds-stage-5)); a
+describes the game the slice grows towards. Numbers below are the defaults of the `core` pack, version 0.8.1 (espionage and conquest of stage 3a, the scoring of stage 4 with the decision-27 changes: great works paid in parts, intel points, war per province, army fog; 0.7.1: no war points for taking back one's own land, decision 28; 0.8.0: espionage v2, decision 30 and [SPY_V2.md](../SPY_V2.md); 0.8.1: deep missions score against a pact partner, decision 32;
+ both on by default in `slice3`, `slice2` and `quad4`; the Abandoned lands of stage 5 are described [below](#abandoned-lands-and-finds-stage-5)); a
 scenario or a pack can change them ([Content packs](modding.md)). The tables of units, buildings, techs, factions and
 artifacts are a snapshot: the match's own numbers are always in `rules(topic)` and `describe(id)` (see the end of
 this page).
@@ -422,6 +423,9 @@ army of each and fights in P07; a hidden army (`?` in the state) has to be guess
   by their own seat.
 - The score: a seat's own exactly and with its breakdown; the others' only as a lower bound «≥» (land over the
   provinces it sees now, great works from the public events, science and war «?»). After `game_over` all is open.
+  Since core 0.8.1 the «Счёт:» line says so: «чужой «≥» — только видимое; скрыты: …» (the visible part only, not an
+  estimate of the whole).
+
 
 `get_state` returns a compact Russian text, roughly like this:
 
@@ -478,7 +482,8 @@ line. `format=json` gives the same view as JSON.
     Since core 0.8.0 the mission's kind (its `intel` field) decides: Secret Objective once a game, Read Orders once
     per rival, Sabotage when the strike worked (a battle the victim lost units in, a stopped build, a revolt; the
     point goes to the first strike on the province); Observe and Ledger score nothing; nothing against a pact partner
-    (as of the recon step);
+    (as of the recon step) — since core 0.8.1 (decision 32) Secret Objective and Read Orders score against a partner
+    too, Sabotage still does not;
   - **secret objective**: one per seat, dealt at the start (hold two forges, six provinces, a province of another
     seat's start, a ready great work; on `mirror2`/`mirror3` also two agri worlds, four War or three Industry techs,
     on `mirror4` two shrines; with three seats or more a rival's capital, or take the named rival's capital); points

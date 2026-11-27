@@ -466,8 +466,10 @@ def _victory_detail(rs: Ruleset, core: str) -> str:
         lines.append(f"- Разведка: +{int(st('score.intel.per_success'))} за успех глубокого задания Тени против живого "
                      f"соперника, не больше {int(st('score.intel.cap'))} за партию: secret — раз за партию, "
                      "read_orders — раз на соперника, sabotage — если удар что-то сделал (бой с потерями жертвы, "
-                     "стройка, бунт; в конце расчёта). Наблюдение и Счётная книга очков не дают; против партнёра "
-                     "по пакту очков нет. Сколько даст успех — estimate_mission.")
+                     "стройка, бунт; в конце расчёта). Наблюдение и Счётная книга очков не дают; "
+                     + ("secret и read_orders дают очко и против партнёра по пакту, sabotage по партнёру — нет. "
+                        if sc_.pact_deep(rs) else "против партнёра по пакту очков нет. ")
+                     + "Сколько даст успех — estimate_mission.")
     elif sc_.on(rs, "intel"):
         lines.append(f"- Разведка: +{int(st('score.intel.per_success'))} за успешное задание Тени (донесение или удар, "
                      f"любая миссия) против живого соперника, не больше {int(st('score.intel.cap'))} за партию; одна "
@@ -489,9 +491,12 @@ def _victory_detail(rs: Ruleset, core: str) -> str:
                      f"Пул партии: {pool}.")
     ledger = next((m.name for m in rs.missions.values() if m.behavior == "read_ledger"), None)
     secret = next((m.name for m in rs.missions.values() if m.behavior == esp.READ_OBJECTIVE), None)
-    lines.append("Видимость: свой счёт — полностью; чужой — нижняя граница «≥»: земля по провинциям, которые ты видишь, "
-                 "стройки — по публичным событиям, наука, война" + (" и разведка" if sc_.on(rs, "intel") else "")
-                 + " — «?». "
+    # core 0.8.1 (decision 32, m10): the «≥» is the visible part only, not an estimate of the whole
+    lines.append("Видимость: свой счёт — полностью; чужой «≥» — только видимая часть, не оценка: земля по "
+                 "провинциям, которые ты видишь, стройки — по публичным событиям; наука, война"
+                 + (", разведка" if sc_.on(rs, "intel") else "")
+                 + (" и тайная цель" if sc_.on(rs, "objectives") else "") + " скрыты («?»), настоящий счёт обычно "
+                 "больше. "
                  + (f"Точную разбивку (без цели) даёт шпион: миссия «{ledger}». " if ledger else "")
                  + (f"Чужую тайную цель — миссия «{secret}». " if secret else "")
                  + "После партии раскрыто всё: итог, разбивка, цели.")
@@ -823,7 +828,9 @@ def _spying(rs: Ruleset) -> Section | None:
         f"запись — PHASE_LOCKED; записи spy/recall/hire_shade{'/ward' if v2 else ''} из Д в П2 не меняются (их "
         "исполнил разведсрез).",
         "Видимость: свои Тени, задания, донесения и S/C видишь только ты; пакт шпионаж не запрещает."
-        + (" Очков нет против партнёра по пакту (на разведсрезе)." if v2 and sc_.on(rs, "intel") else ""),
+        + ((" С партнёра по пакту очко дают secret и read_orders."
+            if sc_.pact_deep(rs) else " Очков нет против партнёра по пакту (на разведсрезе).")
+           if v2 and sc_.on(rs, "intel") else ""),
         "Ошибки: NO_CAPITAL, SHADE_LIMIT, SHADE_BUSY, TOO_MANY_MISSIONS, MISSION_LOCKED, BAD_TARGET, BAD_ROUNDS"
         + ("." if v2 else " (срок длиннее оставшихся ходов)."),
     ]
@@ -842,8 +849,9 @@ def _fog(rs: Ruleset) -> Section:
     core = text + " Прогноз боя — estimate."
     text += " estimate(attacker, defender, province_type, fortified, hasty) — прогноз боя."
     # the score under fog (SCORING.md 5) holds in every game: only in the topic, the core has no room for it
-    score = ("Счёт: свой — точно; чужой — нижняя граница «≥» по провинциям, которые ты видишь сейчас"
-             + ("; стройки — по публичным событиям, наука и война — «?»" if not rs.default_scoring else "")
+    score = ("Счёт: свой — точно; чужой «≥» — только видимая часть: провинции, которые ты видишь сейчас"
+             + ("; стройки — по публичным событиям; прочие источники (наука, война…) скрыты, настоящий счёт "
+                "обычно больше" if not rs.default_scoring else "")
              + ". После партии открыто всё" + (' (rules(topic="victory")).' if not rs.default_scoring else "."))
     return Section("fog", core, text + "\n" + score)
 

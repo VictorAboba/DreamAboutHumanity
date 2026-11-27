@@ -233,23 +233,39 @@ def honest_range(seed: int | str, spy_seat: str, target: str, facet: str, key: s
 
 # ---------------------------------------------------------------- orders (orders.py calls these)
 
+def seat_targets(state: GameState, seat: str) -> str:
+    """«Альфа (A), Гамма (C)»: the living rivals a seat-target mission may name, by nick or by letter."""
+    return ", ".join(f"{p.nick} ({s})" for s, p in sorted(state.players.items()) if s != seat and p.alive) or "нет"
+
+
 def target_problem(state: GameState, rs: Ruleset, seat: str, mission: MissionDef,
                    target: str | None) -> tuple[str, str] | None:
     if mission.target == "seat":
         player = state.players.get(target or "")
         if player is None:
-            return "BAD_TARGET", f"цель {target!r} — не игрок (нужен ник или место)"
+            # core 0.8.1 (m10): a nick or a seat letter; a wrong one names the valid targets
+            return "UNKNOWN_ID", f"нет игрока {str(target)[:40]!r}; цели: {seat_targets(state, seat)}"
         if target == seat or not player.alive:
-            return "BAD_TARGET", "цель — живой другой игрок"
+            return "BAD_TARGET", f"цель — живой другой игрок: {seat_targets(state, seat)}"
         return None
     if target not in state.provinces:
-        return "BAD_TARGET", f"цель {target!r} — не провинция"
+        if cq.seat_ref(state, target) is not None:
+            return "BAD_TARGET", f"цель «{mission.name}» — провинция (id вида P05), а не игрок {str(target)[:40]!r}"
+        return "BAD_TARGET", f"цель {str(target)[:40]!r} — не провинция"
     owner = state.provinces[target].owner
     if owner == seat:
         return "BAD_TARGET", f"{target} — твоя провинция"
     if mission.target == "owned_province" and owner is None:
         return "BAD_TARGET", f"{target} нейтральная: «{mission.name}» — только против провинции игрока"
     return None
+
+
+def own_shades_text(player: Any) -> str:
+    """Core 0.8.1 (m10: «нет Тени 's1'» after its loss read like a bad target): the seat's Shades now."""
+    if not player.shades:
+        return "у тебя сейчас нет Теней (потерянная не возвращается; нанять — hire_shade)"
+    return "твои Тени: " + ", ".join(f"{sh['id']} ({'свободна' if sh.get('status') == IDLE else 'на задании'})"
+                                     for sh in player.shades) + " — list_spies"
 
 
 def _struck_now(state: GameState, seat: str, shade: Mapping[str, Any]) -> bool:
@@ -278,7 +294,7 @@ def order_problem(state: GameState, rs: Ruleset, seat: str, order: Order, others
         return None
     shade = shade_of(state, seat, order.shade)
     if shade is None:
-        return "UNKNOWN_ID", f"нет Тени {order.shade!r}; свои Тени — list_spies"
+        return "UNKNOWN_ID", f"нет Тени {order.shade!r}; {own_shades_text(player)}"
     if order.kind == "recall":
         if any(o.kind == "recall" and o.shade == order.shade for o in others):
             return "INVALID", f"отзыв {order.shade} уже в приказах"
@@ -612,6 +628,22 @@ def _void(state: GameState, rs: Ruleset, seat: str, mission: MissionDef, target:
     return mission.target == "owned_province" and prov.owner is None
 
 
+def void_cause(snap: GameState, rs: Ruleset, seat: str, mission: MissionDef | None, target: str) -> str:
+    """Core 0.8.1 (review F3): why a mission is void, on the recon snapshot that voided it, stored in its round
+    record (`why`) so that a later text does not rebuild it from a state the resolution has moved on: `rules` (no
+    such mission), `out` (the target seat is out), `no_land` (the seat has no land to check in), `own` / `neutral`
+    (the province became the spy's own / neutral), `gone` (no such province)."""
+    if mission is None:
+        return "rules"
+    if mission.target == "seat":
+        player = snap.players.get(target)
+        return "out" if player is None or not player.alive else "no_land"
+    prov = snap.provinces.get(target)
+    if prov is None:
+        return "gone"
+    return "own" if prov.owner == seat else "neutral"
+
+
 def _round_places(snap: GameState, rs: Ruleset, active: Iterable[tuple[str, Mapping[str, Any]]]
                   ) -> dict[str, tuple[str, str]] | None:
     """Core 0.8.0 (docs/SPY_V2.md 3.2, spy.detect.repeat_on): the check place of every Shade playing a round in this
@@ -648,7 +680,7 @@ def _round(s: GameState, snap: GameState, rs: Ruleset, seed: int | str, rep: dic
     place = None if mission is None else check_place(snap, rs, mission, m["target"])
     if mission is None or place is None or _void(snap, rs, seat, mission, m["target"]):
         _end(rep, seat, shade, VOID)
-        rep["rounds"].append({**base, "outcome": VOIDED})
+        rep["rounds"].append({**base, "outcome": VOIDED, "why": void_cause(snap, rs, seat, mission, m["target"])})
         return
     key = stat_key(snap, rs, seat)
     victim = snap.provinces[place].owner
@@ -1183,7 +1215,10 @@ def intel_payoff(state: GameState, rs: Ruleset, seat: str, mission: MissionDef, 
         return 0, left, texts.get(why, sc_.DENY_TEXT.get(why, why))
     per = min(left, int(rs.stat("score.intel.per_success", key)))
     if kind != sc_.EFFECT:
-        return per, left, ""
+        # core 0.8.1 (decision 32): a deep mission scores against a pact partner too; say so, the 0.8.0 rule did not
+        from .diplomacy import pact_between
+        partner = sc_.pact_deep(rs, key) and pact_between(state, seat, rival, state.turn) is not None
+        return per, left, "партнёр по пакту: очко засчитают, пакт шпионаж не нарушает" if partner else ""
     others = [o for o in (book.orders if book is not None else ()) if o.kind == "spy" and o.shade != me]
     scoring = 0
     for o in others:
@@ -1434,12 +1469,64 @@ def capture_text(rs: Ruleset, state: GameState, c: Mapping[str, Any], me: str) -
             f"{_mission_name(rs, c.get('mission'))} {target_label(rs, state, c.get('target'), me)}")
 
 
-def _outcome_text(rs: Ruleset, state: GameState, r: Mapping[str, Any], me: str) -> str:
+def miss_text(r: Mapping[str, Any]) -> str:
+    """Core 0.8.1 (decision 32, m10: read_orders failed 6 of 6 at 45% and the agent saw only «ничего»): why a played
+    round brought nothing — the success roll failed, with its chance."""
+    p_ok = r.get("p_ok")
+    return "успех не выпал" + (f" (шанс {round(float(p_ok) * 100)}%)" if isinstance(p_ok, (int, float)) else "")
+
+
+VOID_TEXT = {"rules": "задания нет в правилах, снято", "out": "цель выбыла, задание снято",
+             "no_land": "у цели нет земли для проверки, задание снято",
+             "own": "провинция стала твоей, задание снято", "neutral": "провинция стала ничьей, задание снято",
+             "gone": "цели нет, задание снято"}
+
+
+def void_text(rs: Ruleset, state: GameState, seat: str, mission_id: Any, target: Any, why: Any = None) -> str:
+    """Why a mission was dropped without a round (2.3), as its owner sees it. `why`: the cause stored in the round
+    record on the snapshot that voided it (core 0.8.1, void_cause); a record without it (an earlier report) is read
+    from `state`, as before."""
+    if isinstance(why, str) and why in VOID_TEXT:
+        return VOID_TEXT[why]
+    mission = rs.missions.get(mission_id) if isinstance(mission_id, str) else None
+    if mission is None:
+        return "задания нет в правилах, снято"
+    if mission.target == "seat":
+        return "цель выбыла, задание снято"
+    prov = state.provinces.get(target) if isinstance(target, str) else None
+    if prov is not None and prov.owner == seat:
+        return "провинция стала твоей, задание снято"
+    if prov is not None and prov.owner is None:
+        return "провинция стала ничьей, задание снято"
+    return "цели нет, задание снято"
+
+
+def ended_empty(rep: Mapping[str, Any] | None, seat: str, shade: Any) -> bool:
+    """Core 0.8.1 (review F1): the seat's Shade ended its mission in this recon step with nothing found at all
+    (EMPTY); a mission that found something in an earlier round ends DONE, even when its last round was empty."""
+    return any(e.get("seat") == seat and e.get("shade") == shade and e.get("reason") == EMPTY
+               for e in (rep or {}).get("ended") or [])
+
+
+def _outcome_text(rs: Ruleset, state: GameState, r: Mapping[str, Any], me: str, compact: bool = False,
+                  rep: Mapping[str, Any] | None = None) -> str:
     if r["outcome"] == LOST:
         return f"{r['shade']}: нет связи"
-    what = {FOUND: f"найдено #{r.get('report_id')}", NOTHING: "ничего",
-            HIT: f"окно найдено: удар по {r['target']} в расчёте этого хода",
-            VOIDED: "цели нет, задание снято"}[r["outcome"]]
+    if r["outcome"] == NOTHING and compact:
+        # ДОНЕСЕНИЯ of get_state (its +400 budget): the success chance only (review F4: «шанс успеха», not a bare
+        # «шанс» next to «ничего»); get_intel and list_spies say the rest
+        p_ok = r.get("p_ok")
+        what = "ничего" + (f" (шанс успеха {round(float(p_ok) * 100)}%)" if isinstance(p_ok, (int, float)) else "")
+    elif r["outcome"] == NOTHING:
+        # core 0.8.1 (decision 32): the reason and the chance; only a mission that ended with nothing found at all
+        # says it came back empty (review F1: not the last round of a mission that found something earlier)
+        empty = ended_empty(rep, me, r.get("shade")) if rep is not None else False
+        what = ("вернулась ни с чем: " if empty else "ничего: ") + miss_text(r)
+    elif r["outcome"] == VOIDED:
+        what = void_text(rs, state, me, r.get("mission"), r.get("target"), r.get("why"))
+    else:
+        what = {FOUND: f"найдено #{r.get('report_id')}",
+                HIT: f"окно найдено: удар по {r['target']} в расчёте этого хода"}[r["outcome"]]
     name = _mission_name(rs, r["mission"]).split()[0]
     return f"{r['shade']} {name} → {target_label(rs, state, r['target'], me)} {r['round']}/{r['rounds']}: {what}"
 
@@ -1453,7 +1540,7 @@ def state_line(rep: Mapping[str, Any] | None, rs: Ruleset, state: GameState, sea
     if rep is None:
         return None
     rounds = own_rounds(rep, seat)
-    items = [_outcome_text(rs, state, r, seat) for r in rounds[:STATE_SHADES]]
+    items = [_outcome_text(rs, state, r, seat, compact=True) for r in rounds[:STATE_SHADES]]
     if len(rounds) > STATE_SHADES:
         items.append(f"+{len(rounds) - STATE_SHADES} (list_spies)")
     for c in (rep.get("captures") or {}).get(seat, []):
@@ -1504,6 +1591,9 @@ def notice_text(rep: Mapping[str, Any], seat: str) -> str | None:
     parts = [f"донесений {played} (найдено {found})"]
     if strikes:
         parts.append("удар: " + ", ".join(strikes))
+    missed = [r for r in rounds if r["outcome"] == NOTHING]
+    if missed:      # core 0.8.1 (decision 32): an empty round is a failed success roll, with its chance
+        parts.append("пусто: " + ", ".join(f"{r['shade']} — {miss_text(r)}" for r in missed))
     if lost:
         parts.append(f"без связи {lost}")
     if caught_here:
@@ -1527,7 +1617,7 @@ def intel_text(rep: Mapping[str, Any] | None, rs: Ruleset, state: GameState, sea
         if hit is None:
             return f"донесения {report_id} нет в ходе {rep['turn']}"
         return report_text(hit, rs, state, seat, full=True)
-    lines = [_outcome_text(rs, state, r, seat) for r in own_rounds(rep, seat)
+    lines = [_outcome_text(rs, state, r, seat, rep=rep) for r in own_rounds(rep, seat)
              if (shade is None or r["shade"] == shade) and r["outcome"] != FOUND]
     out: list[str] = []
     for i, r in enumerate(reports):
@@ -1573,6 +1663,10 @@ def spies_text(state: GameState, rs: Ruleset, seat: str, rep: Mapping[str, Any] 
         if m and sh.get("status") == MISSION:
             last = f" — последнее: #{m['report_ids'][-1]}" if m.get("report_ids") else ""
             end = f" [{END_TEXT.get(m['ended'], m['ended'])}]" if m.get("ended") else ""
+            if m.get("ended") == EMPTY:
+                # core 0.8.1 (decision 32): why it came back empty, with the chance of its last round
+                mine = [r for r in own_rounds(rep, seat) if r["shade"] == sh["id"] and r["outcome"] == NOTHING]
+                end = f" [{END_TEXT[EMPTY]}: {miss_text(mine[-1]) if mine else 'успех не выпал'}]"
             lines.append(f"{sh['id']} {_mission_name(rs, m['type'])} → {target_label(rs, state, m['target'], seat)} "
                          f"{m['played']}/{m['rounds']} K{min(m['played'], cover_max)} V{sh.get('xp', 0)}{last}{end}")
         else:

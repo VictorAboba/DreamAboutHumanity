@@ -33,6 +33,9 @@
 # scenarios trade (docs/TRADE.md). Balance core 0.8.0 (SPY_V2.md «Баланс core 0.8.0»): the catch base is 6% (was 5%)
 # and each successful mission of a Shade (at most 3) lowers it by 3 points (was 5): a Shade survived 81% of its
 # missions, the corridor is 65-80%; the base keeps the 0.4.0 invariant (every mission's default survival >= 55%).
+# Core 0.8.1 (decision 32, measurement m10): the deep missions (secret, read_orders) score against a pact partner too
+# (score.intel.pact_deep 1); a sabotage against a partner still scores nothing. Espionage never breaks a pact
+# (SPY_V2.md 8), sabotage included.
 - id: slice3
   name: Срез на троих
   map: mirror3
@@ -66,6 +69,7 @@
     - {type: modify, target: score.war.province_total, op: set, value: 8}
     - {type: modify, target: score.war.no_reclaim, op: set, value: 1}
     - {type: modify, target: score.betrayal.per_break, op: set, value: 3}
+    - {type: modify, target: score.intel.pact_deep, op: set, value: 1}
     - {type: modify, target: spy.active_base, op: set, value: 2}
     - {type: modify, target: spy.intel.width_min, op: set, value: 1}
     - {type: modify, target: spy.detect.repeat_on, op: set, value: 1}
@@ -90,6 +94,7 @@
     - {type: modify, target: score.war.province_total, op: set, value: 8}
     - {type: modify, target: score.war.no_reclaim, op: set, value: 1}
     - {type: modify, target: score.betrayal.per_break, op: set, value: 3}
+    - {type: modify, target: score.intel.pact_deep, op: set, value: 1}
     - {type: modify, target: spy.active_base, op: set, value: 2}
     - {type: modify, target: spy.intel.width_min, op: set, value: 1}
     - {type: modify, target: spy.detect.repeat_on, op: set, value: 1}
@@ -128,6 +133,7 @@
     - {type: modify, target: score.war.province_total, op: set, value: 8}
     - {type: modify, target: score.war.no_reclaim, op: set, value: 1}
     - {type: modify, target: score.betrayal.per_break, op: set, value: 3}
+    - {type: modify, target: score.intel.pact_deep, op: set, value: 1}
     - {type: modify, target: spy.active_base, op: set, value: 2}
     - {type: modify, target: spy.intel.width_min, op: set, value: 1}
     - {type: modify, target: spy.detect.repeat_on, op: set, value: 1}
@@ -180,6 +186,7 @@
     - {type: modify, target: score.war.province_total, op: set, value: 8}
     - {type: modify, target: score.war.no_reclaim, op: set, value: 1}
     - {type: modify, target: score.betrayal.per_break, op: set, value: 3}
+    - {type: modify, target: score.intel.pact_deep, op: set, value: 1}
     - {type: modify, target: spy.active_base, op: set, value: 2}
     - {type: modify, target: spy.intel.width_min, op: set, value: 1}
     - {type: modify, target: spy.detect.repeat_on, op: set, value: 1}
@@ -213,6 +220,7 @@
     - {type: modify, target: score.war.province_total, op: set, value: 8}
     - {type: modify, target: score.war.no_reclaim, op: set, value: 1}
     - {type: modify, target: score.betrayal.per_break, op: set, value: 3}
+    - {type: modify, target: score.intel.pact_deep, op: set, value: 1}
     - {type: modify, target: spy.active_base, op: set, value: 2}
     - {type: modify, target: spy.intel.width_min, op: set, value: 1}
     - {type: modify, target: spy.detect.repeat_on, op: set, value: 1}
@@ -237,6 +245,7 @@
     - {type: modify, target: score.war.province_total, op: set, value: 8}
     - {type: modify, target: score.war.no_reclaim, op: set, value: 1}
     - {type: modify, target: score.betrayal.per_break, op: set, value: 3}
+    - {type: modify, target: score.intel.pact_deep, op: set, value: 1}
     - {type: modify, target: spy.active_base, op: set, value: 2}
     - {type: modify, target: spy.intel.width_min, op: set, value: 1}
     - {type: modify, target: spy.detect.repeat_on, op: set, value: 1}

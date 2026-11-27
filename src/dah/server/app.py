@@ -115,12 +115,22 @@ def phase(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict
 
 
 async def wait_phase(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
-    """A player's pending poll is visible to the host (`player_waiting` in the host's phase info)."""
+    """A player's pending poll is visible to the host (`player_waiting` in the host's phase info). Core 0.8.1: the
+    poll also returns, `changed: false` with `reason: "ready_cleared"`, when an offer cleared the seat's ready
+    (`ready_cleared` {reason, by, id}; its text leads the reply's `text`); the host's poll returns on it too."""
     host = _is_host(request)
     after_seq = _int_param(request, "after_seq")
     max_seconds = max(0, min(MAX_WAIT_SECONDS, _int_param(request, "max_seconds", DEFAULT_WAIT_SECONDS) or 0))
-    changed = await game.wait_phase(after_seq, max_seconds, player_seat=None if host else seat)
-    return {"changed": changed, **game.phase_info(seat, host=host)}
+    changed = await game.wait_phase(after_seq, max_seconds, player_seat=None if host else seat,
+                                    watch_seat=seat if host else None)
+    info = game.phase_info(seat, host=host)
+    if not changed and not host:
+        note = game.ready_cleared_note(seat)
+        if note is not None:
+            return {"changed": False, "reason": "ready_cleared", **info,
+                    "ready_cleared": {k: v for k, v in note.items() if k != "text"},
+                    "text": f"{note['text']} | {info['text']}"}
+    return {"changed": changed, **info}
 
 
 def state(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:

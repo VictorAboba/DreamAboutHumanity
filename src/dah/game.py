@@ -23,6 +23,7 @@ from dah.engine import (DeadlineInfo, GameState, Ruleset, SeatOrders, SetupChoic
                         orders_hash, render_report_text, render_state_text, resolve, resolve_setup, rules_text,
                         rules_topic, scores, seat_reserved, setup_config, stat_key, state_hash, submit_orders, techs_text,
                         techs_view, upkeep_of, view_state, visible_provinces)
+from dah.engine import conquest as cq
 from dah.engine import diplomacy as dip
 from dah.engine import discoveries as disc
 from dah.engine import espionage as esp
@@ -407,6 +408,11 @@ class Game:
         self.player_first_seen_at: dict[str, tuple[int, float]] = {}  # seat -> its first call of that phase
         # seat -> its last PLAYER_CALLS_KEPT calls, oldest first: (phase_seq, clock time at arrival, passive)
         self.player_calls: dict[str, list[tuple[int, float, bool]]] = {}
+        # core 0.8.1 (m10 finding 1): seat -> the last offer of this phase that cleared its ready
+        # {phase_seq, n, reason, by, id, told, delivered}; a pending wait_phase of that seat (and the host's poll for
+        # it) returns at once. `told`: a player poll was pending at the clear or has returned it (`delivered`).
+        self.ready_clears: dict[str, dict[str, Any]] = {}
+        self._ready_clear_n = 0
         # setup phase (config["setup"]): offers by seat, choices {seat: {factions?, artifacts?}}, final result
         self.setup_offers: dict[str, list[str]] = {}
         self.setup_choices: dict[str, dict[str, Any]] = {}
@@ -822,30 +828,106 @@ class Game:
             if not loop.is_closed():
                 loop.call_soon_threadsafe(_resolve_future, fut)
 
-    async def wait_phase(self, after_seq: int | None, max_seconds: float, *, player_seat: str | None = None) -> bool:
+    async def wait_phase(self, after_seq: int | None, max_seconds: float, *, player_seat: str | None = None,
+                         watch_seat: str | None = None) -> bool:
         """Wait until `phase_seq` differs from `after_seq` (or the timeout). True if it changed.
 
         `player_seat`: a player's (not the host's) long-poll; while it waits, the host's phase info says
-        `player_waiting` for that seat."""
+        `player_waiting` for that seat. Core 0.8.1 (m10 finding 1): the poll also returns (False) as soon as an offer
+        clears that seat's ready (`ready_cleared_note` tells why), and at once while such a clear of this phase has
+        not been returned to the player yet. `watch_seat`: the host's poll for a seat returns on its clear too."""
         if after_seq is None or after_seq != self.phase_seq:
             return True
+        seat = player_seat or watch_seat
+        if player_seat is not None and self._pending_clear(player_seat) is not None:
+            return False
+        mark = self._clear_mark(seat)
+
+        def news() -> bool:
+            return self.phase_seq != after_seq or (seat is not None and self._clear_mark(seat) != mark)
+
         loop = asyncio.get_running_loop()
-        entry = (loop, loop.create_future())
-        with self._waiters_lock:
-            self._waiters.append(entry)
-            if player_seat is not None:
+        end = loop.time() + max(0.0, float(max_seconds))
+        if player_seat is not None:
+            with self._waiters_lock:
                 self.player_polls[player_seat] = self.player_polls.get(player_seat, 0) + 1
         try:
-            await asyncio.wait_for(entry[1], timeout=max_seconds)
-        except TimeoutError:
-            pass
+            while True:
+                entry = (loop, loop.create_future())
+                with self._waiters_lock:
+                    self._waiters.append(entry)
+                try:
+                    left = end - loop.time()
+                    # checked after joining the waiters: a change between the check and the join is not missed
+                    if news() or left <= 0:
+                        break
+                    await asyncio.wait_for(entry[1], timeout=left)
+                except TimeoutError:
+                    break
+                finally:
+                    with self._waiters_lock:
+                        if entry in self._waiters:
+                            self._waiters.remove(entry)
+                if news():      # a notify wakes every waiter: another seat's news waits on
+                    break
         finally:
-            with self._waiters_lock:
-                if entry in self._waiters:
-                    self._waiters.remove(entry)
-                if player_seat is not None:
+            if player_seat is not None:
+                with self._waiters_lock:
                     self.player_polls[player_seat] = max(0, self.player_polls.get(player_seat, 0) - 1)
         return self.phase_seq != after_seq
+
+    # --- an offer cleared a ready seat (core 0.8.1, m10 finding 1) ---------------------------------------
+
+    def _offer_cleared_ready(self, seat: str, reason: str, by: str, ref_id: str) -> None:
+        """An offer (`trade_proposed`, `pact_proposed`) cleared the ready of `seat`: its pending wait_phase returns
+        with the reason (`ready_cleared_note`), and so does the host's poll for it (dah-waker wakes a seat that is not
+        polling). The offer itself is in the seat's inbox: naming who made it leaks nothing."""
+        self._ready_clear_n += 1
+        with self._waiters_lock:
+            polling = self.player_polls.get(seat, 0) > 0
+        self.ready_clears[seat] = {"phase_seq": self.phase_seq, "n": self._ready_clear_n, "reason": reason,
+                                   "by": by, "id": ref_id, "told": polling, "delivered": False}
+        self._notify()
+
+    def _active_clear(self, seat: str | None) -> dict[str, Any] | None:
+        """The seat's offer clear of this phase while it is still not ready (None once it pressed ready again)."""
+        entry = self.ready_clears.get(seat) if seat is not None else None
+        if entry is None or entry["phase_seq"] != self.phase_seq or seat in self.ready_seats or self.game_over:
+            return None
+        return entry
+
+    def _clear_mark(self, seat: str | None) -> int | None:
+        entry = self._active_clear(seat)
+        return entry["n"] if entry is not None else None
+
+    def _pending_clear(self, seat: str) -> dict[str, Any] | None:
+        entry = self._active_clear(seat)
+        return entry if entry is not None and not entry["delivered"] else None
+
+    def _clear_text(self, entry: dict[str, Any]) -> str:
+        who = self._nick(entry["by"])
+        if entry["reason"] == "trade_proposed":
+            what = f"предложение обмена {entry['id']} от {who}"
+            answer = "list_trades(), ответь respond_trade(id, decision)"
+        else:
+            what = f"предложение пакта {entry['id']} от {who}"
+            answer = "inbox() или list_pacts(), ответь respond_pact(id, decision)"
+        again = "ready(confirm_hash=orders_hash)" if self.phase == P2 else "ready()"
+        return f"ГОТОВНОСТЬ СНЯТА: {what} ждёт ответа — посмотри {answer}, затем снова {again}"
+
+    def ready_cleared_note(self, seat: str, *, host: bool = False) -> dict[str, Any] | None:
+        """Why the seat's wait_phase returned without a new phase: {reason, by (nick), id, text}; a player's read
+        marks the clear as returned to it. The host sees it (with `told`) while the seat is not ready again."""
+        entry = self._active_clear(seat) if host else self._pending_clear(seat)
+        if entry is None:
+            return None
+        if not host:
+            entry["delivered"] = entry["told"] = True
+        note = {"reason": entry["reason"], "by": self._nick(entry["by"]), "id": entry["id"],
+                "text": self._clear_text(entry)}
+        if host:    # `n`: which clear (dah-waker wakes once per clear, even when it never saw the seat ready)
+            note["told"], note["n"] = entry["told"], entry["n"]
+        return note
 
     def note_player_activity(self, seat: str, phase_seq: int | None = None, *, arrival: bool = False,
                              passive: bool = False) -> None:
@@ -885,7 +967,9 @@ class Game:
                 "player_last_call": ({"phase_seq": seen[0], "s_ago": round(max(0.0, now - seen[1]), 1)}
                                      if seen is not None else None),
                 "player_calls": [{"phase_seq": seq, "s_ago": round(max(0.0, now - at), 1), "passive": passive}
-                                 for seq, at, passive in self.player_calls.get(seat, [])]}
+                                 for seq, at, passive in self.player_calls.get(seat, [])],
+                # core 0.8.1: the offer that cleared the seat's ready in this phase (None: none, or ready again)
+                "ready_cleared": self.ready_cleared_note(seat, host=True)}
 
     def phase_info(self, seat: str, *, host: bool = False) -> dict[str, Any]:
         alive = self.alive_seats()
@@ -1061,6 +1145,10 @@ class Game:
             idle = esp.idle_line(self.state, seat)
             if idle:
                 text += "\n" + idle
+        if self.phase in NEGOTIATION_PHASES and not self.game_over:
+            dispute = tr.dispute_line(self.state, self.ruleset, seat, self._nick)   # core 0.8.1 (decision 32)
+            if dispute:
+                text += "\n" + dispute
         if self.phase == P2 and self.ruleset.system("espionage"):
             rep = self.recon_report()
             line = esp.state_line(rep, self.ruleset, self.state, seat)
@@ -1551,6 +1639,7 @@ class Game:
         closed = False
         if seat not in self.ready_seats:
             self.ready_seats.add(seat)
+            self.ready_clears.pop(seat, None)       # answered: a later unready of its own is not an offer's clear
             self.journal.append("ready", seat=seat, turn=self.state.turn, phase=self.phase)
             ready = self.ready_text()
             if set(self.alive_seats()) <= self.ready_seats:
@@ -1662,7 +1751,7 @@ class Game:
             raise GameError("INVALID", "to — список ников или \"all\"")
         out: list[str] = []
         for nick in to:
-            target = self.nick_to_seat.get(nick) or (nick if nick in self.seats else None)
+            target = self.nick_to_seat.get(nick) or (nick if nick in self.seats else cq.seat_ref(self.state, nick))
             if target is None:
                 others = ", ".join(p.nick for s, p in self.state.players.items() if s != seat)
                 raise GameError("UNKNOWN_ID", f"нет игрока с ником {nick[:40]!r} (игроки: {others})")
@@ -1727,7 +1816,8 @@ class Game:
         if isinstance(ref, list) and len(ref) == 1:
             ref = ref[0]
         if isinstance(ref, str):
-            return self.nick_to_seat.get(ref.strip()) or (ref.strip() if ref.strip() in self.seats else ref)
+            found = self.nick_to_seat.get(ref.strip()) or (ref.strip() if ref.strip() in self.seats else None)
+            return found or cq.seat_ref(self.state, ref) or ref     # core 0.8.1: another case of a nick or a letter
         return ref
 
     def _diplomacy(self, seat: str, make: Callable[[], dict[str, Any]], example: str) -> dict[str, Any]:
@@ -1814,18 +1904,24 @@ class Game:
         self.journal.append("pact_proposed", seat=seat, to=op["recipient"], pact_id=pact["id"], turns=op["turns"],
                             turn=self.state.turn, phase=self.phase, **extra)
         answer = (f"Ответь respond_pact(id=\"{pact['id']}\", decision=\"accept\" или \"reject\") до конца хода.")
+        # core 0.8.1 (decision 32): a pact offer between two seats in a dispute over provinces names the trade
+        theirs = tr.dispute_note(self.state, self.ruleset, recipient, seat)
+        ours = tr.dispute_note(self.state, self.ruleset, seat, recipient)
         if renews is not None:
             terms = self._renewal_terms(renews, pact)
             self._notice([recipient], f"{self._nick(seat)} предлагает продлить пакт {renews['id']} ({terms}): "
                                       f"продление {pact['id']} начнётся сразу после нынешнего срока, без разрыва. "
-                                      + answer, "pact_proposed")
-            return {"pact": self._pact_view(pact, seat),
-                    "text": f"предложение продлить пакт {renews['id']} отправлено ({pact['id']}, {terms}); ждёт "
-                            "ответа до расчёта"}
-        self._notice([recipient], f"{self._nick(seat)} предлагает пакт {pact['id']} ({self._pact_terms(pact)}"
-                                  "): армии сторон пакта при встрече не сражаются. " + answer, "pact_proposed")
-        return {"pact": self._pact_view(pact, seat),
-                "text": f"предложение {pact['id']} отправлено ({self._pact_terms(pact)}); ждёт ответа до расчёта"}
+                                      + answer + (f" ({theirs})" if theirs else ""), "pact_proposed")
+            text = (f"предложение продлить пакт {renews['id']} отправлено ({pact['id']}, {terms}); ждёт ответа до "
+                    "расчёта")
+        else:
+            self._notice([recipient], f"{self._nick(seat)} предлагает пакт {pact['id']} ({self._pact_terms(pact)}"
+                                      "): армии сторон пакта при встрече не сражаются. " + answer
+                                      + (f" ({theirs})" if theirs else ""), "pact_proposed")
+            text = f"предложение {pact['id']} отправлено ({self._pact_terms(pact)}); ждёт ответа до расчёта"
+        if was_ready:       # after the notice: the woken poll finds the offer in the inbox
+            self._offer_cleared_ready(recipient, "pact_proposed", seat, pact["id"])
+        return {"pact": self._pact_view(pact, seat), "text": text + (f"; {ours}" if ours else "")}
 
     def _renewal_terms(self, current: dict[str, Any], renewal: dict[str, Any]) -> str:
         """`ещё на 3 ход(а): с хода 6 до хода 8 включительно` (or indefinitely after the current term)."""
@@ -2078,6 +2174,8 @@ class Game:
                                   f"{tr.terms_text(self.ruleset, trade, recipient, self.state)}"
                                   f"{'; ' + where if where else ''}. Ответь {call} до конца хода.",
                      "trade_proposed")
+        if was_ready:       # after the notice: the woken poll finds the offer in the inbox
+            self._offer_cleared_ready(recipient, "trade_proposed", seat, op["id"])
         # the reply ≤ 200 chars (docs/TRADE.md 10): the promise is in list_trades, the notes short; then bare ids
         where = tr.province_notes(self.ruleset, self.state, trade, seat, short=True)
         head = f"предложение {op['id']} → {self._nick(recipient)}: "

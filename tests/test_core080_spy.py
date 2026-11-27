@@ -23,6 +23,7 @@ from dah.store import GameDir, init_game_dir
 
 CORE = DEFAULT_PACKS_DIR / "core"
 CORE071 = LEGACY_PACKS_DIR / "core-0.7.1"
+CORE080 = LEGACY_PACKS_DIR / "core-0.8.0"     # core 0.8.1 froze 0.8.0: the 0.7.1 -> 0.8.0 step is checked on the copy
 # ruleset hashes of the frozen core 0.7.1, as core 0.7.1 itself built them at 718af36
 CORE071_HASHES = {"slice3": "8053b955c6d2", "slice2": "5cde72f644e3", "quad4": "01110b16a0fa",
                   "blitz_test": "4b7b67be2e18", "blitz_spy": "60d008e2efc6", "blitz_score": "96a713f00c26",
@@ -83,7 +84,7 @@ def _rounds(*items):
 # ---------------------------------------------------------------- freeze and the pack
 
 def test_core_071_is_frozen_exactly_with_its_hashes():
-    assert "version: 0.8.0" in (CORE / "pack.yaml").read_text(encoding="utf-8")
+    assert "version: 0.8.1" in (CORE / "pack.yaml").read_text(encoding="utf-8")
     head = (CORE071 / "pack.yaml").read_text(encoding="utf-8")
     assert "version: 0.7.1" in head and "Frozen copy of core 0.7.1" in head and "Do not edit" in head
     for sid, prefix in CORE071_HASHES.items():
@@ -105,7 +106,7 @@ def test_only_espionage_scenarios_and_the_version_moved_from_the_frozen_copy():
 
 @pytest.mark.parametrize("sid", SPY_SCENARIOS)
 def test_spy_scenarios_change_only_missions_and_spy_stats(sid):
-    new, old = build_ruleset(None, sid, {"trade": False}), build_ruleset([str(CORE071)], sid)     # trade: its own step
+    new, old = build_ruleset([str(CORE080)], sid, {"trade": False}), build_ruleset([str(CORE071)], sid)     # trade: own step
     a, b = old.to_dict(), new.to_dict()
     assert (a.pop("packs"), b.pop("packs")) == ({"core": "0.7.1"}, {"core": "0.8.0"})
     for d in (b["stats"], *b["faction_stats"].values()):
@@ -189,7 +190,7 @@ def test_each_turn_and_the_tally_of_older_packs_stay_as_in_070():
 
 
 def test_no_points_against_a_pact_partner_and_the_pair_is_not_spent():
-    rs, st = _state()
+    rs, st = _state([str(CORE080)])         # core 0.8.1 (decision 32): deep missions score (test_core081.py)
     _pact(st, "A", "B")
     denied: list = []
     assert sc.credit_intel(st, rs, _rounds(("A", "core:read_orders", "B", "B"), ("A", "core:secret", "B", "B")),
@@ -463,8 +464,10 @@ def test_estimate_mission_says_what_a_success_scores():
     sab = esp.estimate_mission(st, rs, "A", "sabotage", "P10", 1)
     assert sab["intel_points"] == 1 and "только если удар что-то сделает" in sab["text"]
     _pact(st, "A", "C")
+    # core 0.8.1 (decision 32): a deep mission scores against a partner, a sabotage does not (test_core081.py)
     assert esp.estimate_mission(st, rs, "A", "read_orders", "НикC", 1)["intel_reason"] == \
-        "партнёр по пакту: очков не даст"
+        "партнёр по пакту: очко засчитают, пакт шпионаж не нарушает"
+    assert esp.estimate_mission(st, rs, "A", "sabotage", "P05", 1)["intel_reason"] == "партнёр по пакту: очков не даст"
 
 
 def test_estimate_mission_warns_when_the_books_scoring_entries_fill_the_cap():
@@ -491,8 +494,10 @@ def test_the_rules_name_the_scoring_missions_and_the_new_terms():
     assert "Очки (+1, ≤3): secret, read_orders, sabotage." in line and "ложные записи" not in line
     topic = rules_topic(rs, "spying")
     for words in ("очко: 1 раз за партию", "очко: 1 раз на соперника", "+ 8%·R", "Завеса шёпота", "feint\":true",
-                  "без очков", "Очков нет против партнёра по пакту"):
+                  "без очков", "С партнёра по пакту очко дают secret и read_orders"):     # 0.8.1: decision 32
         assert words in topic, words
+    assert "Очков нет против партнёра по пакту" in rules_topic(build_ruleset([str(CORE080)], "quad4"), "spying")
+
     assert len(topic) <= 4087 + 500
     old = build_ruleset([str(CORE071)], "quad4")
     assert "Успех задания: +1 очко (≤3)" in rules_text(old) and "R" not in rules_topic(old, "spying").split("Поимка")[1][:80]
@@ -555,8 +560,8 @@ def test_estimate_by_an_observation_report(tmp_path, sure):
 
 # ---------------------------------------------------------------- 14.19 replay of the measured games
 
-@pytest.mark.parametrize("name,frozen", [("games-m9/m9", "core-0.7.0"), ("games-m8/m8", "core-0.6.0"),
-                                         ("games-m7/m7", None)])
+@pytest.mark.parametrize("name,frozen", [("games-m10/m10", "core-0.8.0"), ("games-m9/m9", "core-0.7.0"),
+                                         ("games-m8/m8", "core-0.6.0"), ("games-m7/m7", None)])
 def test_measured_games_still_replay(tmp_path, name, frozen):
     src = RUNS / name
     if not (src / "journal.jsonl").is_file():

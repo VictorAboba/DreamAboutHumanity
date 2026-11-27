@@ -60,6 +60,8 @@ _STAT_TEXT = {
     # core 0.7.1 (decision 28)
     "score.war.no_reclaim": "возврат своей провинции не даёт очков войны",
     "score.intel.per_success": "очки за успешное задание Тени", "score.intel.cap": "предел очков разведки",
+    # core 0.8.1 (decision 32)
+    "score.intel.pact_deep": "глубокие задания против партнёра по пакту дают очко",
     "fog.army_presence": "видно наличие чужих армий вне обзора",
 }
 

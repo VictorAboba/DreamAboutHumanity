@@ -279,6 +279,11 @@ SCORING_STATS: tuple[StatSpec, ...] = (
     # mission kind once a turn), at most score.intel.cap over the game
     _s4("score.intel.per_success", 0, 5, 1, "intel"),
     _s4("score.intel.cap", 0, 20, 3, "intel"),
+    # core 0.8.1 (decision 32, measurement m10): 1 = the deep missions (intel kinds `once`, `once_per_target`: secret,
+    # read_orders) score against a pact partner too; `effect` (sabotage) keeps the pact block (a strike at a partner
+    # scores nothing; espionage never breaks a pact, SPY_V2.md 8) and `each_turn` never had one. 0 (the default,
+    # older packs): no point against a partner (G1, 0.8.0)
+    _s4("score.intel.pact_deep", 0, 1, 0, "intel"),
     # core 0.6.0 (decision 26): points a seat loses per pact it broke (a penalty line `betrayal` of the turn score
     # under a non-default scoring); 0 (the default) = no penalty, so older packs score as before
     StatSpec("score.betrayal.per_break", int, 0, 10, 0, seeded=False, system=SCORING_ANY),

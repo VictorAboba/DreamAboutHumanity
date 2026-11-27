@@ -1016,6 +1016,73 @@ def state_line(state: GameState, rs: Ruleset, seat: str, who: Callable[[str], st
     return f"ОБМЕН: обменов {len(items)} (list_trades)"
 
 
+DISPUTE_LINE_LIMIT = 160        # core 0.8.1 (decision 32): the СПОР line of get_state
+# core 0.8.1 (TRADE.md 12 G7, review F3): trade's growth of one get_state text: the ОБМЕН line (<= 160) and the СПОР
+# line (<= DISPUTE_LINE_LIMIT), each with its line break
+STATE_GROWTH_LIMIT = 160 + DISPUTE_LINE_LIMIT + 2
+DISPUTE_ITEMS = 3
+DISPUTE_TAIL = " — можно предложить обмен: propose_trade (провинция, ресурсы, донесение)"
+
+
+def _ties(state: GameState, pid: str, seat: str) -> bool:
+    """Public facts that tie `seat` to the province: it started with it (origin), the province is occupied from it,
+    or the seat holds a claim on it in force."""
+    prov = state.provinces[pid]
+    occ = cq.occupied(prov)
+    return (state.origins.get(pid) == seat or (occ is not None and occ.get("from") == seat)
+            or cq.claim_of(state, seat, pid, state.turn) is not None)
+
+
+def disputes(state: GameState, rs: Ruleset, seat: str, rival: str | None = None) -> list[tuple[str, str]]:
+    """Core 0.8.1 (decision 32, m10: two seats each held a province of the other all game and never traded):
+    [(province, rival)] where the seat holds a province a living rival is tied to (`_ties`), or a living rival
+    holds one the seat is tied to. Public facts only (owners, origins, occupations, claims are public); only in a
+    trade game where provinces can change hands by trade. `rival`: that rival only."""
+    if not on(rs) or not provinces_on(rs) or seat not in state.players or not state.players[seat].alive:
+        return []
+    out = []
+    for pid, prov in sorted(state.provinces.items()):
+        owner = prov.owner
+        if owner is None:
+            continue
+        if owner == seat:
+            others = [r for r, p in sorted(state.players.items())
+                      if r != seat and p.alive and (rival is None or r == rival) and _ties(state, pid, r)]
+            out += [(pid, r) for r in others[:1]]
+        elif (rival is None or owner == rival) and state.players[owner].alive and _ties(state, pid, seat):
+            out.append((pid, owner))
+    return out
+
+
+def dispute_line(state: GameState, rs: Ruleset, seat: str, who: Callable[[str], str]) -> str:
+    """`СПОР: P07 (Бета), P03 (Гамма) — можно предложить обмен: propose_trade (провинция, ресурсы, донесение)` (≤ 160
+    chars, at most 3 provinces, then `+k`); "" without a dispute."""
+    found = disputes(state, rs, seat)
+    if not found:
+        return ""
+    for n in range(min(DISPUTE_ITEMS, len(found)), 0, -1):
+        more = f" +{len(found) - n}" if len(found) > n else ""
+        line = "СПОР: " + ", ".join(f"{pid} ({who(r)})" for pid, r in found[:n]) + more + DISPUTE_TAIL
+        if len(line) <= DISPUTE_LINE_LIMIT:
+            return line
+    return f"СПОР: провинций {len(found)}" + DISPUTE_TAIL
+
+
+def state_growth(state_line: str, dispute: str) -> int:
+    """What trade adds to one get_state text: its ОБМЕН and СПОР lines, each with its line break (gate G7)."""
+    return sum(len(x) + 1 for x in (state_line, dispute) if x)
+
+
+def dispute_note(state: GameState, rs: Ruleset, seat: str, rival: str) -> str:
+    """The reply to a pact offer between two seats in a dispute: `спор о P07, P03: можно и обмен — propose_trade
+    (провинция, ресурсы, донесение)`; "" without one."""
+    pids = sorted({pid for pid, _ in disputes(state, rs, seat, rival)})
+    if not pids:
+        return ""
+    shown = ", ".join(pids[:DISPUTE_ITEMS]) + (f" +{len(pids) - DISPUTE_ITEMS}" if len(pids) > DISPUTE_ITEMS else "")
+    return f"спор о {shown}: можно и обмен — propose_trade (провинция, ресурсы, донесение)"
+
+
 def promises_line(state: GameState, rs: Ruleset, seat: str, who: Callable[[str], str]) -> str:
     """ОБЕЩАНИЯ of get_state, only with trade.show_promises (docs/TRADE.md 3, a separate «memory vs honesty»
     series): `ОБЕЩАНИЯ: ты → Хор: Сплав 20 к ходу 6 · Ник → тебе: P07 к ходу 7` (≤ 160 chars)."""

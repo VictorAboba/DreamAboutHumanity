@@ -161,6 +161,9 @@ class Match:
         self.trade_log: list[dict[str, Any]] = []
         self.gifts: list[tuple[int, str, str, str, dict[str, int]]] = []   # (turn, phase, from, to, resources)
         self.state_line_max = 0     # the longest ОБМЕН line a seat's get_state showed (gate G7)
+        # core 0.8.1 (review F3): the longest СПОР line, and the longest trade growth of one get_state (ОБМЕН + СПОР)
+        self.dispute_line_max = 0
+        self.trade_growth_max = 0
 
 
 _ESTIMATES: dict[Any, float] = {}
@@ -462,6 +465,9 @@ def play_game(rs: Ruleset, kinds: dict[str, str], seed: str, setup: dict[str, An
                 for seat in sorted(kinds):      # what get_state shows before the answers (gate G7)
                     if m.state.players[seat].alive:
                         line = tr.state_line(m.state, rs, seat, lambda x: m.state.players[x].nick)
+                        spor = tr.dispute_line(m.state, rs, seat, lambda x: m.state.players[x].nick)
+                        m.dispute_line_max = max(m.dispute_line_max, len(spor))
+                        m.trade_growth_max = max(m.trade_growth_max, tr.state_growth(line, spor))
                         m.state_line_max = max(m.state_line_max, len(line))
                 reply_passes(m, bots, apis)
         turn = m.state.turn
@@ -533,6 +539,7 @@ def play_game(rs: Ruleset, kinds: dict[str, str], seed: str, setup: dict[str, An
             "decisions": {s: dict(b.memory.decisions) for s, b in bots.items() if b.memory.decisions},
             # core 0.8.0 (docs/TRADE.md 12.2): the trade ops, gifts, the bots' promises, the ОБМЕН line, the end map
             "trade": trade, "trade_log": m.trade_log, "gifts": m.gifts, "state_line_max": m.state_line_max,
+            "dispute_line_max": m.dispute_line_max, "trade_growth_max": m.trade_growth_max,
             "promises": {s: dict(b.trade_mem.promises) for s, b in bots.items()},
             "final_owner": {pid: p.owner for pid, p in m.state.provinces.items()},
             "ptype": {pid: short(p.type) for pid, p in m.state.provinces.items()}}
@@ -1082,6 +1089,8 @@ class TradeTally:
         self.idle: dict[str, list[int]] = defaultdict(list)
         self.final: dict[str, list[int]] = defaultdict(list)
         self.state_line_max = 0
+        self.dispute_line_max = 0
+        self.trade_growth_max = 0
 
     def add(self, g: dict[str, Any]) -> None:
         kinds = g["kinds"]
@@ -1094,6 +1103,8 @@ class TradeTally:
             return
         self.games += 1
         self.state_line_max = max(self.state_line_max, g.get("state_line_max", 0))
+        self.dispute_line_max = max(self.dispute_line_max, g.get("dispute_line_max", 0))
+        self.trade_growth_max = max(self.trade_growth_max, g.get("trade_growth_max", 0))
         for e in g["trade_log"]:
             op = e["op"]
             if op["op"] == "trade_offer":
@@ -1173,7 +1184,8 @@ class TradeTally:
                 "hold_foreign_traded": self.hold_foreign_traded,
                 "idle_resource_turns": {k: mean(v) for k, v in sorted(self.idle.items())},
                 "final_resources": {k: mean(v) for k, v in sorted(self.final.items())},
-                "state_line_max": self.state_line_max}
+                "state_line_max": self.state_line_max, "dispute_line_max": self.dispute_line_max,
+                "trade_growth_max": self.trade_growth_max}
 
     def report(self) -> list[str]:
         if not self.games:
@@ -1250,6 +1262,12 @@ def trade_gates(rs: Ruleset, t: TradeTally, win: dict[str, float], base: dict[st
     row("G7: rules core chars (rules_text, uncut)", len(text), "<= 6000, no «сокращено»",
         len(text) <= 6000 and "сокращено" not in text)
     row("G7: longest ОБМЕН line of get_state", sm["state_line_max"], "<= 160", sm["state_line_max"] <= 160)
+    # core 0.8.1 (decision 32, review F3): the СПОР line has its own 160, and trade's growth of one get_state (ОБМЕН
+    # + СПОР with their line breaks) is bounded by tr.STATE_GROWTH_LIMIT
+    spor, growth = sm.get("dispute_line_max", 0), sm.get("trade_growth_max", 0)
+    row("G7: longest СПОР line of get_state", spor, "<= 160", spor <= tr.DISPUTE_LINE_LIMIT)
+    row("G7: trade growth of one get_state (ОБМЕН + СПОР)", growth, f"<= {tr.STATE_GROWTH_LIMIT}",
+        growth <= tr.STATE_GROWTH_LIMIT)
     return rows
 
 

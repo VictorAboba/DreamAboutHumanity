@@ -1,0 +1,75 @@
+# Common units: the counter cycle assault > artillery > armor > assault (core 0.2.0 numbers), plus stage-2 units
+# behind techs and the Smithy (TECH_AND_SETUP.md section 3). Unique faction units: units/unique.yaml.
+- id: assault
+  name: {ru: Штурмовики, en: Assault Troops}
+  short: штурм
+  attack: 3
+  defense: 3
+  cost: {alloy: 12}
+  upkeep: {provisions: 1}
+  counters: [artillery]
+- id: armor
+  name: {ru: Бронеход, en: Walker}
+  short: бронех
+  attack: 5
+  defense: 4
+  cost: {alloy: 25}
+  upkeep: {provisions: 1}
+  counters: [assault]
+- id: artillery
+  name: {ru: Артиллерия, en: Artillery}
+  short: арт
+  attack: 4
+  defense: 1
+  cost: {alloy: 15}
+  upkeep: {provisions: 1}
+  counters: [armor]
+- id: militia
+  name: {ru: Ополчение, en: Militia}
+  short: опол
+  attack: 2
+  defense: 2
+  cost: {alloy: 8}
+  upkeep: {provisions: 1}
+  lore: Жители миров с ружьями из кузнечного брака. Держат землю, но не берут её.
+- id: outriders
+  name: {ru: Разъезд, en: Outriders}
+  short: разъезд
+  attack: 2
+  defense: 1
+  cost: {alloy: 10}
+  upkeep: {provisions: 1}
+  counters: [artillery]
+  abilities: [fast]
+  requires: {tech: [supply_routes]}
+- id: dreamwalker
+  name: {ru: Сноходец, en: Dreamwalker}
+  short: сноход
+  attack: 3
+  defense: 2
+  cost: {alloy: 14}
+  upkeep: {provisions: 1}
+  counters: [armor]
+  abilities: [ignore_fortify]
+  requires: {tech: [dream_lore]}
+  lore: lore/dreamwalker.md
+- id: mortar
+  name: {ru: Мортира, en: Mortar}
+  short: морт
+  attack: 5
+  defense: 1
+  cost: {alloy: 22}
+  upkeep: {provisions: 1}
+  move: 1
+  abilities: [{id: siege, cap: 1.0}]
+  requires: {tech: [smithcraft], building: [smithy]}
+- id: titan
+  name: {ru: Титан, en: Titan}
+  short: титан
+  attack: 8
+  defense: 7
+  cost: {alloy: 45}
+  upkeep: {provisions: 2}
+  counters: [assault]
+  move: 1
+  requires: {tech: [war_engines], building: [smithy]}

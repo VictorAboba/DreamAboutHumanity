@@ -126,11 +126,18 @@ def _victory_goal_line(config: dict[str, Any]) -> str:
     where = "dah.get_setup() и dah.get_state()" if config.get("setup") else "dah.get_state()"
     spy = (" (узнать чужую можно Тенью, миссия secret)"
            if (config.get("systems") or {}).get("espionage") else "")
+    # core 0.8.1 (decision 32, m10): the rival's «≥» is the visible part only; name what it leaves out
+    gone = [n for src, n in (("science", "наука"), ("war", "война"), ("intel", "разведка"),
+                             ("objectives", "тайная цель")) if weights.get(src)]
+    seen = [n for src, n in (("territory", "земля в твоём обзоре"), ("works", "стройки")) if weights.get(src)]
+    hidden = (f" ({', '.join(seen)})" if seen else "") + (
+        f": {', '.join(gone)} {'скрыты' if len(gone) > 1 else 'скрыта'}, настоящий чужой счёт может быть намного "
+        "больше" if gone else "")
     secret = (f" Твоя тайная цель — в {where} (выполнена ли сейчас); её очки добавятся в конце, чужие цели тайные"
               f"{spy}." if weights.get("objectives") else "")
     return (f"Цель игры: после хода {config['turn_limit']} иметь больший итог очков: {names} (числа — "
             "dah.rules(topic=\"victory\")), или остаться последним живым. Свой счёт с разбивкой — строка «Счёт:» в "
-            f"dah.get_state(); чужой виден только как нижняя граница «≥».{secret}")
+            f"dah.get_state(); чужой «≥» — только видимая часть{hidden}.{secret}")
 
 
 def _setup_goal_lines(config: dict[str, Any]) -> list[str]:

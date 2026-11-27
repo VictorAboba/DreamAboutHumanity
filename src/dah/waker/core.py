@@ -11,7 +11,14 @@ watches the player's own game calls (host-only presence fields) and records `wak
 
 An eliminated seat (`alive: false` before game_over) is done with the game: the waker sends it one notice (`ты выбыл,
 партия для тебя окончена; заверши цель одним итоговым сообщением`), stops waking it and watches its spend as after
-game_over (`after_game_over` figures, `post_game_finished` with `eliminated: true`)."""
+game_over (`after_game_over` figures, `post_game_finished` with `eliminated: true`).
+
+Core 0.8.1 (m10 finding 1): an offer to a seat that was ready (`trade_proposed`, `pact_proposed`) clears its ready.
+The host's phase info names such a clear in `ready_cleared` (with its counter `n`); for each new clear the waker sends
+one `ready_cleared` wake (what cleared it, answer it, press ready again), even when no poll saw the seat ready in
+between, unless the player's own wait_phase already returned the news (`told`). A player that called the game
+moments ago (its ready() call counts) only postpones the wake: it is re-checked until that activity is older than
+ACTIVE_SKIP_SECONDS. A game server without `ready_cleared`: the true -> false step of `you_ready`."""
 
 from __future__ import annotations
 
@@ -21,7 +28,7 @@ from typing import Any, Callable
 
 from dah.bridge.client import GameApiError, GameClient
 from dah.waker.dreamteam import DreamTeamClient, DtResponse
-from dah.waker.text import eliminated_text, wake_text, wrap_up_text
+from dah.waker.text import eliminated_text, ready_cleared_text, wake_text, wrap_up_text
 
 ACTIVE_PHASES = frozenset({"setup", "negotiation_1", "actions", "negotiation_2"})  # setup: stage 2
 POLL_SECONDS = 45
@@ -104,6 +111,14 @@ class Waker:
         self.ack_seconds = max(0.0, ack_seconds)
         # The last phase wake not yet answered: {at, turn, phase, seq, reason} (`at` on this process's clock).
         self._pending_ack: dict[str, Any] | None = None
+        # `you_ready` of the last poll in the current phase (a true -> false step is a clear for a game server
+        # without `ready_cleared`)
+        self._you_ready = False
+        # core 0.8.1 review W1/W2: the key of the last offer clear (host `ready_cleared`) that was woken or finally
+        # skipped; a clear skipped only because the player was active is re-checked (`_clear_retry_at`)
+        self._clear_done: Any = None
+        self._clear_skip_logged: Any = None
+        self._clear_retry_at: float | None = None
 
     # --- loop ---------------------------------------------------------------------------------------------
 
@@ -161,10 +176,15 @@ class Waker:
             self._log("место выбыло: партия для него окончена, больше не бужу")
             return True
         key = (info.get("turn"), info.get("phase"))
+        was_ready = self._you_ready and key == self._phase_key
         self._observe(info)
+        self._you_ready = bool(info.get("you_ready"))
         if key != self._phase_key:
             closed, self._phase_key = self._phase_key, key
             self._reminded = False
+            self._clear_retry_at = self._clear_skip_logged = None
+            # a clear already present at the first poll of a phase (a restarted waker) is covered by phase_open
+            self._clear_done = self._clear_key(info.get("ready_cleared"))
             self._report_spend(closed)
             if self._must_act():
                 skip = self._skip_reason()
@@ -176,6 +196,11 @@ class Waker:
                 else:
                     self._wake("phase_open")
                 self._reminded = self._reminder_due()  # opened less than a minute before its deadline
+        elif self._clear_due(info, was_ready):
+            self._ready_cleared(info)
+            if self._clear_retry_at is not None and self._reminder_due():   # a postponed clear never hides it
+                self._reminded = True
+                self._wake("reminder")
         elif self._reminder_due():
             self._reminded = True
             self._wake("reminder")
@@ -213,6 +238,67 @@ class Waker:
             return "player_active"
         return None
 
+    @staticmethod
+    def _clear_key(cleared: Any) -> Any:
+        """Which offer clear the host's `ready_cleared` names: its counter `n`, or (a server without it) the offer."""
+        if not isinstance(cleared, dict):
+            return None
+        if cleared.get("n") is not None:
+            return ("n", cleared.get("n"))
+        return ("offer", cleared.get("reason"), cleared.get("by"), cleared.get("id"))
+
+    def _clear_due(self, info: dict[str, Any], was_ready: bool) -> bool:
+        """Core 0.8.1 review W1: a server that names offer clears (`ready_cleared` in the host's info) wakes on a
+        clear this waker has not handled yet, whether or not a poll saw the seat ready in between (a ready pressed
+        and cleared within one poll is seen only as the clear). An earlier server (no such field): the true ->
+        false step of `you_ready` within the phase, as before."""
+        if not self._must_act():
+            return False
+        if "ready_cleared" not in info:
+            return was_ready
+        key = self._clear_key(info.get("ready_cleared"))
+        return key is not None and key != self._clear_done
+
+    def _ready_cleared(self, info: dict[str, Any]) -> None:
+        """An offer cleared the seat's ready within the phase (or, for an earlier server, its ready went off): one
+        wake. Skipped for good when the player's own poll returned the clear (`told`); skipped only for now when
+        the player called the game moments ago (core 0.8.1 review W2: its ready() call itself counts, and a seat
+        that pressed ready and stopped makes no next call): re-checked on the next polls until the activity is
+        older than ACTIVE_SKIP_SECONDS."""
+        cleared = info.get("ready_cleared") if isinstance(info.get("ready_cleared"), dict) else None
+        key = self._clear_key(cleared)
+        skip = self._ready_skip_reason(cleared)
+        retry = skip == "player_active" and cleared is not None
+        if skip and (key is None or self._clear_skip_logged != (key, skip)):
+            self._clear_skip_logged = (key, skip)
+            self._telemetry("continue_skipped", {"reason": skip, "wake": "ready_cleared", "turn": info.get("turn"),
+                                                 "phase": info.get("phase"),
+                                                 "cleared_by": (cleared or {}).get("reason"),
+                                                 "player_active_s_ago": info.get("player_active_s_ago"),
+                                                 "retry": retry, "session_state": self._session_state})
+        if retry:
+            ago = info.get("player_active_s_ago")
+            self._clear_retry_at = self._clock() + max(1.0, ACTIVE_SKIP_SECONDS - float(ago) + 1.0)
+            return
+        self._clear_done, self._clear_retry_at = key, None
+        if not skip:
+            self._wake("ready_cleared")
+
+    def _ready_skip_reason(self, cleared: dict[str, Any] | None) -> str | None:
+        """_skip_reason for a ready_cleared wake: the player's own poll has returned the clear (or was pending at
+        it: `told`), or it called the game moments ago (its next wait_phase returns the clear at once). Never
+        skipped for a stopped session."""
+        if cleared is None:
+            return self._skip_reason()
+        if self._session_state in STOPPED_STATES:
+            return None
+        if cleared.get("told"):
+            return "player_waiting"
+        ago = self._info.get("player_active_s_ago")
+        if isinstance(ago, (int, float)) and ago <= ACTIVE_SKIP_SECONDS:
+            return "player_active"
+        return None
+
     def _must_act(self) -> bool:
         info = self._info
         return bool(info.get("alive", True)) and info.get("phase") in ACTIVE_PHASES and not info.get("you_ready")
@@ -231,6 +317,8 @@ class Waker:
         left = self._until_reminder()
         if left is not None:
             wait = min(wait, left)
+        if self._clear_retry_at is not None:     # a ready_cleared wake skipped while the player was active
+            wait = min(wait, self._clear_retry_at - self._clock())
         if self._pending_ack is not None:
             wait = min(wait, ACK_POLL_SECONDS, self._pending_ack["at"] + self.ack_seconds - self._clock())
         return max(1.0, wait)
@@ -318,7 +406,9 @@ class Waker:
         where = {"reason": reason, "turn": self._info.get("turn"), "phase": self._info.get("phase")}
         before = self._dt.get_session(self._session_id)
         # `at`: when the wake was out (after any retries), not when the waker began to send it
-        at = self._deliver(wake_text(self._info, reminder=reason == "reminder"), where, before, restart=True)
+        text = (ready_cleared_text(self._info) if reason == "ready_cleared"
+                else wake_text(self._info, reminder=reason == "reminder"))
+        at = self._deliver(text, where, before, restart=True)
         if at is not None:
             if self._pending_ack is not None:  # an earlier wake of this phase, still unanswered
                 self._ack_resolved("wake_unanswered", at - self._pending_ack["at"], superseded=True)

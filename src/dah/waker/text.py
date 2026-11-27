@@ -65,6 +65,18 @@ def wake_text(phase_info: dict[str, Any], *, reminder: bool = False) -> str:
     """E.g. `[DAH] Ход 3/10, фаза ДЕЙСТВИЯ, до 14:30Z (ещё 20 мин). Готово 1/3. Посмотри ...`."""
     turn = int(phase_info.get("turn") or 0)
     phase = str(phase_info.get("phase", ""))
+    head = _head(phase_info)
+    prefix = "[DAH] Напоминание: фаза скоро закроется, ты ещё не нажал ready. " if reminder else "[DAH] "
+    ready = f" Готово {phase_info['ready']}." if phase_info.get("ready") else ""
+    return (f"{prefix}{head}.{ready} {_hint(phase, turn, phase_info.get('orders_hash'), phase_info.get('intel'))}"
+            + _idle_shades(phase, phase_info.get("idle_shades"))
+            + _trades_waiting(phase, phase_info.get("trades_waiting")))
+
+
+def _head(phase_info: dict[str, Any]) -> str:
+    """`Ход 3/10, фаза ДЕЙСТВИЯ, до 14:30Z (ещё 20 мин)`."""
+    turn = int(phase_info.get("turn") or 0)
+    phase = str(phase_info.get("phase", ""))
     limit = phase_info.get("turn_limit")
     parts = [f"Ход {turn}/{limit}" if limit else f"Ход {turn}", f"фаза {PHASE_NAMES.get(phase, phase)}"]
     timing = []
@@ -74,12 +86,29 @@ def wake_text(phase_info: dict[str, Any], *, reminder: bool = False) -> str:
     seconds_left = phase_info.get("seconds_left")
     if isinstance(seconds_left, (int, float)):
         timing.append(f"(ещё {max(1, math.ceil(seconds_left / 60))} мин)")
-    head = ", ".join(parts) + (", " + " ".join(timing) if timing else "")
-    prefix = "[DAH] Напоминание: фаза скоро закроется, ты ещё не нажал ready. " if reminder else "[DAH] "
-    ready = f" Готово {phase_info['ready']}." if phase_info.get("ready") else ""
-    return (f"{prefix}{head}.{ready} {_hint(phase, turn, phase_info.get('orders_hash'), phase_info.get('intel'))}"
-            + _idle_shades(phase, phase_info.get("idle_shades"))
-            + _trades_waiting(phase, phase_info.get("trades_waiting")))
+    return ", ".join(parts) + (", " + " ".join(timing) if timing else "")
+
+
+def ready_cleared_text(phase_info: dict[str, Any]) -> str:
+    """Core 0.8.1 (m10 finding 1): the wake of a seat whose ready an offer cleared, e.g. `[DAH] Ход 7/12, фаза
+    ПЕРЕГОВОРЫ 1, ... Твою готовность сняло предложение обмена T4 от Беты: посмотри dah.list_trades(), ответь
+    dah.respond_trade(id, decision), затем снова dah.ready().` (`ready_cleared` of the host's phase info)."""
+    cleared = phase_info.get("ready_cleared") if isinstance(phase_info.get("ready_cleared"), dict) else {}
+    who = f" от {cleared['by']}" if isinstance(cleared.get("by"), str) and cleared.get("by") else ""
+    ref = f" {cleared['id']}" if isinstance(cleared.get("id"), str) and cleared.get("id") else ""
+    if cleared.get("reason") == "trade_proposed":
+        what = f"предложение обмена{ref}{who}"
+        answer = "посмотри dah.list_trades(), ответь dah.respond_trade(id, decision)"
+    elif cleared.get("reason") == "pact_proposed":
+        what = f"предложение пакта{ref}{who}"
+        answer = "посмотри dah.inbox(), ответь dah.respond_pact(id, decision)"
+    else:
+        what = "чужое предложение (обмен или пакт)"
+        answer = "посмотри dah.inbox() и dah.list_trades(), ответь на него"
+    phase = str(phase_info.get("phase", ""))
+    again = _ready_call(phase_info.get("orders_hash")) if phase == "negotiation_2" else "dah.ready()"
+    note = " (после правки приказов хэш новый)" if phase == "negotiation_2" else ""
+    return (f"[DAH] {_head(phase_info)}. Твою готовность сняло {what}: {answer}, затем снова {again}{note}.")
 
 
 def _trades_waiting(phase: str, n: Any) -> str:

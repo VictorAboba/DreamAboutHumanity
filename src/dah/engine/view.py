@@ -670,8 +670,8 @@ def _mission_name(ruleset: Ruleset, mid: Any) -> str:
     return ruleset.missions[mid].name if mid in ruleset.missions else str(mid)
 
 
-_MISSION_END = {"done": "срок вышел", "empty": "вернулась ни с чем", "struck": "удар нанесён", "recalled": "отозвана",
-                "void": "цели больше нет", "caught": "нет связи"}
+_MISSION_END = {"done": "срок вышел", "empty": "вернулась ни с чем: успех не выпал", "struck": "удар нанесён",
+                "recalled": "отозвана", "void": "цели больше нет", "caught": "нет связи"}
 
 # Report events of espionage (SPY_AND_CONQUEST.md 2.6, 2.9, 8): only their sides see them (resolve._PRIVATE_KINDS);
 # `who` names a seat (a mission's target may be a province: it is shown as is).

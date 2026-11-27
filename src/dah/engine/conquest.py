@@ -222,7 +222,12 @@ def seat_ref(state: GameState, ref: Any) -> str | None:
     ref = ref.strip()
     if ref in state.players:
         return ref
-    return next((s for s, p in state.players.items() if p.nick == ref), None)
+    exact = next((s for s, p in state.players.items() if p.nick == ref), None)
+    if exact is not None:
+        return exact
+    # core 0.8.1 (m10): a nick or a letter in another case, when it names one seat only
+    folded = [s for s, p in state.players.items() if ref.casefold() in (s.casefold(), (p.nick or "").casefold())]
+    return folded[0] if len(folded) == 1 else None
 
 
 def dispose_problem(state: GameState, ruleset: Ruleset, seat: str, order: Order) -> tuple[str, str] | None:

@@ -338,20 +338,28 @@ def intel_pair(mission: str, target: str) -> str:
     return f"{mission}:{target}"
 
 
+def pact_deep(rs: Ruleset, key: StatKey = None) -> bool:
+    """Core 0.8.1 (decision 32): the deep missions (intel kinds once, once_per_target) score against a pact partner
+    (score.intel.pact_deep 1); 0.8.0 and older: they do not (G1)."""
+    return _stat(rs, "score.intel.pact_deep", key) > 0
+
+
 def intel_block(state: GameState, rs: Ruleset, seat: str, target: str, mission: str, kind: str,
                 key: StatKey = ..., pact: bool | None = None) -> str | None:
     """Why a success of `mission` against the rival `target` would not score now (None: it would). Every kind but
     each_turn (the rule of 0.7.0, which knows only the cap): a pact partner (G1; `pact` given: the recon snapshot's
-    answer), the once / once_per_target rules; then the cap."""
+    answer), the once / once_per_target rules; then the cap. Core 0.8.1 (decision 32, score.intel.pact_deep 1): the
+    deep kinds (once, once_per_target) score against a pact partner too; `effect` keeps the pact block."""
     if key is ...:
         key = stat_key(state, rs, seat)
     tally = state.players[seat].tally
-    if kind != EACH_TURN:
+    if kind != EACH_TURN and not (kind in (ONCE, ONCE_PER_TARGET) and pact_deep(rs, key)):
         if pact is None:
             from .diplomacy import pact_between
             pact = pact_between(state, seat, target, state.turn) is not None
         if pact:
             return DENY_PACT
+    if kind != EACH_TURN:
         if kind == ONCE and mission in (tally.get("intel_kinds") or ()):
             return DENY_ONCE
         if kind == ONCE_PER_TARGET and intel_pair(mission, target) in (tally.get("intel_targets") or ()):
@@ -897,7 +905,9 @@ def score_line(state: GameState, rs: Ruleset, viewer: str, tags: Mapping[str, st
         num = f"{k['score']}" if k["exact"] else f"≥{k['score']}"
         return f"{name}{f' ({tag})' if tag else ''} {num}" + ("" if p.alive else " выбыл")
 
-    def compose(detail_others: bool, detail_self: bool, with_tags: bool) -> str:
+    fog = fog_note(rs, known)
+
+    def compose(detail_others: bool, detail_self: bool, with_tags: bool, with_fog: bool = True) -> str:
         items = []
         for s in state.players:
             text = head(s, with_tags)
@@ -907,18 +917,36 @@ def score_line(state: GameState, rs: Ruleset, viewer: str, tags: Mapping[str, st
                 text += " " + _parts_text(parts, known[s]["exact"])
             items.append(text)
         tail = _objective_tail(state, rs, viewer)
-        return "Счёт: " + " | ".join(items + ([tail] if tail else []))
+        return "Счёт: " + " | ".join(items + ([fog] if fog and with_fog else []) + ([tail] if tail else []))
 
     forms = ((True, True, True), (False, True, True), (False, False, True), (True, True, False),
              (False, True, False), (False, False, False))
     line = ""
-    for others, me, with_tags in forms:
-        if with_tags and not tags:
-            continue
-        line = compose(others, me, with_tags)
-        if len(line) <= SCORE_LINE_LIMIT:
-            return line
+    for with_fog in (True, False):      # core 0.8.1: the fog note goes last of all
+        for others, me, with_tags in forms:
+            if with_tags and not tags:
+                continue
+            line = compose(others, me, with_tags, with_fog)
+            if len(line) <= SCORE_LINE_LIMIT:
+                return line
     return line[:SCORE_LINE_LIMIT - 1] + "…"
+
+
+def fog_note(rs: Ruleset, known: Mapping[str, Mapping[str, Any]]) -> str:
+    """Core 0.8.1 (decision 32, m10: a seat took a rival's «≥15» for its score, it had 35): what a rival's «≥» leaves
+    out — «чужой «≥» — только видимое; скрыты: наука, война, разведка, тайная цель»; '' when nothing is hidden (the
+    default scoring, after the game)."""
+    if rs.default_scoring:
+        return ""
+    hidden = [NAMES[src] for src in TURN_SOURCES
+              if any(not k["exact"] and k["parts"].get(src, 0) is None for k in known.values())]
+    if not any(not k["exact"] for k in known.values()):
+        return ""
+    if on(rs, "objectives"):
+        hidden.append(NAMES["objectives"])
+    # review F5: one hidden source is «скрыта: наука», as cli._victory_goal_line says it
+    return "чужой «≥» — только видимое" + (f"; {'скрыты' if len(hidden) > 1 else 'скрыта'}: {', '.join(hidden)}"
+                                            if hidden else "")
 
 
 def final_line(state: GameState, rs: Ruleset, viewer: str, result: Mapping[str, Any]) -> str:

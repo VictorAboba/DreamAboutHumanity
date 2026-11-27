@@ -492,7 +492,7 @@ P09 Пепельный Брод [нейтр.] пуст. ? | → P08 P10
 | GET | `/v1/whoami` | | game_id, seat, nick, faction, turn, phase |
 | GET | `/v1/rules` | `?topic=` | text (короткий, ≤ 6000 символов на всё) |
 | GET | `/v1/phase` | | turn, phase, deadline, seconds_left, ready "N/M", you_ready, phase_seq, allowed[], game_over |
-| GET | `/v1/wait_phase` | `?after_seq=&max_seconds=45` (≤ 55) | changed, + как `/v1/phase` |
+| GET | `/v1/wait_phase` | `?after_seq=&max_seconds=45` (≤ 55) | changed, + как `/v1/phase`; core 0.8.1: `reason: "ready_cleared"` и `ready_cleared` {reason, by, id}, если чужое предложение сняло «готов» |
 | GET | `/v1/state` | `?format=text\|json&since_turn=` | text или state |
 | GET | `/v1/orders` | | orders[], orders_hash, cp_left |
 | POST | `/v1/orders/validate` | `{orders:[...]}` | results[{ok, reason?, cp_cost, warning?}] (в любой фазе) |
@@ -580,6 +580,23 @@ host-поле фазы `player_calls` [{phase_seq, s_ago, passive}] (после�
 состоянием сессии. Если сессия DreamTeam в одном из STOPPED_STATES, `continue` шлётся всё равно. Напоминание перед
 дедлайном не пропускается. При старте waker записывает свой `--dt-session` в партию
 (`POST /v1/seat/dreamteam_session`), а если сервер игры ещё не поднят — после первого удачного опроса.
+
+**Снятый «готов» (core 0.8.1, m10).** Предложение обмена или пакта месту, которое уже нажало ready, снимает «готов»
+(`ready_cleared`). Long-poll `wait_phase` этого места тогда возвращается сразу: `changed: false`, `reason:
+"ready_cleared"`, `ready_cleared` {reason: `trade_proposed` \| `pact_proposed`, by (ник предложившего), id}, а `text`
+начинается с «ГОТОВНОСТЬ СНЯТА: предложение … ждёт ответа — посмотри …, затем снова ready()». Если опроса в тот момент
+не было, следующий `wait_phase` в этой фазе вернётся сразу, один раз. Повторное ready снимает отметку. Host-поле фазы
+`ready_cleared` {reason, by, id, text, told, n} (None — снятий нет или место снова готово; None и при собственном
+unready или правке приказов), `told` — опрос игрока ждал в момент снятия или уже вернул его, `n` — номер снятия.
+Служебный опрос waker'а тоже возвращается при снятии. На каждое новое снятие (новый `n`) waker шлёт одно
+пробуждение `reason: ready_cleared` («Твою готовность сняло предложение обмена T от Ника: посмотри
+dah.list_trades(), ответь dah.respond_trade(id, decision), затем снова dah.ready().») — даже если ни один его опрос
+не застал место готовым (ready и предложение в пределах одного опроса). Пропускает его (`continue_skipped`
+{reason, wake: `ready_cleared`, cleared_by, retry}) при `told` (`player_waiting`), но не у остановленной сессии.
+Вызов игрока ≤ 30 с назад (`player_active`; сам ready() — тоже вызов) только откладывает пробуждение (`retry: true`):
+waker проверяет снова, когда этому вызову исполнится 30 с, и будит, если опрос игрока так и не вернул снятие.
+Сервер без поля `ready_cleared` — по-старому, по смене `you_ready` с true на false. Ответ на пробуждение считается
+как у пробуждения фазы.
 
 После game_over waker отправляет расход последней фазы и шлёт ОДНО итоговое пробуждение — сообщение всем
 (`--wake-mode all`/`both`; остановленную сессию ради итога не запускает: `continue_skipped`, `not_running`) или
