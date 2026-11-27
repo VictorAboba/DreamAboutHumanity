@@ -104,6 +104,7 @@ def trade_report(events: list[dict[str, Any]], seats: list[str]) -> dict[str, An
     rejected_moves: Counter[str] = Counter()
     scores_by_turn: dict[int, dict[str, int]] = {}
     last_turn = 0
+    out_turn: dict[str, int] = {}       # seat -> the turn it was eliminated
     for e in events:
         kind = e.get("type")
         if kind == "trade_proposed":
@@ -143,6 +144,8 @@ def trade_report(events: list[dict[str, Any]], seats: list[str]) -> dict[str, An
             failed.append(e)
             if e.get("reason") == "proposer_lacks" and e.get("short_side"):
                 seat(e["short_side"])["failed_by_own_lack"] += 1
+        elif kind in ("pact_ended", "claim_ended") and e.get("reason") == "eliminated" and e.get("seat"):
+            out_turn.setdefault(str(e["seat"]), int(e.get("turn") or 0))     # journals before `eliminated` was written
         elif kind == "promise_made":
             promises.append(e)
         elif kind == "province_transferred":
@@ -159,6 +162,8 @@ def trade_report(events: list[dict[str, Any]], seats: list[str]) -> dict[str, An
         elif kind == "order_rejected" and e.get("reason") == "PROVINCE_PROMISED":
             rejected_moves[str(e.get("seat"))] += 1
         elif kind == "turn_resolved":
+            for s in e.get("eliminated") or ():
+                out_turn.setdefault(str(s), int(e["turn"]))
             scores_by_turn[int(e["turn"])] = {str(k): int(v or 0) for k, v in (e.get("scores") or {}).items()}
             last_turn = max(last_turn, int(e["turn"]))
         elif kind == "game_over":
@@ -215,7 +220,7 @@ def trade_report(events: list[dict[str, Any]], seats: list[str]) -> dict[str, An
              + [(int(r.get("turn") or 0), str(r.get("seat")), "provinces") for r in releases]
              + [(int(c.get("turn") or 0), str(c.get("from")), "copies") for c in copies])
     _kingmaking(flows, scores_by_turn, last_turn, per, price, given)
-    promise_rows = _promises(promises, flows, transfers, last_turn, per)
+    promise_rows = _promises(promises, flows, transfers, last_turn, per, out_turn)
     for s, t in per.items():
         t["promised_move_rejected"] = rejected_moves.get(s, 0)
     kept = sum(1 for p in promise_rows if p["status"] == "kept")
@@ -366,11 +371,13 @@ def _kingmaking(flows: list[tuple[int, str, str, dict[str, int], bool, str | Non
 
 def _promises(promises: list[dict[str, Any]], flows: list[tuple[int, str, str, dict[str, int], bool, str | None,
                                                                     str | None]],
-              transfers: list[dict[str, Any]], last_turn: int, per: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+              transfers: list[dict[str, Any]], last_turn: int, per: dict[str, dict[str, Any]],
+              out_turn: dict[str, int] | None = None) -> list[dict[str, Any]]:
     """13.3.1: each promised part of `later` -> kept | partial | broken | void (+ early). Resources: the promiser's
     one-sided transfers to the same seat in [answered turn, by_turn] and both parts of trades marked `fulfils` this
     trade; overlapping promises of a pair take them first due, first served. Provinces: a transfer from the promiser to
-    the promised seat in the window. Void: due after the last turn played."""
+    the promised seat in the window. Void: due after the last turn played, or not kept and either side was
+    eliminated by the due turn (decision of 2026-11-27)."""
     rows = []
     used: dict[int, Counter[str]] = defaultdict(Counter)      # flow index -> amounts already counted
     for p in sorted(promises, key=lambda p: (int(p.get("by_turn") or 0), p.get("seq", 0))):
@@ -400,7 +407,10 @@ def _promises(promises: list[dict[str, Any]], flows: list[tuple[int, str, str, d
         need_n = len(want) + len(provs)
         full = sum(1 for r, n in want.items() if got[r] >= n) + len({t["province"] for t in passed})
         some = any(got.values()) or bool(passed)
+        gone = [(out_turn or {}).get(x) for x in (giver, taker)]
         if last_turn and due > last_turn:
+            status = "void"
+        elif not (need_n and full == need_n) and any(g is not None and g <= due for g in gone):
             status = "void"
         elif need_n and full == need_n:
             status = "kept"

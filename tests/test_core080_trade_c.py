@@ -438,6 +438,25 @@ def test_fulfils_keeps_a_promise_and_fifo_shares_the_transfers():
     assert rows["t9"]["status"] == "partial"        # the fulfils trade went to t1 first; the gift of 3 is t9's
 
 
+def test_a_promise_of_a_seat_eliminated_before_it_is_due_is_void():
+    res = lambda n: {"resources": {ALLOY: n}}       # noqa: E731
+    events = [
+        ev("promise_made", 1, seat="C", to="B", goods=res(7), by_turn=12, trade_id="t1", seats=["B", "C"], turn=3),
+        ev("promise_made", 2, seat="A", to="C", goods=res(2), by_turn=12, trade_id="t2", seats=["A", "C"], turn=3),
+        ev("promise_made", 3, seat="A", to="B", goods=res(2), by_turn=6, trade_id="t3", seats=["A", "B"], turn=3),
+        ev("turn_resolved", 4, turn=11, scores={"A": 5, "B": 5}, eliminated=["C"]),
+        ev("game_over", 5, turn=12, winners=["A"]),
+    ]
+    rep = trade_report(events, ["A", "B", "C"])
+    rows = {p["trade"]: p["status"] for p in rep["game"]["promises"]["rows"]}
+    assert rows == {"t1": "void", "t2": "void", "t3": "broken"}     # giver out, taker out, both alive
+    assert rep["seats"]["C"]["promises_void"] == 1 and rep["seats"]["C"]["promises_broken"] == 0
+    old = [e for e in events if e["type"] != "turn_resolved"] + [   # older journals: only a claim / pact end says it
+        ev("claim_ended", 6, turn=11, province="P13", seat="C", reason="eliminated")]
+    rows = {p["trade"]: p["status"] for p in trade_report(old, ["A", "B", "C"])["game"]["promises"]["rows"]}
+    assert rows["t1"] == "void"
+
+
 def test_a_real_game_journals_trades_and_the_report_counts_them(tmp_path):
     game = make_game(tmp_path)
     game.state.provinces["P02"].units = {ASSAULT: 2}           # B stands next to A's P07

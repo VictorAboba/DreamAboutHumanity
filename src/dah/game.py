@@ -772,7 +772,8 @@ class Game:
             idle_resources={s: v["resources"] for s, v in report.idle.items()},
             idle_units={s: v["units"] for s, v in report.idle.items()},
             resources={s: dict(p.resources) for s, p in new_state.players.items()},   # stocks at the turn's end
-            autopilot=sorted(s for s, b in books.items() if not b.orders))
+            autopilot=sorted(s for s, b in books.items() if not b.orders),
+            **({"eliminated": list(report.public["eliminated"])} if report.public.get("eliminated") else {}))
         if self.ruleset.system("espionage"):
             self._journal_orders_summary(turn, books)
         self.state = new_state
