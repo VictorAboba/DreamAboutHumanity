@@ -1,0 +1,42 @@
+- id: forge_lord
+  name: {ru: Хозяин кузниц, en: Forge Lord}
+  kind: hold_type
+  params: {type: forge, count: 2}
+  points: 3
+- id: granary
+  name: {ru: Житница, en: Granary}
+  kind: hold_type
+  params: {type: agri, count: 1}
+  points: 3
+- id: dominion
+  name: {ru: Держава, en: Dominion}
+  kind: hold_count
+  params: {count: 3}
+  points: 3
+  maps: [tri5]
+  players: {min: 3}
+- id: foreign_throne
+  name: {ru: Чужой престол, en: Foreign Throne}
+  kind: capital_other
+  params: {count: 1}
+  points: 3
+- id: mechanicus
+  name: {ru: Механикус, en: Mechanicus}
+  kind: techs_branch
+  params: {branch: war, count: 1}
+  points: 3
+- id: architect
+  name: {ru: Зодчий, en: Architect}
+  kind: great_work
+  params: {count: 1}
+  points: 3
+  requires_system: scoring.works
+- id: conqueror
+  name: {ru: Завоеватель, en: Conqueror}
+  kind: hold_foreign
+  params: {count: 1}
+  points: 3
+- id: kingbreaker
+  name: {ru: Цареубийца, en: Kingbreaker}
+  kind: rival_capital_taken
+  points: 3

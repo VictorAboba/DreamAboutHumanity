@@ -1,0 +1,19 @@
+- id: banner
+  name: Знамя похода
+  power: 1
+  cost: 1
+  requires_system: conquest
+  effects:
+    - {effect: add_resource, resource: provisions, amount: 15}
+- id: chest
+  name: Сундук
+  power: 1
+  cost: 1
+  effects:
+    - {effect: add_resource, resource: alloy, amount: 15}
+- id: tome
+  name: Свиток муштры
+  power: 1
+  cost: 1
+  effects:
+    - {effect: grant_tech, tech: drill}

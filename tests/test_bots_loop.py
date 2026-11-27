@@ -93,7 +93,8 @@ def test_builder_greets_submits_and_confirms_hash():
     BuilderBot("A", 1).run(api, threading.Event())
     names = [name for name, _ in api.calls]
     assert names == ["message", "ready", "submit", "ready", "ready"]
-    assert readies(api)[1] == ("actions", "h2")
+    submitted = next(args for name, args in api.calls if name == "submit")[1]
+    assert readies(api)[1] == ("actions", f"h{len(submitted)}")   # confirms the hash of what it submitted
 
 
 def test_rush_appends_p2_attack_when_cp_allow():

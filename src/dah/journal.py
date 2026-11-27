@@ -8,11 +8,98 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+# core 0.8.0 (docs/TRADE.md 11): trade, private to its two seats (`seats`) until game_over
+TRADE_TYPES = ("trade_proposed", "trade_accepted", "trade_rejected", "trade_withdrawn", "trade_replaced",
+               "trade_countered", "trade_lapsed", "trade_settled", "trade_failed", "promise_made",
+               # trade step B: a province passed by a trade, a report copy bought (both private to the two seats)
+               "province_transferred", "intel_copied")
 EVENT_TYPES = frozenset({
     "game_created", "seat_info", "phase_open", "phase_close", "recon", "call", "first_call_in_phase",
     "orders_validated", "orders_submitted", "order_edit", "order_edit_p2", "ready", "unready", "ready_cleared",
     "message", "turn_resolved", "spend_report", "telemetry", "game_over",
+    # diplomacy (CONCEPT.md section 7): gifts and pacts
+    "gift", "pact_proposed", "pact_accepted", "pact_rejected", "pact_withdrawn", "pact_left", "pact_broken",
+    "pact_expired", "pact_ended", "pact_lapsed", "pact_renewed", "pact_renewal_cancelled",
+    # stage 2 (TECH_AND_SETUP.md): setup phase and research. `setup_choice` (seat, kind, prefs/artifacts) is private
+    # until `setup_closed`; the artifacts in `setup_closed` stay hidden from players and spectators until game_over.
+    "setup_choice", "setup_closed", "research_started", "tech_completed",
+    # stage 3 (SPY_AND_CONQUEST.md 8). Conquest: fates of captured provinces, policies, claims, revolts, ruins.
+    "province_captured", "disposition", "policy_set", "policy_unaffordable", "dispose_failed", "occupation_revolt",
+    "claim_created", "claim_ended", "ruin_ended",
+    # espionage (private to their seats; full level only)
+    "shade_hired", "mission_started", "spy_round", "intel_report", "intel_read", "shade_captured", "mission_end",
+    "sabotage", "strike_cancelled", "feint", "feint_exposed", "mission_rejected",
+    # core 0.8.0 (docs/SPY_V2.md 5.2, 7): what a strike did, successes that scored nothing and why
+    "sabotage_effect", "intel_denied", "build_sabotaged", "ward_set",
+    # core 0.8.0 (docs/SPY_V2.md 11): the report's «донесение → решение»
+    "orders_summary", "estimate_report",
+    # stage 4 (SCORING.md 9): objectives (private to the seat until game_over), war credit (to the fight's sides),
+    # great works (public), the reveal at the end
+    "objectives_dealt", "war_credit", "work_started", "work_completed", "objectives_revealed",
+    # stage 5 (ABANDONED_LANDS.md 10, 16): the layout (admin-only until game_over), finds and choices (to their seats)
+    "discoveries_placed", "discoveries_unfair", "fair_mirror_skipped", "discovery_found", "discovery_chosen",
+    "discovery_units", "discovery_pending", "order_clipped", "guard_cleared", "lair_grew",
+    # core 0.7.0 (decision 27, to their seat): war points per province, intel points, the shares of works paid in parts
+    "war_points", "intel_point", "build_paid", "build_stalled",
+    *TRADE_TYPES,
+    # core 0.8.0 (docs/TRADE.md 13.2, to its seat): a move into a promised province dropped at step 1
+    "order_rejected",
 })
+
+# Visibility of scoring events in a non-admin view of the journal (view_events)
+_SEAT_PRIVATE = {"objectives_dealt": ("seat",), "war_credit": ("killer", "victim"),
+                 # stage 5: a find to its entrants, a choice and its consequences to the holder
+                 "discovery_found": ("seats",), "discovery_chosen": ("seat",), "discovery_units": ("seat",),
+                 "discovery_pending": ("seat",), "order_clipped": ("seat",),
+                 # core 0.7.0
+                 "war_points": ("seat",), "intel_point": ("seat",), "build_paid": ("seat",), "build_stalled": ("seat",),
+                 # core 0.8.0
+                 "sabotage_effect": ("seat",), "intel_denied": ("seat",), "build_sabotaged": ("seat",),
+                 "ward_set": ("seat",), "orders_summary": ("seat",), "estimate_report": ("seat",),
+                 **{kind: ("seats",) for kind in TRADE_TYPES}, "order_rejected": ("seat",)}
+# core 0.8.0 (docs/SPY_V2.md 7): a revolt journaled with `cause_private` shows its cause only to its side
+_REVOLT_PRIVATE = ("reason", "lost", "rebels", "cause_private")
+# the layout of finds: nobody but the admin until game_over
+_ADMIN_ONLY = frozenset({"discoveries_placed", "discoveries_unfair", "fair_mirror_skipped"})
+
+
+# config fields that deal the secret objectives (and core 0.8.2: the hidden last turn): admin-only until game_over
+_SECRET_CONFIG = ("seed", "objectives_salt", "end_turn")
+
+
+def view_events(events: list[dict[str, Any]], *, seat: str | None = None, admin: bool = False,
+                spectator: bool = False) -> list[dict[str, Any]]:
+    """A journal as a non-admin may read it (SCORING.md 5, 9). Until game_over: `game_created` loses the secret
+    `seed` and `objectives_salt` (also inside `config`); `objectives_dealt` and `war_credit` only for their seats (`seat`); `turn_resolved`
+    keeps only the seat's own `scores`/`score_parts` entry. A `spectator` (the delayed level) sees every score, never
+    objectives or war credit. After game_over (or for the admin) everything is shown."""
+    if admin or any(e.get("type") == "game_over" for e in events):
+        return [dict(e) for e in events]
+    out = []
+    for e in events:
+        kind = e.get("type")
+        if kind == "game_created":
+            e = {k: v for k, v in e.items() if k not in _SECRET_CONFIG}
+            if isinstance(e.get("config"), dict):
+                e["config"] = {k: v for k, v in e["config"].items() if k not in _SECRET_CONFIG}
+        elif kind in _ADMIN_ONLY:
+            continue
+        elif kind in _SEAT_PRIVATE:
+            sides = [x for f in _SEAT_PRIVATE[kind] for x in (e.get(f) if isinstance(e.get(f), list) else [e.get(f)])]
+            if spectator or seat is None or seat not in sides:
+                continue
+        elif kind == "ready_cleared" and e.get("reason") == "trade_proposed":
+            if spectator or seat is None or seat != e.get("seat"):
+                continue        # an offer is private (docs/TRADE.md 16а): nobody else learns that one was made
+        elif kind == "occupation_revolt" and e.get("cause_private"):
+            e = {k: v for k, v in e.items() if k not in _REVOLT_PRIVATE} if spectator or seat != e.get("seat") else                 {k: v for k, v in e.items() if k != "cause_private"}
+        elif kind == "turn_resolved" and not spectator:
+            e = dict(e)
+            for field in ("scores", "score_parts"):
+                if isinstance(e.get(field), dict):
+                    e[field] = {k: v for k, v in e[field].items() if k == seat}
+        out.append(dict(e))
+    return out
 
 
 def read_events(path: str | Path) -> list[dict[str, Any]]:
@@ -44,6 +131,10 @@ class Journal:
         self._lock = threading.Lock()
         self._seq = max((e.get("seq", 0) for e in _iter_events(self.path)), default=0)
         self._end_torn_line()
+        self._size = self._file_size()
+
+    def _file_size(self) -> int:
+        return self.path.stat().st_size if self.path.is_file() else 0
 
     def _end_torn_line(self) -> None:
         """After a crash mid-write, close the torn last line so the next event starts on a line of its own."""
@@ -60,10 +151,14 @@ class Journal:
         if type_ not in EVENT_TYPES:
             raise ValueError(f"unknown journal event type {type_!r}")
         with self._lock:
+            if self._file_size() != self._size:
+                # Another writer appended (`dah game set-session` next to a running server): continue its seq.
+                self._seq = max(self._seq, max((e.get("seq", 0) for e in _iter_events(self.path)), default=0))
             self._seq += 1
             event = {"seq": self._seq, "ts": round(self._clock(), 3), "type": type_, **fields}
             with self.path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
+            self._size = self._file_size()
         return event
 
     def events(self) -> list[dict[str, Any]]:

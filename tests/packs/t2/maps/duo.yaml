@@ -1,0 +1,23 @@
+id: duo
+name: Дуэт
+max_players: 2
+provinces:
+  - {id: A1, name: Столица Альфа, type: capital}
+  - {id: A2, name: Кузня Альфа, type: forge}
+  - {id: A3, name: Святыня Альфа, type: shrine}
+  - {id: B1, name: Столица Бета, type: capital}
+  - {id: B2, name: Кузня Бета, type: forge}
+  - {id: B3, name: Святыня Бета, type: shrine}
+  - {id: C1, name: Нивы Центра, type: agri}
+  - {id: C2, name: Поля Центра, type: agri}
+edges:
+  - [A1, A2]
+  - [A2, A3]
+  - [A3, C1]
+  - [B1, B2]
+  - [B2, B3]
+  - [B3, C2]
+  - [C1, C2]
+starts:
+  - {capital: A1, provinces: [A2, A3]}
+  - {capital: B1, provinces: [B2, B3]}

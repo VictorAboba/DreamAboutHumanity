@@ -1,0 +1,28 @@
+- {id: barracks, name: Казарма, cost: {alloy: 30}, build_turns: 2, recruit: true}
+- id: temple
+  name: Храм
+  cost: {alloy: 10}
+  build_turns: 1
+  effects:
+    - {effect: income, resource: creed, amount: 3}
+- id: smithy
+  name: Кузня
+  cost: {alloy: 10}
+  build_turns: 1
+  requires: {tech: [smithing]}
+- id: citadel
+  name: Цитадель
+  cost: {alloy: 20}
+  build_turns: 1
+  requires: {tech: [fortification]}
+  effects:
+    - {effect: modify, target: province.defense_mul, op: add, value: 0.5, scope: province}
+    - {effect: modify, target: command_points, op: add, value: 1, scope: owner}
+- id: market
+  name: Рынок
+  cost: {alloy: 10}
+  build_turns: 1
+  factions: [ash]
+  effects:
+    - {effect: modify, target: province.income_mul.alloy, op: mul, value: 1.5, scope: province}
+    - {effect: modify, target: province.recruit_discount, op: add, value: 0.5, scope: province}

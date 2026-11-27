@@ -1,0 +1,17 @@
+- id: subjugate
+  name: {ru: Подчинить, en: Subjugate}
+  behavior: annex
+  cost: {provisions: 5}
+- id: exterminate
+  name: {ru: Истребить, en: Exterminate}
+  behavior: raze
+  loot: {alloy: 5, provisions: 3}
+  params: {ruin_turns: 6}
+- id: raid
+  name: {ru: Разграбить, en: Raid}
+  behavior: raid
+  loot: {alloy: 3, provisions: 3}
+  params: {ravage_turns: 2}
+- id: liberate
+  name: {ru: Освободить, en: Liberate}
+  behavior: release

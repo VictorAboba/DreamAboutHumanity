@@ -1,0 +1,41 @@
+- id: staff_litanies
+  name: {ru: Штабные литании, en: Staff Litanies}
+  branch: logistics
+  tier: 1
+  cost: 10
+  unlocks: [hq]
+  effects:
+    - {effect: modify, target: p2.hasty_penalty, op: add, value: -0.05}
+- id: supply_routes
+  name: {ru: Тропы снабжения, en: Supply Routes}
+  branch: logistics
+  tier: 1
+  cost: 10
+  unlocks: [outriders, warehouse]
+  effects:
+    - {effect: modify, target: unit.assault.move, op: add, value: 1}
+    - {effect: modify, target: unit.militia.move, op: add, value: 1}
+- id: treasury_order
+  name: {ru: Казённый порядок, en: Treasury Order}
+  branch: logistics
+  tier: 1
+  cost: 10
+  effects:
+    - {effect: modify, target: p2.cancel_refund, op: add, value: 0.25}
+    - {effect: modify, target: resource.provisions.income_mul, op: mul, value: 1.1}
+- id: second_staff
+  name: {ru: Второй штаб, en: Second Staff}
+  branch: logistics
+  tier: 2
+  cost: 22
+  requires_tier: {tier: 1, count: 2}
+  effects:
+    - {effect: modify, target: command_points, op: add, value: 1}
+- id: courier_walkers
+  name: {ru: Вестовые-сноходцы, en: Courier Walkers}
+  branch: logistics
+  tier: 2
+  cost: 20
+  requires_tier: {tier: 1, count: 2}
+  effects:
+    - {effect: modify, target: p2.cost.new_attack, op: add, value: -1}

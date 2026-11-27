@@ -1,0 +1,4 @@
+- {id: capital, name: Столица, short: столица, income: {alloy: 3, provisions: 3, creed: 2}, defense_mul: 1.5}
+- {id: forge, name: Кузнечный мир, short: кузн., income: {alloy: 4}}
+- {id: shrine, name: Святыня, short: свят., income: {creed: 3, provisions: 1}}
+- {id: agri, name: Агромир, short: агро, income: {provisions: 4}}

@@ -83,14 +83,23 @@ class FakeGame:
             return httpx.Response(200, json={"ok": True})
         return httpx.Response(404, json={"ok": False, "error": {"code": "not_found", "message": path}})
 
-    def kinds(self) -> list[str]:
-        return [t["kind"] for t in self.telemetry]
+    def kinds(self, *, acks: bool = False) -> list[str]:
+        """Telemetry kinds in order; `wake_answered` / `wake_unanswered` only with `acks` (this fake reports no
+        player presence, so every wake ends unanswered)."""
+        return [t["kind"] for t in self.telemetry
+                if acks or t["kind"] not in ("wake_answered", "wake_unanswered")]
+
+    def detail(self, kind: str) -> list[dict[str, Any]]:
+        return [t["detail"] for t in self.telemetry if t["kind"] == kind]
 
 
 class FakeDreamTeam:
-    def __init__(self, clock: Clock, continue_replies: list[tuple[int, dict[str, Any]]] | None = None):
+    def __init__(self, clock: Clock, continue_replies: list[tuple[int, dict[str, Any]]] | None = None,
+                 message_replies: list[tuple[int, dict[str, Any]]] | None = None):
         self.clock = clock
         self.replies = list(continue_replies or [])
+        self.message_replies = list(message_replies or [])
+        self.messages: list[tuple[float, list[str], str]] = []
         self.session: dict[str, Any] = {"id": SESSION, "state": "running", "final": False, "cost_usd": 0.0,
                                         "max_cost_usd": 5.0, "goal": {"status": "in_progress"}, "error": None}
         self.requests: list[httpx.Request] = []
@@ -107,17 +116,30 @@ class FakeDreamTeam:
                 status, body = self.replies.pop(0)
                 return httpx.Response(status, json=body)
             return httpx.Response(200, json={"session": {**self.session, "state": "running"}})
+        if request.method == "POST" and request.url.path == f"/api/v1/sessions/{SESSION}/messages":
+            body = json.loads(request.content)
+            self.messages.append((self.clock.now, body["to"], body["text"]))
+            if self.message_replies:
+                status, reply = self.message_replies.pop(0)
+                return httpx.Response(status, json=reply)
+            if self.session["state"] in ("stopped", "failed", "created"):
+                return httpx.Response(409, json={"error": "the session is not running", "code": "not_running"})
+            return httpx.Response(201, json={"message": {"id": len(self.messages), "to": body["to"]}})
         return httpx.Response(404, json={"error": "no", "code": "not_found"})
 
+    def wakes(self) -> list[tuple[float, str]]:
+        """(time, text) of every wake delivered, by message or by continue, in time order."""
+        return sorted([(at, text) for at, _, text in self.messages] + self.continues, key=lambda w: w[0])
 
-def make_waker(game: FakeGame, dt: FakeDreamTeam, clock: Clock) -> Waker:
+
+def make_waker(game: FakeGame, dt: FakeDreamTeam, clock: Clock, **options: Any) -> Waker:
     return Waker(GameClient("http://game.test", KEY, transport=httpx.MockTransport(game)),
                  DreamTeamClient("http://dt.test", TOKEN, transport=httpx.MockTransport(dt)),
-                 SESSION, clock=clock, sleep=clock.sleep, log=lambda message: None)
+                 SESSION, clock=clock, sleep=clock.sleep, log=lambda message: None, **options)
 
 
-def run(game: FakeGame, dt: FakeDreamTeam, clock: Clock) -> Waker:
-    waker = make_waker(game, dt, clock)
+def run(game: FakeGame, dt: FakeDreamTeam, clock: Clock, **options: Any) -> Waker:
+    waker = make_waker(game, dt, clock, **options)
     for _ in range(10_000):
         if waker.step():
             return waker
@@ -129,8 +151,9 @@ def test_wakes_on_phase_open_and_reminds_before_deadline():
     game, dt = FakeGame(clock), FakeDreamTeam(clock)
     run(game, dt, clock)
 
-    assert len(dt.continues) == 6
-    opens, reminders = dt.continues[0::2], dt.continues[1::2]
+    assert dt.continues == [] and len(dt.messages) == 6
+    assert all(to == ["all"] for _, to, _ in dt.messages)
+    opens, reminders = dt.wakes()[0::2], dt.wakes()[1::2]
     for index, (at, text) in enumerate(opens):
         assert at == T0 + index * 600
         assert text.startswith("[DAH] Ход 1/10, фаза ")
@@ -140,7 +163,7 @@ def test_wakes_on_phase_open_and_reminds_before_deadline():
         assert text.startswith("[DAH] Напоминание")
         assert "ещё 1 мин" in text
     assert "фаза ДЕЙСТВИЯ" in opens[1][1]
-    assert game.kinds() == ["continue_sent"] * 6
+    assert game.kinds() == ["wake_sent"] * 6
     assert clock.sleeps == []
 
 
@@ -148,8 +171,8 @@ def test_ready_seat_gets_no_reminder():
     clock = Clock()
     game, dt = FakeGame(clock, ready_after=100), FakeDreamTeam(clock)
     run(game, dt, clock)
-    assert [text for _, text in dt.continues if "Напоминание" in text] == []
-    assert len(dt.continues) == 3
+    assert [text for _, text in dt.wakes() if "Напоминание" in text] == []
+    assert len(dt.wakes()) == 3
 
 
 def test_spend_reported_after_each_phase_change():
@@ -188,7 +211,7 @@ def test_budget_exhausted_stops_waking():
     clock = Clock()
     game = FakeGame(clock)
     dt = FakeDreamTeam(clock, [(409, {"error": "budget is spent", "code": "budget_exhausted"})])
-    waker = run(game, dt, clock)
+    waker = run(game, dt, clock, wake_mode="continue")
     assert len(dt.continues) == 1
     assert game.kinds() == ["budget_exhausted"]
     assert waker.budget_exhausted
@@ -210,7 +233,7 @@ def test_retries_then_wake_failed():
     errors = [(503, {"error": "x", "code": "internal"}), (429, {"error": "x", "code": "too_many_sessions"}),
               (500, {"error": "x", "code": "internal"}), (503, {"error": "x", "code": "internal"})]
     dt = FakeDreamTeam(clock, errors)
-    waker = make_waker(game, dt, clock)
+    waker = make_waker(game, dt, clock, wake_mode="continue")
     waker.step()
     assert clock.sleeps == [10, 30, 60]
     assert len(dt.continues) == 4
@@ -223,16 +246,16 @@ def test_retry_then_success():
     clock = Clock()
     game = FakeGame(clock, length=100_000)
     dt = FakeDreamTeam(clock, [(502, {})])
-    make_waker(game, dt, clock).step()
+    make_waker(game, dt, clock, wake_mode="continue").step()
     assert clock.sleeps == [10]
-    assert game.kinds() == ["continue_sent"]
+    assert game.kinds() == ["wake_sent"]
 
 
 def test_refusal_is_not_retried():
     clock = Clock()
     game = FakeGame(clock, length=100_000)
     dt = FakeDreamTeam(clock, [(409, {"error": "refused", "code": "conflict"})])
-    make_waker(game, dt, clock).step()
+    make_waker(game, dt, clock, wake_mode="continue").step()
     assert clock.sleeps == []
     assert game.kinds() == ["wake_failed"]
     assert game.telemetry[0]["detail"]["code"] == "conflict"
@@ -243,8 +266,8 @@ def test_session_restarted_detected():
     game = FakeGame(clock, length=100_000)
     dt = FakeDreamTeam(clock, [(200, {"session": {"id": SESSION, "state": "starting"}})])
     dt.session.update(state="stopped", final=True)
-    make_waker(game, dt, clock).step()
-    assert game.kinds() == ["continue_sent", "session_restarted"]
+    make_waker(game, dt, clock, wake_mode="continue").step()
+    assert game.kinds() == ["wake_sent", "session_restarted"]
     detail = game.telemetry[1]["detail"]
     assert detail["state_before"] == "stopped" and detail["state_after"] == "starting"
 
@@ -254,15 +277,15 @@ def test_goal_reopened_detected():
     game = FakeGame(clock, length=100_000)
     dt = FakeDreamTeam(clock, [(200, {"session": {"id": SESSION, "state": "starting"}})])
     dt.session.update(state="done", final=True, goal={"status": "done"})
-    make_waker(game, dt, clock).step()
-    assert game.kinds() == ["continue_sent", "goal_reopened", "session_restarted"]
+    make_waker(game, dt, clock, wake_mode="continue").step()
+    assert game.kinds() == ["wake_sent", "goal_reopened", "session_restarted"]
 
 
 def test_running_session_is_not_restarted():
     clock = Clock()
     game, dt = FakeGame(clock, length=100_000), FakeDreamTeam(clock)
     make_waker(game, dt, clock).step()
-    assert game.kinds() == ["continue_sent"]
+    assert game.kinds() == ["wake_sent"]
 
 
 def test_secrets_stay_with_their_hosts():
@@ -295,14 +318,19 @@ def test_game_errors_back_off_without_crashing():
     assert waker.step() is False
     assert clock.sleeps == [5]
     waker.step()
-    assert len(dt.continues) == 1
+    assert len(dt.wakes()) == 1
 
 
 def test_wake_text_format():
     text = wake_text({"turn": 3, "turn_limit": 10, "phase": "actions", "deadline": "2026-11-23T14:30:00Z",
                       "seconds_left": 1200, "ready": "1/3"})
     assert text == ("[DAH] Ход 3/10, фаза ДЕЙСТВИЯ, до 14:30Z (ещё 20 мин). Готово 1/3. "
-                    "Посмотри dah.get_state(since_turn=2), подай приказы, нажми dah.ready.")
+                    "Посмотри dah.get_state(since_turn=2), подай приказы (dah.submit_orders), затем "
+                    "dah.ready(confirm_hash=orders_hash из ответа dah.submit_orders).")
+    p1 = wake_text({"turn": 3, "turn_limit": 10, "phase": "negotiation_1"})
+    assert "сразу dah.ready() (в П1 без confirm_hash)" in p1
+    p2 = wake_text({"turn": 3, "turn_limit": 10, "phase": "negotiation_2", "orders_hash": "abc123"})
+    assert 'dah.ready(confirm_hash="abc123")' in p2
 
 
 def test_cli_requires_token_from_env(monkeypatch, capsys):

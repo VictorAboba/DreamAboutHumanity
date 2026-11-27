@@ -82,7 +82,7 @@ def test_replay_report_and_goal_text(tmp_path, capsys):
     assert main(["report", "t1", "--games-dir", str(tmp_path), "--json"]) == 0
     report = json.loads(capsys.readouterr().out)
     assert report["result"]["turn"] == 2 and len(report["turns"]) == 2
-    assert report["totals"]["A"]["submits"] == 2 and report["totals"]["B"]["autopilot_turns"] == [1, 2]
+    assert report["totals"]["A"]["submits"] == 2 and report["totals"]["B"]["no_orders_turns"] == [1, 2]
     assert report["rules_chars"] > 1000 and report["phases"][0]["closed"] == "deadline"
     assert main(["report", "t1", "--games-dir", str(tmp_path)]) == 0
     assert "ОТЧЁТ ПАРТИИ t1" in capsys.readouterr().out

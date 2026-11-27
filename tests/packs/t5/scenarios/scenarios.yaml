@@ -1,0 +1,30 @@
+- id: finds
+  name: Треугольник с находками
+  map: tri5
+  factions: [iron, ash]
+  turn_limit: 6
+  phase_limits: {negotiation_1: 60s, actions: 60s, negotiation_2: 60s}
+  systems: {discoveries: true}
+  discoveries:
+    garrison:
+      units: {militia: 2}
+      reward: [{effect: add_resource, resource: alloy, amount: 30}, {effect: add_resource, resource: provisions, amount: 15}]
+- id: finds_all
+  name: Треугольник, всё включено
+  map: tri5
+  factions: [iron, ash]
+  turn_limit: 6
+  phase_limits: {negotiation_1: 60s, actions: 60s, negotiation_2: 60s}
+  systems: {espionage: true, conquest: true, discoveries: true}
+  scoring: {territory: 1, science: 1, works: 1, war: 1, objectives: 1}
+  objectives: {dealt: 1, pool: [forge_lord, foreign_throne, kingbreaker]}
+  discoveries:
+    garrison:
+      units: {militia: 2}
+      reward: [{effect: add_resource, resource: alloy, amount: 30}]
+- id: plain
+  name: Треугольник без находок
+  map: tri5
+  factions: [iron, ash]
+  turn_limit: 6
+  phase_limits: {negotiation_1: 60s, actions: 60s, negotiation_2: 60s}

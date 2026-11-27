@@ -1,0 +1,20 @@
+- id: duel_draft
+  name: Дуэль с драфтом
+  map: duo
+  factions: [iron, ash]
+  turn_limit: 8
+  phase_limits: {setup: 2m, negotiation_1: 60s, actions: 60s, negotiation_2: 60s}
+  setup: {artifacts: draft, artifact_offer: 2}
+- id: duel_points
+  name: Дуэль на очках
+  map: duo
+  factions: [iron, ash]
+  turn_limit: 8
+  phase_limits: {negotiation_1: 60s, actions: 60s, negotiation_2: 60s}
+  setup: {artifacts: points, artifact_points: 3, unique_factions: false}
+- id: duel_plain
+  name: Дуэль без старта
+  map: duo
+  factions: [iron]
+  turn_limit: 8
+  phase_limits: {negotiation_1: 60s, actions: 60s, negotiation_2: 60s}

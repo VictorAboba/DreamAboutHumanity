@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dah.local/schemas/disposition.schema.json",
+  "type": "object",
+  "required": [
+    "id",
+    "name",
+    "behavior"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "name": {
+      "$ref": "common.schema.json#/$defs/lname"
+    },
+    "behavior": {
+      "type": "string",
+      "pattern": "^[a-z_]{1,32}$"
+    },
+    "cost": {
+      "$ref": "common.schema.json#/$defs/amounts"
+    },
+    "loot": {
+      "$ref": "common.schema.json#/$defs/amounts"
+    },
+    "params": {
+      "type": "object"
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 1000
+    }
+  }
+}

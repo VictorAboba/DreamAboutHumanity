@@ -1,0 +1,2 @@
+- {id: war, name: {ru: Война, en: War}, order: 1, description: Оружие и укрепления., color: "#aa3333"}
+- {id: economy, name: {ru: Хозяйство, en: Economy}, order: 2}

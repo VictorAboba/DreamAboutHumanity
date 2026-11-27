@@ -1,0 +1,28 @@
+id: tri
+name: Треугольник
+max_players: 3
+provinces:
+  - {id: A1, name: Столица Альфа, type: capital}
+  - {id: A2, name: Кузня Альфа, type: forge}
+  - {id: B1, name: Столица Бета, type: capital}
+  - {id: B2, name: Кузня Бета, type: forge}
+  - {id: C1, name: Столица Гамма, type: capital}
+  - {id: C2, name: Кузня Гамма, type: forge}
+  - {id: M, name: Нивы Середины, type: agri}
+edges:
+  - [A1, A2]
+  - [B1, B2]
+  - [C1, C2]
+  - [A1, B1]
+  - [B1, C1]
+  - [C1, A1]
+  - [A2, M]
+  - [B2, M]
+  - [C2, M]
+  - [A2, B2]
+  - [B2, C2]
+  - [C2, A2]
+starts:
+  - {capital: A1, provinces: [A2]}
+  - {capital: B1, provinces: [B2]}
+  - {capital: C1, provinces: [C2]}

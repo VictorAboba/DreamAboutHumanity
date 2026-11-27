@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from dah.bots import BOT_TYPES, BuilderBot, PassiveBot, RushBot
+from dah.bots import BOT_TYPES, BuilderBot, DiplomatBot, PassiveBot, RushBot
 from dah.bots.base import seat_seed
 from dah.bots.view import parse_state
 
@@ -43,6 +43,26 @@ def fixed_estimate(table: dict[str, float]):
 
     estimate.calls = calls
     return estimate
+
+
+PLAYERS = [{"seat": "A", "alive": True}, {"seat": "B", "alive": True}]
+
+
+class FakeDiplomacy:
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    def respond_pact(self, pact_id, decision):
+        self.calls.append(("respond", pact_id, decision))
+
+    def propose_pact(self, to, turns):
+        self.calls.append(("propose", to, turns))
+
+    def send_gift(self, to, resources):
+        self.calls.append(("gift", to, resources))
+
+    def leave_pact(self, pact_id):
+        self.calls.append(("leave", pact_id))
 
 
 def no_estimate(*_args):
@@ -95,47 +115,94 @@ def test_passive_does_nothing():
 
 
 # --- builder ---
+# Builder, rush and diplomat share the movement code (dah.bots.tactics): each army goes at its best target, interior
+# armies march, armies that stay fortify. A bot's capital garrison is picked by its seed; the tests set it.
 
 
-def test_builder_builds_mine_and_fortifies_capital():
-    orders = BuilderBot("A", 1).action_orders(parse_state(make_state(), ME), no_estimate)
+def builder(garrison: int = 3, seed: int = 1) -> BuilderBot:
+    bot = BuilderBot("A", seed)
+    bot.garrison = garrison
+    return bot
+
+
+def test_builder_builds_mine_recruits_and_fortifies_capital():
+    orders = builder().action_orders(parse_state(make_state(), ME), no_estimate)  # the whole army is the garrison
+    # 40 - 10 (mine) = 30 -> 2 assault (12 each); food 30 - 3*3 = 21 -> 7 feedable
     assert orders == [
         {"kind": "build", "province": "P02", "building": "mine"},
+        {"kind": "recruit", "province": "P01", "unit": "assault", "count": 2},
         {"kind": "fortify", "province": "P01"},
     ]
 
 
 def test_builder_prefers_farm_when_food_is_short():
-    orders = BuilderBot("A", 1).action_orders(parse_state(make_state(provisions=5), ME), no_estimate)
+    orders = builder().action_orders(parse_state(make_state(provisions=5), ME), no_estimate)
     assert orders[0] == {"kind": "build", "province": "P03", "building": "farm"}
     assert not any(o["kind"] == "recruit" for o in orders)
 
 
+def test_builder_farm_by_net_food_income():
+    fed = make_state()
+    fed["state"]["you"]["net_income"] = {"alloy": 8, "provisions": 4}
+    assert builder().action_orders(parse_state(fed, ME), no_estimate)[0]["building"] == "mine"
+    hungry = make_state(provisions=12)
+    hungry["state"]["you"]["net_income"] = {"alloy": 8, "provisions": 1}
+    orders = builder().action_orders(parse_state(hungry, ME), no_estimate)
+    assert orders[0] == {"kind": "build", "province": "P03", "building": "farm"}
+    # food 12 + 3 turns x 1 = 15 feeds 5 more for 3 turns; alloy (40 - 8) // 12 = 2
+    assert orders[1]["count"] == 2
+
+
 def test_builder_recruits_from_surplus_with_full_ids():
-    orders = BuilderBot("A", 1).action_orders(parse_state(make_state(alloy=100, prefixed=True), ME), no_estimate)
+    orders = builder().action_orders(parse_state(make_state(alloy=100, prefixed=True), ME), no_estimate)
     kinds = [o["kind"] for o in orders]
     assert kinds == ["build", "recruit", "fortify"]
     assert orders[0]["building"] == "core:mine"
-    # 100 - 20 (mine) - 20 reserve = 60 -> 5 assault; food 30 - 3*3 = 21 -> 7 feedable
-    assert orders[1] == {"kind": "recruit", "province": "P01", "unit": "core:assault", "count": 5}
+    # 100 - 10 (mine) = 90 -> 7 assault; food 30 - 3*3 = 21 -> 7 feedable
+    assert orders[1] == {"kind": "recruit", "province": "P01", "unit": "core:assault", "count": 7}
 
 
-def test_builder_never_moves_and_greets_only_on_first_turn():
+def test_builder_attacks_only_sure_fights_and_keeps_its_garrison():
+    view = parse_state(make_state(alloy=0), ME)
+    unsure = fixed_estimate({"forge": 0.7})
+    assert builder(garrison=1).action_orders(view, unsure) == [{"kind": "fortify", "province": "P01"}]
+    assert unsure.calls == [({"assault": 2}, {"assault": 1}, "forge", False, False)]   # 3 - garrison 1
+    sure = builder(garrison=1).action_orders(view, fixed_estimate({"forge": 0.8}))
+    assert sure == [{"kind": "move", "from": "P01", "to": "P07", "units": {"assault": 2}}]   # capital left: no fortify
+    late = parse_state(make_state(alloy=0, turn=9, turn_limit=10), ME)   # stopped building: 0.6 is enough
+    assert builder(garrison=1).action_orders(late, fixed_estimate({"forge": 0.65}))[0]["kind"] == "move"
+
+
+def test_builder_greets_only_on_first_turn():
     bot = BuilderBot("A", 1)
     first = parse_state(make_state(phase="negotiation_1"), ME)
     later = parse_state(make_state(phase="negotiation_1", turn=2), ME)
     assert isinstance(bot.message(first), str) and bot.message(first)
     assert bot.message(later) is None
     assert bot.p2_orders(first, [], 3, no_estimate) == []
-    assert all(o["kind"] != "move" for o in bot.action_orders(first, no_estimate))
+
+
+def test_builder_accepts_pacts_and_spares_partners():
+    state = make_state(alloy=0, players=PLAYERS, pact_proposals=[{"id": "pact-A-B-1", "from": "B", "to": "A"}])
+    api = FakeDiplomacy()
+    builder().diplomacy(parse_state(state, ME), api)
+    assert api.calls == [("respond", "pact-A-B-1", "accept")]
+    allied = parse_state(make_state(alloy=0, players=PLAYERS, pacts=[{"seats": ["A", "B"], "id": "pact-A-B-1"}]), ME)
+    assert builder(garrison=0).action_orders(allied, no_estimate) == [{"kind": "fortify", "province": "P01"}]
 
 
 # --- rush ---
 
 
+def rush(garrison: int = 0, seed: int = 1) -> RushBot:
+    bot = RushBot("A", seed)
+    bot.garrison = garrison
+    return bot
+
+
 def test_rush_recruits_max_and_attacks_best_target():
     estimate = fixed_estimate({"forge": 0.7})
-    orders = RushBot("A", 1).action_orders(parse_state(make_state(alloy=40), ME), estimate)
+    orders = rush().action_orders(parse_state(make_state(alloy=40), ME), estimate)
     assert orders == [
         {"kind": "recruit", "province": "P01", "unit": "assault", "count": 3},
         {"kind": "move", "from": "P01", "to": "P07", "units": {"assault": 3}},
@@ -143,9 +210,24 @@ def test_rush_recruits_max_and_attacks_best_target():
     assert estimate.calls == [({"assault": 3}, {"assault": 1}, "forge", False, False)]
 
 
+def test_rush_keeps_its_garrison():
+    estimate = fixed_estimate({"forge": 0.7})
+    orders = rush(garrison=1).action_orders(parse_state(make_state(alloy=0), ME), estimate)
+    assert orders == [{"kind": "move", "from": "P01", "to": "P07", "units": {"assault": 2}}]
+
+
+def test_rush_builds_a_farm_when_food_limits_the_army():
+    state = make_state(alloy=40, provisions=2)
+    state["state"]["you"]["net_income"] = {"alloy": 8, "provisions": 0}
+    orders = rush().action_orders(parse_state(state, ME), fixed_estimate({}))
+    # food 2 + 2 turns x 0 feeds 1 more; the farm (8) comes first
+    assert orders[:2] == [{"kind": "build", "province": "P03", "building": "farm"},
+                          {"kind": "recruit", "province": "P01", "unit": "assault", "count": 1}]
+
+
 def test_rush_holds_when_estimate_below_threshold():
-    orders = RushBot("A", 1).action_orders(parse_state(make_state(alloy=0), ME), fixed_estimate({"forge": 0.59}))
-    assert orders == []
+    orders = rush().action_orders(parse_state(make_state(alloy=0), ME), fixed_estimate({"forge": 0.59}))
+    assert orders == [{"kind": "fortify", "province": "P01"}]
 
 
 def test_rush_advances_interior_army_towards_nearest_foreign_province():
@@ -153,8 +235,9 @@ def test_rush_advances_interior_army_towards_nearest_foreign_province():
     provinces = state["state"]["provinces"]
     provinces[0].update(units={}, neighbors=["P02", "P03"])  # capital no longer borders P07
     provinces[2].update(units={"assault": 4}, neighbors=["P01"])  # army deep inside, P03 -> P01 -> P02 -> P07
-    orders = RushBot("A", 1).action_orders(parse_state(state, ME), no_estimate)
-    assert orders == [{"kind": "move", "from": "P03", "to": "P01", "units": {"assault": 4}}]
+    orders = rush().action_orders(parse_state(state, ME), no_estimate)
+    assert orders == [{"kind": "move", "from": "P03", "to": "P01", "units": {"assault": 4}},
+                      {"kind": "fortify", "province": "P01"}]
 
 
 def test_rush_p2_adds_one_hasty_attack_with_free_units():
@@ -181,8 +264,8 @@ def test_rush_p2_skips_reserved_units():
 
 def test_rush_tie_break_is_deterministic_per_seat_seed():
     state = make_state(alloy=0)
-    state["state"]["provinces"][2].update(neighbors=["P01", "P09"], units={"assault": 2})
-    state["state"]["provinces"].append(province("P09", "forge", "C", {"assault": 1}, ["P03"]))
+    state["state"]["provinces"][0]["neighbors"].append("P09")
+    state["state"]["provinces"].append(province("P09", "forge", "C", {"assault": 1}, ["P01"]))
     view = parse_state(state, ME)
     estimate = fixed_estimate({"forge": 0.9})
 
@@ -194,5 +277,52 @@ def test_rush_tie_break_is_deterministic_per_seat_seed():
     assert targets == {"P07", "P09"}
 
 
+# --- diplomat ---
+
+
+def diplomat(garrison: int = 0, seed: int = 1) -> DiplomatBot:
+    bot = DiplomatBot("A", seed)
+    bot.garrison = garrison
+    return bot
+
+
+def test_diplomat_proposes_to_neighbours_and_accepts_offers():
+    state = make_state(players=PLAYERS + [{"seat": "C", "alive": True}],
+                       pact_proposals=[{"id": "pact-A-C-1", "from": "C", "to": "A", "turns": None}])
+    api = FakeDiplomacy()
+    bot = diplomat()
+    bot.diplomacy(parse_state(state, ME), api)
+    # C offered: accept; B borders us (P07): propose an indefinite pact; C (no neighbour) gets no proposal
+    assert ("respond", "pact-A-C-1", "accept") in api.calls and ("propose", "B", None) in api.calls
+    assert not any(c[0] == "propose" and c[1] == "C" for c in api.calls)
+    for _ in range(3):  # gives up on a seat after two unanswered proposals
+        bot.diplomacy(parse_state(make_state(players=PLAYERS), ME), api)
+    assert sum(1 for c in api.calls if c[:2] == ("propose", "B")) == 2
+
+
+def test_diplomat_spares_partners_until_a_decisive_late_betrayal():
+    pacts = [{"seats": ["A", "B"], "id": "pact-A-B-1"}]
+    mid = parse_state(make_state(alloy=0, turn=5, turn_limit=10, players=PLAYERS, pacts=pacts), ME)
+    assert diplomat().action_orders(mid, fixed_estimate({"forge": 1.0})) == [{"kind": "fortify", "province": "P01"}]
+    late = parse_state(make_state(alloy=0, turn=10, turn_limit=10, players=PLAYERS, pacts=pacts), ME)
+    assert diplomat().action_orders(late, fixed_estimate({"forge": 0.8})) == [{"kind": "fortify", "province": "P01"}]
+    orders = diplomat().action_orders(late, fixed_estimate({"forge": 0.9}))
+    assert orders == [{"kind": "move", "from": "P01", "to": "P07", "units": {"assault": 3}, "pact": "break"}]
+
+
+def test_bot_numbers_match_the_core_pack():
+    """The bots plan with the core pack's costs (dah.bots.view); a balance change must update both."""
+    from dah.bots import view as bv
+    from dah.engine import build_ruleset
+
+    rs = build_ruleset(None, "slice3")
+    # since core 0.3.0 the pack has more units and buildings (techs, factions); the bots know the slice ones
+    assert {"assault", "armor", "artillery"} <= set(bv.UNIT_COST_ALLOY)
+    assert bv.UNIT_COST_ALLOY == {u: rs.unit_cost(f"core:{u}")["core:alloy"] for u in bv.UNIT_COST_ALLOY}
+    assert bv.UNIT_UPKEEP_FOOD == {u: rs.unit_upkeep(f"core:{u}")["core:provisions"] for u in bv.UNIT_UPKEEP_FOOD}
+    assert {"mine", "farm", "barracks"} <= set(bv.BUILDING_COST_ALLOY)
+    assert bv.BUILDING_COST_ALLOY == {b: rs.building_cost(f"core:{b}")["core:alloy"] for b in bv.BUILDING_COST_ALLOY}
+
+
 def test_bot_registry_names():
-    assert set(BOT_TYPES) == {"passive", "builder", "rush"}
+    assert set(BOT_TYPES) == {"passive", "builder", "rush", "diplomat", "scout"}   # scout: stage 5, the sweep

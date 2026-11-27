@@ -1,0 +1,118 @@
+# Start bonuses of the setup phase (TECH_AND_SETUP.md section 2). power: weight for a fair draft;
+# cost: price in the points mode (1..3).
+- id: ancient_blueprint
+  name: {ru: Древний чертёж, en: Ancient Blueprint}
+  power: 1
+  cost: 1
+  description: Технология «Глубинное бурение» с первого хода.
+  effects:
+    - {effect: grant_tech, tech: deep_drilling}
+- id: smith_relic
+  name: {ru: Реликвия Кузнеца, en: Smith's Relic}
+  power: 2
+  cost: 2
+  description: Технология «Кузнечное дело» и 15 Сплава на старте.
+  effects:
+    - {effect: grant_tech, tech: smithcraft}
+    - {effect: add_resource, resource: alloy, amount: 15}
+- id: trail_maps
+  name: {ru: Карты Троп, en: Trail Maps}
+  power: 1
+  cost: 1
+  description: Технология «Тропы снабжения» с первого хода.
+  effects:
+    - {effect: grant_tech, tech: supply_routes}
+- id: dreamer_shard
+  name: {ru: Осколок Сновидца, en: Dreamer's Shard}
+  power: 2
+  cost: 2
+  description: Технология «Сонное знание» и 10 Кредо на старте.
+  lore: lore/dreamer_shard.md
+  effects:
+    - {effect: grant_tech, tech: dream_lore}
+    - {effect: add_resource, resource: creed, amount: 10}
+- id: mercenary_band
+  name: {ru: Наёмный отряд, en: Mercenary Band}
+  power: 2
+  cost: 2
+  description: Два отряда Ополчения в столице и 5 Провианта на старте.
+  effects:
+    - {effect: grant_units, unit: militia, count: 2, where: capital}
+    - {effect: add_resource, resource: provisions, amount: 5}
+- id: mercenary_contract
+  name: {ru: Контракт Разъезда, en: Outrider Contract}
+  power: 2
+  cost: 2
+  description: Два Разъезда в столице и право нанимать их без технологии.
+  effects:
+    - {effect: unlock, kind: unit, id: outriders}
+    - {effect: grant_units, unit: outriders, count: 2, where: capital}
+- id: seal_of_command
+  name: {ru: Печать Командования, en: Seal of Command}
+  power: 2
+  cost: 3
+  exclusive_with: [calm_banner]
+  description: +1 Очко Командования каждый ход на всю партию.
+  effects:
+    - {effect: modify, target: command_points, op: add, value: 1}
+- id: calm_banner
+  name: {ru: Знамя хладнокровия, en: Banner of Composure}
+  power: 1
+  cost: 1
+  exclusive_with: [seal_of_command]
+  description: Штраф «наспех» за удары из П2 на 10 пунктов меньше.
+  effects:
+    - {effect: modify, target: p2.hasty_penalty, op: add, value: -0.1}
+- id: war_codex
+  name: {ru: Кодекс Брани, en: Codex of Strife}
+  power: 1
+  cost: 1
+  description: Технологии ветки «Война» на 30% дешевле.
+  effects:
+    - {effect: modify, target: tech.branch.war.cost_mul, op: mul, value: 0.7}
+- id: tithe_chalice
+  name: {ru: Чаша десятины, en: Tithe Chalice}
+  power: 2
+  cost: 2
+  description: +2 Кредо каждый ход.
+  effects:
+    - {effect: income, resource: creed, amount: 2}   # core 0.5.0: 3 -> 2 (creed scores as science)
+- id: ore_vein
+  name: {ru: Сплавная жила, en: Alloy Vein}
+  power: 2
+  cost: 2
+  description: +3 Сплава каждый ход.
+  effects:
+    - {effect: income, resource: alloy, amount: 3}
+- id: citadel_keystone
+  name: {ru: Краеугольный камень, en: Keystone}
+  power: 2
+  cost: 2
+  description: Цитадель в столице с первого хода.
+  effects:
+    - {effect: grant_building, building: citadel, where: capital}
+- id: ash_censer
+  name: {ru: Кадило Пепла, en: Ash Censer}
+  power: 1
+  cost: 1
+  factions: [ash_choir]
+  description: Только для Хора Пепла. +2 Кредо каждый ход.
+  effects:
+    - {effect: income, resource: creed, amount: 2}
+# Stage 3 (SPY_AND_CONQUEST.md section 5): espionage only; without it they leave the draft pool and the points list.
+- id: faceless_mask
+  name: {ru: Маска Безликого, en: Faceless Mask}
+  power: 1
+  cost: 1
+  requires_system: espionage
+  description: Шёпот +1 на всю партию.
+  effects:
+    - {effect: modify, target: spy.whisper, op: add, value: 1}
+- id: crooked_mirror
+  name: {ru: Кривое зеркало, en: Crooked Mirror}
+  power: 1
+  cost: 1
+  requires_system: espionage
+  description: Зеркала +1 на всю партию.
+  effects:
+    - {effect: modify, target: spy.mirrors, op: add, value: 1}

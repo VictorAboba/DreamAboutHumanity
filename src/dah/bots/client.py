@@ -14,11 +14,13 @@ class ApiError(Exception):
 
 
 class ApiClient:
-    def __init__(self, server_url: str, key: str, timeout: float = 70.0) -> None:
+    def __init__(self, server_url: str, key: str, timeout: float = 70.0,
+                 transport: httpx.BaseTransport | None = None) -> None:
         self._http = httpx.Client(
             base_url=server_url.rstrip("/"),
             headers={"Authorization": f"Bearer {key}"},
             timeout=timeout,
+            transport=transport,  # tests: an in-process app
         )
 
     def close(self) -> None:
@@ -70,8 +72,67 @@ class ApiClient:
         )
         return float(data.get("win_prob", data.get("estimate", {}).get("win_prob", 0.0)))
 
+    def estimate_report(self, attacker: dict[str, int], report_id: str, hasty: bool) -> dict[str, Any]:
+        """Core 0.8.0 (docs/SPY_V2.md 6.1): estimate(defender="r3") by an own Observation report: {win_prob,
+        win_prob_if_fortified?, fortified?, report}."""
+        data = self._call("POST", "/v1/estimate", json={"attacker": attacker, "defender": report_id, "hasty": hasty})
+        return dict(data.get("estimate") or data)
+
+    def cancel_order(self, order_id: str) -> dict[str, Any]:
+        return self._call("DELETE", f"/v1/orders/{order_id}")
+
     def send_message(self, to: list[str] | str, text: str) -> dict[str, Any]:
         return self._call("POST", "/v1/messages", json={"to": to, "text": text})
 
-    def ready(self, confirm_hash: str) -> dict[str, Any]:
-        return self._call("POST", "/v1/ready", json={"confirm_hash": confirm_hash})
+    def send_gift(self, to: str, resources: dict[str, int]) -> dict[str, Any]:
+        return self._call("POST", "/v1/gifts", json={"to": to, "resources": resources})
+
+    def propose_pact(self, to: str, turns: int | None) -> dict[str, Any]:
+        return self._call("POST", "/v1/pacts", json={"to": to, "turns": turns})
+
+    def respond_pact(self, pact_id: str, decision: str) -> dict[str, Any]:
+        return self._call("POST", f"/v1/pacts/{pact_id}/respond", json={"decision": decision})
+
+    def leave_pact(self, pact_id: str) -> dict[str, Any]:
+        return self._call("POST", f"/v1/pacts/{pact_id}/leave", json={})
+
+    # --- core 0.8.0: trade (docs/TRADE.md 9) ---
+
+    def list_trades(self) -> dict[str, Any]:
+        return self._call("GET", "/v1/trades")
+
+    def propose_trade(self, to: str, give: dict[str, Any] | None = None, want: dict[str, Any] | None = None,
+                      **extra: Any) -> dict[str, Any]:
+        """`extra`: later, reply_to, replaces, fulfils."""
+        body = {"to": to, "give": give or {}, "want": want or {}, **{k: v for k, v in extra.items() if v is not None}}
+        return self._call("POST", "/v1/trades", json=body)
+
+    def respond_trade(self, trade_id: str, decision: str) -> dict[str, Any]:
+        return self._call("POST", f"/v1/trades/{trade_id}/respond", json={"decision": decision})
+
+    def ready(self, confirm_hash: str | None) -> dict[str, Any]:
+        """`None`: no hash (the setup phase accepts that; it confirms the current choice)."""
+        return self._call("POST", "/v1/ready", json={} if confirm_hash is None else {"confirm_hash": confirm_hash})
+
+    # --- stage 2: setup phase and techs (TECH_AND_SETUP.md section 4) ---
+
+    def get_setup(self) -> dict[str, Any]:
+        return self._call("GET", "/v1/setup")
+
+    def choose_faction(self, prefs: list[str]) -> dict[str, Any]:
+        return self._call("POST", "/v1/setup/faction", json={"prefs": prefs})
+
+    def choose_artifacts(self, ids: list[str]) -> dict[str, Any]:
+        return self._call("POST", "/v1/setup/artifacts", json={"ids": ids})
+
+    def list_techs(self) -> dict[str, Any]:
+        return self._call("GET", "/v1/techs")
+
+    # --- stage 3: espionage (docs/SPY_AND_CONQUEST.md section 7) ---
+
+    def intel(self, turn: int | None = None) -> dict[str, Any]:
+        """The seat's own reports of a recon step as data: {turn, intel: {reports, rounds, caught, lost}}."""
+        params: dict[str, Any] = {"format": "json"}
+        if turn is not None:
+            params["turn"] = turn
+        return self._call("GET", "/v1/intel", params=params)

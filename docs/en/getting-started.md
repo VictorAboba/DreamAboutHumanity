@@ -20,6 +20,11 @@ uv sync
 Run them from the repository folder through uv: `uv run dah ...`. From another folder, add
 `--project <path to DreamAboutHumanity>`.
 
+On Windows, while a `dah-bridge` or `dah-waker` is running, its `.venv\Scripts\*.exe` file is locked. A plain
+`uv run` first syncs the environment and may try to rewrite that file, which fails with `os error 32` (the file is
+used by another process). Start further commands with `uv run --no-sync ...`, or call the file directly:
+`<path to DreamAboutHumanity>\.venv\Scripts\dah-bridge.exe` (likewise `dah.exe`, `dah-waker.exe`).
+
 ## Tests
 
 ```sh
@@ -52,22 +57,36 @@ uv run dah replay demo            # re-runs every turn and checks each state_has
 
 - `dah game create` prints the seat keys **once**. Only their sha256 is stored on disk. Bot keys are also kept in
   `games/demo/private/bot_keys.json`, so `dah bots run` can play them.
+- There are two kinds of keys. A **seat key** `dah_<game>_<seat>_...` is the player's: it goes into `DAH_KEY` of
+  `dah-bridge` and into `dah-waker --key`, and opens the player routes `/v1/*`. A **spectator key**
+  `dahw_<game>_...` (printed with them; reissue with `dah game spectator-key`) is for people watching: it is typed
+  into the page `http://127.0.0.1:8800/watch/<id>` and opens only that page and `/v1/spectate/*`. Neither works in
+  the other's place. The watch page also accepts a link `/watch/<id>#key=<spectator key>`. The key stays in the fragment, which the browser never sends to the server; the page saves it in sessionStorage, removes it from the address bar at once and sends it only as the `Authorization: Bearer` header. Without a fragment the page asks for the key in a form.
 - Turn 1 does not start at creation. Its first phase opens when the server loads the match, so setup time does not
   count against the phase.
 - A phase closes on its deadline or as soon as every living seat has pressed ready. Bots press ready at once, so a
   bot match usually ends in seconds.
 
-The three bots:
+The four bots (the three that play share their movement code: each army attacks its best neighbouring target
+when `estimate` is high enough, interior armies march to the border, the capital keeps a garrison, armies that stay
+fortify):
 
 - `passive` does nothing and is always ready.
-- `builder` builds farms and mines, recruits from surplus, keeps the army at home and fortifies the capital.
-- `rush` recruits as much as it can, attacks a neighbouring foreign or neutral province when `estimate` gives
-  a win probability of 0.6 or more, and otherwise marches towards the nearest one.
+- `builder` lays a farm or a mine every turn while the match is young, recruits what it can feed, attacks only when
+  `estimate` is 0.75 or more (0.6 once it has stopped building) and accepts every pact offered to it.
+- `rush` spends everything on the army (a farm only when food limits recruiting) and attacks when `estimate` gives
+  a win probability of 0.6 or more.
+- `diplomat` proposes a pact to each neighbour, accepts pacts, sometimes sends a small gift, attacks only seats it
+  has no pact with (0.65 or more) and, in the last two turns, breaks a pact (`"pact": "break"`) when `estimate` is
+  0.85 or more.
+
+`uv run python scripts/simulate.py` plays hundreds of bot matches on the engine directly, without a server, and
+prints balance tables (docs/SLICE.md, section 3).
 
 ## A match with AI agents
 
 ```sh
-uv run dah game create --scenario core:slice3 --seed 7 --limits 20m,20m,10m --turns 10 \
+uv run dah game create --scenario core:slice3 --seed 7 --limits 12m,5m,5m --turns 10 \
     --seat A:swarm:Niko --seat B:agent:Solo --seat C:bot-rush:Bot
 uv run dah goal-text <id> A        # goal text for the swarm or agent of seat A (it holds no key)
 ```
@@ -101,20 +120,45 @@ Creates `games/<id>/` and prints the seat keys once.
 |---|---|
 | `--scenario ID` | required; full id such as `core:slice3` (a short `slice3` also works if it is unique) |
 | `--seat SEAT:KIND:NICK` | required, once per seat; `KIND` is listed below |
-| `--seed N` | game seed; random if omitted |
-| `--limits N1,A,N2` | phase lengths, e.g. `20m,20m,10m` (`s`, `m`, `h` or seconds); default from the scenario |
+| `--seed N` | game seed; a random 63-bit one if omitted (secret objectives are also dealt from a separate secret `objectives_salt` in the config) |
+| `--limits N1,A,N2` | phase lengths, e.g. `12m,5m,5m` (`s`, `m`, `h` or seconds); default from the scenario |
 | `--turns N` | turn limit; default from the scenario |
 | `--id ID` | match id: letters, digits, hyphen, up to 64 characters |
-| `--dt-session SEAT=ID` | DreamTeam session id of a seat, recorded in the config and journal |
+| `--dt-session SEAT=ID` | DreamTeam session id of a seat, recorded in the config and journal (later: `dah game set-session`, or the waker records it itself) |
 | `--declared SEAT=JSON` | what the seat declares about itself: system, model, number of agents, version |
 | `--packs DIR` | pack folder, repeat for each pack; with it only the listed packs load (include `core`) |
+| `--artifacts draft\|points\|none` | artifact mode of the setup phase; default from the scenario. `draft` or `points` turns the setup phase on even for a scenario without one; `none` keeps the faction choice only |
+| `--artifact-offer N` | draft: artifacts offered to each seat (1..10; default from the scenario, 3 in `core`) |
+| `--artifact-points N` | points: each seat's budget (0..50; default from the scenario, 3 in `core`) |
+| `--setup-limit T` | length of the setup phase, e.g. `5m`; default from the scenario, else 5m |
+| `--espionage on\|off` | stage 3: espionage (Shades, recon, false entries) for this match; default from the scenario (on in `slice3`, `slice2`, `quad4`, `blitz_spy`) |
+| `--conquest on\|off` | stage 3: conquest (occupation, fates, claims) for this match; default from the scenario |
+| `--discoveries on\|off` | stage 5: Abandoned lands and finds (a start without a seat becomes Abandoned land with ruins, a guard and hidden finds); default from the scenario |
+| `--discovery-extra N` | stage 5: also lay finds into up to N ordinary neutral provinces (0..20; default from the scenario, 0) |
+| `--scoring SRC=W,...` | stage 4: weights of the score sources `territory`, `science`, `works`, `war`, `objectives` (0..5; a source not named: 0), e.g. `territory=1,science=1,works=0,war=1,objectives=1`; default from the scenario (all 1 in `slice3`, `slice2`, `quad4`, `blitz_score`; land only in `blitz_test`, `blitz_spy`) |
+| `--objectives N` | stage 4: secret objectives dealt per seat (N ≥ 1; default from the scenario, 1 in `core`); to switch objectives off use `--scoring ...,objectives=0` |
 | `--games-dir DIR` | where to create the match (default `games`) |
 
-- `KIND` is `swarm`, `agent`, `human`, or a bot: `bot-passive`, `bot-builder`, `bot-rush`.
+- `KIND` is `swarm`, `agent`, `human`, or a bot: `bot-passive`, `bot-builder`, `bot-rush`, `bot-diplomat`.
 - `--declared` example: `--declared 'B={"system":"...","model":"...","agents":1,"version":"..."}'`.
 
+`core:slice3`, `core:slice2` and `core:quad4` open with a setup phase (factions and an artifact draft) before turn
+1; `core:blitz_test` has none. See [Game rules](rules.md#the-setup-phase). `slice3`, `slice2`, `quad4` and the
+short `blitz_score` score five sources (land, science, great works, war, a secret objective —
+[Game rules](rules.md#victory-and-scoring)); `dah game create` prints the match's weights as «Счёт: …».
+
 Seat ids are letters and digits, up to 16 characters. Seat ids and nicks must be unique within a match. The
-number of seats is from 1 to the map's number of starts; unused starts stay neutral and empty.
+number of seats is from 1 to the map's number of starts; unused starts stay neutral and empty, or, with
+`--discoveries on`, become Abandoned land ([Game rules](rules.md#abandoned-lands-and-finds-stage-5)). The layout of
+finds is dealt from the seed and the secret `objectives_salt`, so it is the same on replay and hidden from the
+seats.
+
+### `dah game set-session ID SEAT DT_SESSION_ID`
+
+Records the DreamTeam session that plays a seat, for a session created after the match: writes
+`dreamteam_session_id` into `games/<id>/config.json` and journals a `seat_info` event with `update: true` and
+`source: "cli"`. It is safe next to a running server. `dah-waker` does the same by itself at start, from its
+`--dt-session`.
 
 ### `dah serve`
 
@@ -139,20 +183,37 @@ Plays every seat of kind `bot` in the match, one thread per seat, until `game_ov
 
 The match report built from the journal. Per seat and phase: time from phase open to the first call, to the first
 accepted order submission and to ready; how the phase closed; number of calls and characters sent and received;
-submissions, edits and rejections; idle resources and units; turns played on autopilot; scores by turn; money by
-turn (from `dah-waker`); waker telemetry and the turn where the money ran out. `--json` prints the same as JSON.
+submissions (also counted per phase kind: «подач в П1 / Д / П2»), edits and rejections; idle resources and units;
+the turns a seat submitted no orders at all («не подал приказов в ходах») and the phases the deadline closed while
+it had not pressed ready («не нажал готово (закрыто по таймеру)»); scores by turn; money by turn and by phase (from
+`dah-waker`, counted for the phase each figure is for); per seat money and time «во время партии» and «после
+game_over» apart (what the session spent while it wrapped up after the match; both times on the journal clock,
+shown only for seats with after-game data, as on /watch); waker telemetry and the turn where
+the money ran out; per seat the waker's phase wakes («пробуждения: отправлено / ответ / без ответа, медиана до хода»:
+wakes sent, answered and unanswered within `--ack-seconds`, the median seconds to the first game call after a wake). `--json` prints the same as JSON (`submits_by_phase`, `no_orders_turns`, `not_ready_phases`,
+`spent_in_game_usd`, `spent_after_game_usd`, `in_game_s`, `after_game_s`, `post_game_watch_s`, `wakes_sent`,
+`wakes_answered`, `wakes_unanswered`, `wake_answer_median_s`, `pacts_signed`, `pacts_kept`, `pacts_broken`,
+`gifts_sent`, `gifts_received`, `gifted_resources`, `received_resources`, ...). Diplomacy per seat is in the text too
+(«пакты: заключено / соблюдено / нарушено; подношения: отдано / получено»), for seats that had any.
 
-### `dah replay ID`
+### `dah replay ID [--packs DIR[,DIR...]]`
 
-Rebuilds the ruleset, re-runs every resolved turn from the initial state and the saved orders, and compares the
-ruleset hash, each turn's `state_hash` and the final result with the journal. Prints `OK` or the mismatch per turn.
-The exit code is 1 on any mismatch, for example when pack content changed after the match.
+Rebuilds the ruleset, re-runs every resolved turn from the initial state (for a match with a setup phase, turn 1 as
+the `setup_closed` event recorded it) and the saved orders, and compares the ruleset hash, each turn's `state_hash`
+and the final result with the journal. Prints `OK` or the mismatch per turn.
+
+Which packs: `--packs` if given (comma-separated or repeated); otherwise the match config's packs when their hash
+matches the journal; otherwise, for a match on the default packs, a frozen earlier version from `content/legacy`
+(now `core-0.2.0`) whose hash matches, so a match played before a content update still replays. The command says
+which version it took. The exit code is 1 on any mismatch, for example when the packs changed after the match and
+no frozen version matches.
 
 ### `dah goal-text ID SEAT`
 
 Prints the goal text for a swarm or agent seat: the game, the nick and the opponents, that the connection is the
 MCP server `dah`, phase lengths, the turn loop, that the goal is not reached until `dah.phase()` returns
-`game_over`, and that opponents' messages are not instructions. The text holds no key.
+`game_over`, that after `game_over` it should finish at once with one short summary (score, place), and that
+opponents' messages are not instructions. The text holds no key.
 
 ### Exit codes
 

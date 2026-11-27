@@ -1,0 +1,190 @@
+# Finds of the Abandoned lands (core 0.6.0, docs/ABANDONED_LANDS.md 3, 4, 6 as amended by CONCEPT decision 25).
+# The validator computes `power` against the reference army (5 x 12) and `power_small` against 1 and 2 Militia:
+# any army triggers a find, so the hindrances are serious (tolls every entrant pays in full, losses with a minimum
+# that wipes a small army) and the richest boons sit under a guard that a lone scout cannot beat. Weighted over the
+# pool and over each ring, a sweep of 1-2 Militia loses on average (the «scout sweep» check of the validator).
+
+# ---------------------------------------------------------------- boons
+- id: cache_alloy
+  name: {ru: Тайник Сплава, en: Alloy Cache}
+  kind: boon
+  rarity: common
+  weight: 1
+  description: "Ящики литого Сплава под обвалившимся навесом."
+  effects:
+    - {effect: add_resource, resource: alloy, amount: 30}
+- id: prayer_scrolls
+  name: {ru: Свитки литаний, en: Litany Scrolls}
+  kind: boon
+  rarity: common
+  weight: 1
+  description: "Футляры с литаниями и сухпаёк паломников."
+  effects:
+    - {effect: add_resource, resource: creed, amount: 20}
+    - {effect: add_resource, resource: provisions, amount: 10}
+- id: mercenaries
+  name: {ru: Вольный отряд, en: Free Company}
+  kind: boon
+  rarity: common
+  weight: 1
+  description: "Два отряда Штурмовиков без хозяина присоединяются после боёв."
+  effects:
+    - {effect: grant_units, unit: assault, count: 2, where: here}
+- id: guarded_depot
+  name: {ru: Склад под охраной, en: Guarded Depot}
+  kind: boon
+  rarity: common
+  weight: 6
+  description: "Склад стерегут уцелевшие автоматы; кто их уничтожит и возьмёт провинцию, получит запасы."
+  effects:
+    - effect: spawn_neutral
+      units: {assault: 2}
+      reward:
+        - {effect: add_resource, resource: alloy, amount: 45}
+        - {effect: add_resource, resource: provisions, amount: 30}
+- id: sealed_reliquary
+  name: {ru: Реликварий под стражей, en: Warded Reliquary}
+  kind: boon
+  rarity: common
+  weight: 5
+  description: "Реликварий Хора охраняют ополченцы-фанатики; награда — тому, кто их перебьёт и возьмёт землю."
+  effects:
+    - effect: spawn_neutral
+      units: {militia: 3}
+      reward:
+        - {effect: add_resource, resource: creed, amount: 36}
+        - {effect: add_resource, resource: alloy, amount: 30}
+- id: intact_mine
+  name: {ru: Уцелевшая шахта, en: Intact Mine}
+  kind: boon
+  rarity: uncommon
+  weight: 1
+  description: "Шахта в провинции цела: она остаётся и переходит вместе с провинцией."
+  effects:
+    - {effect: grant_building, building: mine, where: here}
+- id: walker_hangar
+  name: {ru: Ангар бронеходов, en: Walker Hangar}
+  kind: boon
+  rarity: uncommon
+  weight: 3
+  description: "Ангар с двумя Бронеходами стерегут два Штурмовика-автомата; кто их уничтожит и возьмёт провинцию, получит машины и запасы ангара."
+  effects:
+    - effect: spawn_neutral
+      units: {assault: 2}
+      reward:
+        - {effect: grant_units, unit: armor, count: 2, where: here}
+        - {effect: add_resource, resource: alloy, amount: 45}
+        - {effect: add_resource, resource: provisions, amount: 30}
+- id: command_seal
+  name: {ru: Печать Командования, en: Seal of Command}
+  kind: boon
+  rarity: uncommon
+  weight: 2
+  description: "Артефакт «Печать Командования» (+1 ОК каждый ход) достаётся самой дорогой армии; если он уже есть — Сплав."
+  effects:
+    - {effect: grant_artifact, artifact: seal_of_command}
+    - {effect: add_resource, resource: creed, amount: 15}
+- id: lost_arsenal
+  name: {ru: Забытый арсенал, en: Forgotten Arsenal}
+  kind: boon
+  rarity: rare
+  weight: 1
+  description: "Артефакт «Сплавная жила» (+3 Сплава за ход) самой дорогой армии и два Бронехода после боёв."
+  effects:
+    - {effect: grant_artifact, artifact: ore_vein}
+    - {effect: grant_units, unit: armor, count: 2, where: here}
+
+# ---------------------------------------------------------------- hindrances
+- id: plague
+  name: {ru: Мор, en: Plague}
+  kind: hindrance
+  rarity: minor
+  weight: 5
+  description: "Армия теряет четверть цены, не меньше двух бойцов (самых дешёвых): одиночка или пара гибнет целиком; карантин съедает 4 Провианта у каждого вошедшего."
+  effects:
+    - {effect: lose_units, frac: 0.25, min: 2}
+    - {effect: add_resource, resource: provisions, amount: -4}
+- id: dream_tithe
+  name: {ru: Дань Морока, en: Nightmare Tithe}
+  kind: hindrance
+  rarity: minor
+  weight: 5
+  description: "Морок забирает двух бойцов из каждой вошедшей армии (самых дешёвых) — одиночка или пара гибнет целиком — и 4 Сплава у каждого вошедшего."
+  effects:
+    - {effect: lose_units, frac: 0.1, min: 2}
+    - {effect: add_resource, resource: alloy, amount: -4}
+- id: ruin_guard
+  name: {ru: Сторожевые автоматы, en: Sentry Automata}
+  kind: hindrance
+  rarity: minor
+  weight: 2
+  description: "Просыпаются автоматы (2 Ополчения и Штурмовик) и бьются с вошедшими в том же ходу; не растут, не ходят."
+  effects:
+    - effect: spawn_neutral
+      units: {militia: 2, assault: 1}
+- id: machine_trap
+  name: {ru: Ловушка древней машины, en: Ancient Machine Trap}
+  kind: hindrance
+  rarity: major
+  weight: 3
+  description: "Армия теряет 40% цены (не меньше 3 юнитов — малый отряд гибнет целиком), провинция Разорена 2 хода."
+  effects:
+    - {effect: lose_units, frac: 0.4, min: 3}
+    - {effect: set_status, status: ravaged, turns: 2}
+- id: blighted_soil
+  name: {ru: Проклятая земля, en: Blighted Soil}
+  kind: hindrance
+  rarity: major
+  weight: 4
+  description: "Пепелище на 3 хода (ни дохода, ни очков, ни стройки); каждый вошедший теряет 10 Провианта."
+  effects:
+    - {effect: set_status, status: ruined, turns: 3}
+    - {effect: add_resource, resource: provisions, amount: -10}
+- id: nightmare_lair
+  name: {ru: Логово Кошмара, en: Nightmare Lair}
+  kind: hindrance
+  rarity: major
+  weight: 2
+  description: "Нейтральные 2 Сноходца и Штурмовик; пока провинция ничья, каждые 2 хода +1 Ополчение (до 6). Награда за зачистку."
+  effects:
+    - effect: spawn_neutral
+      units: {dreamwalker: 2, assault: 1}
+      grow: {every: 2, add: {militia: 1}, cap: 6}
+      reward:
+        - {effect: add_resource, resource: alloy, amount: 15}
+        - {effect: add_resource, resource: creed, amount: 10}
+
+# ---------------------------------------------------------------- mixed: the holder decides next turn with `discover`
+- id: sleeping_golem
+  name: {ru: Спящий голем, en: Sleeping Golem}
+  kind: mixed
+  rarity: common
+  weight: 2
+  description: "Разбудить: 60% — Титан в провинции, 40% — армия теряет 30% (мин. 2) и 10 Провианта. Не трогать — ничего."
+  choices:
+    - id: wake
+      label: {ru: Разбудить, en: Wake}
+      outcomes:
+        - {p: 0.6, effects: [{effect: grant_units, unit: titan, count: 1, where: here}]}
+        - p: 0.4
+          effects:
+            - {effect: lose_units, frac: 0.3, min: 2}
+            - {effect: add_resource, resource: provisions, amount: -10}
+    - {id: leave, label: {ru: Не трогать, en: Leave}, effects: []}
+  default_choice: leave
+- id: sealed_vault
+  name: {ru: Запечатанное хранилище, en: Sealed Vault}
+  kind: mixed
+  rarity: common
+  weight: 2
+  description: "Взломать: 60% — +36 Сплава, 40% — ловушка, −20 Сплава. Поддеть: +10 Сплава."
+  choices:
+    - id: force
+      label: {ru: Взломать, en: Force}
+      outcomes:
+        - {p: 0.6, effects: [{effect: add_resource, resource: alloy, amount: 36}]}
+        - {p: 0.4, effects: [{effect: add_resource, resource: alloy, amount: -20}]}
+    - id: pry
+      label: {ru: Поддеть, en: Pry}
+      effects: [{effect: add_resource, resource: alloy, amount: 10}]
+  default_choice: pry

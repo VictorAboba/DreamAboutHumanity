@@ -12,7 +12,8 @@ from fastapi.testclient import TestClient
 
 from dah.engine import ContentError, build_ruleset
 from dah.engine.content import DEFAULT_PACKS_DIR, circular_layout
-from dah.game import Game, make_config
+from dah.game import Game
+from slice_helpers import slice_config
 from dah.server import create_app
 from dah.store import init_game_dir
 
@@ -108,7 +109,7 @@ def test_circular_layout_is_deterministic_and_inside_canvas():
 def test_meta_of_map_without_pos_gets_computed_layout(tmp_path, pack):
     edit_map(pack, "mirror2", strip_pos)
     seats = [{"seat": "A", "nick": "Нико", "kind": "agent"}, {"seat": "B", "nick": "Соло", "kind": "agent"}]
-    config = make_config(game_id="np", scenario="core:slice2", seats=seats, seed=1, pack_dirs=[str(pack)])
+    config = slice_config(game_id="np", scenario="core:slice2", seats=seats, seed=1, pack_dirs=[str(pack)])
     games = tmp_path / "games"
     gdir, _ = init_game_dir(games, config)
     Game.create(gdir)

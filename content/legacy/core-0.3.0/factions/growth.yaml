@@ -1,0 +1,17 @@
+id: growth
+name: {ru: Ненасытная Поросль, en: Ravenous Growth}
+description: >-
+  Биорой. Ополчение без Сплава (4 Провианта), Провиант +15%, ветка «Война» дешевле на 30%, уникальный Пожиратель
+  (сильный, но ест 2 Провианта). Минус: Кредо −50%, технологии идут медленно.
+lore: lore/growth.md
+bonuses:
+  - {effect: modify, target: unit.militia.cost.alloy, op: set, value: 0}
+  - {effect: modify, target: unit.militia.cost.provisions, op: add, value: 4}
+  - {effect: modify, target: resource.provisions.income_mul, op: mul, value: 1.15}
+  - {effect: modify, target: tech.branch.war.cost_mul, op: mul, value: 0.7}
+penalties:
+  - {effect: modify, target: resource.creed.income_mul, op: mul, value: 0.5}
+starting:
+  resources: {alloy: 30, provisions: 20}
+  units: {assault: 2, militia: 2, devourer: 1}
+  buildings: [barracks]

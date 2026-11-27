@@ -1,0 +1,29 @@
+id: litany
+name: {ru: Литания Ржавого Престола, en: Litany of the Rusted Throne}
+description: >-
+  Техно-теократия, «черепаха». Сплав +10%, все здания на 20% дешевле, ветка «Промышленность» дешевле на 30%,
+  уникальный Страж Престола (+1 к обороне на своей земле). Минус: дальность хода юнитов
+  −1 — обычно 1 ребро даже по своей земле (бонусы технологий к ходу складываются).
+lore: lore/litany.md
+bonuses:
+  - {effect: modify, target: resource.alloy.income_mul, op: mul, value: 1.1}
+  - {effect: modify, target: tech.branch.industry.cost_mul, op: mul, value: 0.7}
+  - {effect: modify, target: building.mine.cost.alloy, op: mul, value: 0.8}
+  - {effect: modify, target: building.farm.cost.alloy, op: mul, value: 0.8}
+  - {effect: modify, target: building.barracks.cost.alloy, op: mul, value: 0.8}
+  - {effect: modify, target: building.temple.cost.alloy, op: mul, value: 0.8}
+  - {effect: modify, target: building.smithy.cost.alloy, op: mul, value: 0.8}
+  - {effect: modify, target: building.citadel.cost.alloy, op: mul, value: 0.8}
+  - {effect: modify, target: building.warehouse.cost.alloy, op: mul, value: 0.8}
+  - {effect: modify, target: building.hq.cost.alloy, op: mul, value: 0.8}
+penalties:
+  - {effect: modify, target: unit.assault.move, op: add, value: -1}
+  - {effect: modify, target: unit.armor.move, op: add, value: -1}
+  - {effect: modify, target: unit.artillery.move, op: add, value: -1}
+  - {effect: modify, target: unit.militia.move, op: add, value: -1}
+  - {effect: modify, target: unit.dreamwalker.move, op: add, value: -1}
+  - {effect: modify, target: unit.throne_warden.move, op: add, value: -1}
+starting:
+  resources: {alloy: 30, provisions: 15}
+  units: {assault: 3, throne_warden: 1}
+  buildings: [barracks]

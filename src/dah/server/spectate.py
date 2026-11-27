@@ -22,9 +22,36 @@ The handlers stay on the event loop on purpose: Game has no lock and every playe
 running them in a threadpool would race `tick()` and the message list. Only the journal parse, which reads nothing
 but the append-only journal file, runs in a thread.
 
+Diplomacy (CONCEPT.md section 7): `pacts` of a snapshot are the pacts in force after that turn. The delayed spectator
+sees them, and gifts and pact events in the feed, as public facts only: who gave to whom (no amounts), who signed,
+left or broke a pact (no pact ids, which would count a pair's private proposals); proposals and refusals are hidden
+until the game is over. The game's own inbox notices (`system` entries of the message log) are not player messages and
+are not listed under messages: the events say the same.
+
 The delayed spectator never sees the game-wide message id (its gaps would count the private messages in between):
 public messages are numbered among public messages only. Seat kinds, bot types and declared setups are hidden until
 the game is over, as they are from the players.
+
+Stage 2 (TECH_AND_SETUP.md section 4): `live` has `setup` while a setup phase runs (mode, ready N/M; the admin also
+sees each seat's choice so far). Snapshots taken during the setup phase are of the provisional turn 1 and are never
+cached (turn 1 is rebuilt when the phase closes). Every level sees each seat's faction once the setup phase has closed
+(as the players do); the full levels also see artifacts, techs, research progress and the active tech, the delayed
+spectator only the number of techs each seat has researched. Setup choices are never shown to the delayed spectator.
+
+Stage 3 (docs/SPY_AND_CONQUEST.md section 8): with conquest on, every level sees the public marks of provinces
+(`status`: occupied {by, from, since}, ruined_until, ravaged_until), the claims and the public fates, revolts, claims
+and ruins in the feed; the full levels also see each seat's conquest policy and the fates with prices, loot and source.
+Espionage is private: the delayed spectator sees only «саботаж в P07» without nicks, never Shades, missions or captures
+(nor, core 0.7.0, the intel score of successful missions: it leaves its parts and totals until the game is over);
+the full levels see each seat's Shades (count, missions) and the turn's captures (`shade_captured` with the owner and
+whether the victim learned it) next to the sabotage with its author.
+
+Stage 5 (docs/ABANDONED_LANDS.md 10): with the Abandoned lands on, every level sees `abandoned` and the public marks of
+a province (`abandoned`, `ruins`, the ruins' guard; a lair only where the full levels look or after the game) and the
+pool's names and kinds; the delayed spectator sees a find only when it went off, in its public form (where, who
+entered, its kind and what shows in the province: never its name or gains); the full levels see each province's find
+(`discovery {id, state, known}`), the full find events, and `finds_layout`, every find as laid out at creation with its
+state after the turn (hidden, site, pending or spent). After game_over the revealed level shows all of it.
 """
 
 from __future__ import annotations
@@ -38,14 +65,19 @@ import re
 import time
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, Response
 
-from dah.engine import GameState, TurnReport, scores
+from dah.engine import GameState, TurnReport, scores, stat_key
+from dah.engine import scoring as sc_
+from dah.engine import conquest as cq
+from dah.engine import diplomacy as dip
+from dah.engine import discoveries as disc
+from dah.engine.techs import public_techs
 from dah.engine.view import PHASE_LABELS, event_text
-from dah.game import GAME_OVER, Game, iso_time
+from dah.game import GAME_OVER, SETUP, Game, iso_time, secret_salt
 from dah.journal import read_events
 from dah.report import build_report
 from dah.store import hash_key
@@ -55,7 +87,9 @@ TIMINGS_MIN_AGE = 5.0  # seconds: a live game's journal changes on nearly every 
 LEVEL_LABELS = {LIVE: "Админ (вживую)", DELAYED: "Зритель (задержка 1 ход)", REVEALED: "Партия окончена — всё открыто"}
 # Events that concern only their own seat: shown with the seat's nick in front.
 _PERSONAL_KINDS = frozenset({"economy", "starvation", "recruited", "build_started", "build_done", "order_rejected",
-                             "retreat", "retreat_lost", "fortify_broken"})
+                             "retreat", "retreat_lost", "fortify_broken", "research_started", "tech_completed",
+                             "feint", "mission_started", "mission_end", "strike_cancelled", "policy_set",
+                             "policy_unaffordable", "dispose_failed"})
 WATCH_PAGE = Path(__file__).with_name("watch.html")
 _SCRIPT_RE = re.compile(r"<script>(.*?)</script>", re.S)
 
@@ -109,18 +143,47 @@ class GameCache:
         self.snapshots: dict[tuple[int, str], dict[str, Any]] = {}
         self.reports: dict[int, dict[str, Any] | None] = {}
         self.start_scores: dict[str, int] | None = None
+        self.start_parts: dict[str, dict[str, int]] | None = None     # turn-0 score by source (scored games)
         self.spectator_hash: tuple[tuple[int, int, int] | None, str | None] | None = None
         # (journal stamp, built at monotonic time, payload)
         self.timings: tuple[tuple[int, int], float, dict[str, Any]] | None = None
         self.timings_lock = asyncio.Lock()
+        self.layout: dict[str, str] | None = None     # stage 5: province -> find placed at creation (full levels)
 
     def scores_at_start(self, game: Game) -> dict[str, int]:
         if self.start_scores is None:
             raw = game.gdir.load_turn("states", 1)
             if raw is None:
                 return {}
-            self.start_scores = scores(GameState.from_dict(raw), game.ruleset)
+            start = scores(GameState.from_dict(raw), game.ruleset)
+            if game.phase == SETUP:  # provisional: turn 1 is rebuilt when the setup phase closes
+                return start
+            self.start_scores = start
         return self.start_scores
+
+    def finds_layout(self, game: Game) -> dict[str, str]:
+        """Stage 5 (ABANDONED_LANDS.md 10): every find as laid out at creation, recomputed from the turn-0 state, the
+        seed and the salt (the layout reads no factions, so a provisional turn 1 gives the same one)."""
+        if self.layout is None:
+            raw = game.gdir.load_turn("states", 1)
+            if raw is None:
+                return {}
+            info = disc.journal_layout(game.ruleset, GameState.from_dict(raw), game.config["seed"],
+                                       secret_salt(game.config))
+            self.layout = dict((info or {}).get("finds") or {})
+        return self.layout
+
+    def parts_at_start(self, game: Game) -> dict[str, dict[str, int]]:
+        """Turn-0 score by source (non-default scoring), cached like `scores_at_start`."""
+        if self.start_parts is None:
+            raw = game.gdir.load_turn("states", 1)
+            if raw is None:
+                return {}
+            start = sc_.score_parts(GameState.from_dict(raw), game.ruleset)
+            if game.phase == SETUP:  # provisional: turn 1 is rebuilt when the setup phase closes
+                return start
+            self.start_parts = start
+        return self.start_parts
 
     def load_spectator_hash(self, game: Game) -> str | None:
         """The stored hash, re-read only when spectator.json changes (a reissued key is picked up at once)."""
@@ -224,7 +287,45 @@ def meta(game: Game, access: str, level: str) -> dict[str, Any]:
             "turn_limit": game.config["turn_limit"], "phase_limits": game.config["phase_limits"],
             "map": {"id": m.id, "name": m.name, "layout_computed": m.layout_computed, "provinces": provinces,
                     "edges": [list(e) for e in edges]},
-            "seats": seats, "access": access, "level": level, "level_label": LEVEL_LABELS[level]}
+            "seats": seats, "access": access, "level": level, "level_label": LEVEL_LABELS[level],
+            "works": sc_.on(rs, "works"), "objectives": sc_.on(rs, "objectives"), **_end_turns(game)}
+
+
+def _end_turns(game: Game) -> dict[str, Any]:
+    """Core 0.8.2 (decision 33): a hidden end as the range [lo, hi] at every level (a spectator key may reach a
+    player); the drawn `end_turn` only after game_over."""
+    lo = int(game.config.get("end_turn_min") or 0)
+    if not lo or lo >= int(game.config["turn_limit"]):
+        return {}
+    out: dict[str, Any] = {"end_turns": [lo, game.config["turn_limit"]]}
+    if game.game_over:
+        # review F2: the drawn turn, as the report gives it (a last_standing finish may come before it)
+        out["end_turn"] = int(game.config.get("end_turn") or game.state.turn)
+    return out
+
+
+# Score sources hidden from the delayed spectator while the game runs (core 0.7.0): intel counts a seat's successful
+# Shade missions turn by turn, which would name the author of an anonymous «саботаж в P07» (SPY_AND_CONQUEST.md 8).
+# Dropping the part alone would not do (total minus the other parts gives it back), and folding it into science
+# would not either (the delayed level sees each seat's number of techs): it leaves the totals too.
+DELAYED_HIDDEN: tuple[str, ...] = ("intel",)
+
+
+def delayed_scores(scores_: Mapping[str, Any], parts: Mapping[str, Any] | None,
+                   level: str) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """(scores, {seat: {source: points}}) as `level` may see them: the delayed level gets DELAYED_HIDDEN sources out
+    of the parts and out of the totals; the full levels and the revealed one get them as they are."""
+    if level != DELAYED or not parts:
+        return dict(scores_), (dict(parts) if parts is not None else None)
+    out_scores, out_parts = dict(scores_), {}
+    for seat, row in parts.items():
+        row = dict(row or {})
+        for src in DELAYED_HIDDEN:
+            pts = row.pop(src, 0)
+            if pts and seat in out_scores:
+                out_scores[seat] = out_scores[seat] - pts
+        out_parts[seat] = row
+    return out_scores, out_parts
 
 
 def live(game: Game, cache: GameCache, access: str, level: str) -> dict[str, Any]:
@@ -235,18 +336,45 @@ def live(game: Game, cache: GameCache, access: str, level: str) -> dict[str, Any
             sc = cache.scores_at_start(game)
         else:
             rep = cache.report(game, turn)
-            sc = (rep or {}).get("public", {}).get("scores", {})
-        history.append({"turn": turn, "scores": sc})
+            # the turn score is private to the players (SCORING.md 5); every spectator level sees it (delayed: late)
+            sc = (rep or {}).get("scores") or (rep or {}).get("public", {}).get("scores", {})
+        entry = {"turn": turn, "scores": sc}
+        if not game.ruleset.default_scoring:
+            by_source = ((cache.report(game, turn) or {}).get("score_parts") if turn else
+                         cache.parts_at_start(game)) or {}
+            entry["scores"], entry["by_source"] = delayed_scores(sc or {}, by_source, level)
+        history.append(entry)
     out: dict[str, Any] = {
         "game_id": game.config["game_id"], "turn": game.state.turn, "turn_limit": game.config["turn_limit"],
         "phase": game.phase, "phase_label": PHASE_LABELS.get(game.phase, game.phase),
         "deadline": iso_time(game.deadline) if game.deadline is not None else None, "seconds_left": game.seconds_left(), "ready": game.ready_text(),
         "phase_seq": game.phase_seq, "resolved_turns": resolved_turns(game), "last_viewable": last,
         "game_over": game.game_over, "access": access, "level": level, "level_label": LEVEL_LABELS[level],
-        "timings_allowed": level != DELAYED, "scores_history": history,
+        "timings_allowed": level != DELAYED, "scores_history": history, **_end_turns(game),
     }
     if game.game_over:
         out["result"] = game.state.result
+    if game.setup:
+        out["setup"] = setup_info(game, level)
+    return out
+
+
+def setup_closed(game: Game) -> bool:
+    """Factions are settled (and public): the game has no setup phase, or it has closed."""
+    return not game.setup or game.phase != SETUP
+
+
+def setup_info(game: Game, level: str) -> dict[str, Any]:
+    """The setup phase as the header shows it; the admin (live level) also sees the choices so far."""
+    setup = game.setup or {}
+    out: dict[str, Any] = {"open": game.phase == SETUP, "artifacts": setup.get("artifacts"),
+                           "unique_factions": bool(setup.get("unique_factions", True))}
+    if level == LIVE and game.phase == SETUP:
+        rs = game.ruleset
+        out["choices"] = {
+            seat: {"factions": [rs.factions[f].name for f in (c.get("factions") or []) if f in rs.factions],
+                   "artifacts": [rs.artifacts[a].name for a in (c.get("artifacts") or []) if a in rs.artifacts]}
+            for seat, c in sorted(game.setup_choices.items())}
     return out
 
 
@@ -274,9 +402,64 @@ def _event_entry(e: dict[str, Any], game: Game, state: GameState) -> dict[str, A
 def _public_events(report: dict[str, Any], game: Game, state: GameState) -> list[dict[str, Any]]:
     public = report.get("public", {})
     events = [{"kind": "captured", "province": c["province"], "from": c["from"], "to": c["to"],
+               **({"status": c["status"]} if c.get("status") else {}),
                "seats": sorted(s for s in (c["from"], c["to"]) if s)} for c in public.get("ownership_changes", [])]
     events += [{"kind": "eliminated", "province": None, "seat": s, "seats": [s]} for s in public.get("eliminated", [])]
+    events += [dip.public_event(e) for e in public.get("diplomacy", [])]
+    # conquest (SPY_AND_CONQUEST.md 2.7, 8): fates, revolts, claims, ruins in their public form (no prices, loot or
+    # sources); captures are the ownership changes above
+    events += [e for e in public.get("conquest", []) if e.get("kind") != "captured"]
+    events += [dict(e) for e in public.get("works", [])]     # great works: public start and completion (SCORING.md 9)
+    # espionage (SPY_AND_CONQUEST.md 8): only «саботаж в P07», without nicks (the strike shows in the broken fortify);
+    # no Shades, missions or captures ever
+    events += [{"kind": "sabotage", "province": e.get("province"), "seats": []}
+               for e in report.get("events", []) if e.get("kind") == "sabotage"]
+    # Abandoned lands (ABANDONED_LANDS.md 10): where a find went off and its kind, never its name
+    events += [dict(e) for e in public.get("discoveries", [])]
     return [_event_entry(e, game, state) for e in events]
+
+
+def _capture_events(game: Game, turn: int, state: GameState) -> list[dict[str, Any]]:
+    """Full levels only: the Shades caught at the recon step of `turn` (owner, victim, whether it was attributed)."""
+    rep = game.gdir.load_turn("recon", turn) if game.ruleset.system("espionage") else None
+    nick = {s: p.nick for s, p in state.players.items()}
+    out = []
+    for c in (rep or {}).get("caught", []):
+        victim = nick.get(c.get("victim"), "нейтральная провинция") if c.get("victim") else "нейтральная провинция"
+        known = "хозяин установлен" if c.get("attributed") else "хозяин не установлен"
+        mission = c.get("mission", "?").rsplit(":", 1)[-1]
+        out.append({"kind": "shade_captured", "province": c.get("province"), "seats": sorted(
+                    x for x in (c.get("owner"), c.get("victim")) if x), "owner": c.get("owner"),
+                    "victim": c.get("victim"), "attributed": bool(c.get("attributed")), "mission": c.get("mission"),
+                    "target": c.get("target"),
+                    "text": f"Тень {c.get('shade')} ({nick.get(c.get('owner'), c.get('owner'))}) поймана в "
+                            f"{c.get('province')} у {victim}: {mission} → {c.get('target')}; {known}"})
+    return out
+
+
+def _shades(state: GameState, seat: str) -> list[dict[str, Any]]:
+    out = []
+    for sh in state.players[seat].shades:
+        m = sh.get("mission") or {}
+        out.append({"id": sh["id"], "status": sh.get("status"), "xp": sh.get("xp", 0),
+                    **({"mission": m.get("type"), "target": m.get("target"), "played": m.get("played"),
+                        "rounds": m.get("rounds"), "ended": m.get("ended")} if m else {})})
+    return out
+
+
+def _pacts(state: GameState, full: bool) -> list[dict[str, Any]]:
+    """Pacts in force in `state` (public: sides and terms); the full view adds ids and every proposal and ended pact."""
+    nick = {s: p.nick for s, p in state.players.items()}
+    rows = state.pacts if full else dip.active_pacts(state)
+    out = []
+    for pact in rows:
+        entry = {**dip.public_pact(pact), "status": pact["status"]}
+        if full:
+            entry.update(id=pact["id"], proposed_by=pact["a"], broken_by=list(pact.get("broken_by") or []),
+                         ended_turn=pact.get("ended_turn"), ended_reason=pact.get("ended_reason"))
+        entry["nicks"] = [nick.get(s, s) for s in entry["seats"]]
+        out.append(entry)
+    return out
 
 
 def _message_entry(m: dict[str, Any], state: GameState, number: int) -> dict[str, Any]:
@@ -294,29 +477,85 @@ def snapshot(game: Game, cache: GameCache, turn: int, level: str) -> dict[str, A
     if turn > last:
         raise SpectateError(403, "NOT_YET", f"ход {turn} ещё не открыт для зрителей (виден до хода {last})")
     in_progress = turn > resolved_turns(game)
+    provisional = game.phase == SETUP  # turn 1 is rebuilt when the setup phase closes: nothing is cached
     key = (turn, level)
-    if not in_progress and key in cache.snapshots:
+    if not in_progress and not provisional and key in cache.snapshots:
         return cache.snapshots[key]
     full = level != DELAYED
     state = _end_state(game, turn)
     rs = game.ruleset
     sc = scores(state, rs)
+    parts = sc_.score_parts(state, rs) if not rs.default_scoring else None
+    if parts is not None and state.phase == GAME_OVER and (state.result or {}).get("score_parts"):
+        # the end: the final score by source, the revealed objectives included (SCORING.md 9)
+        parts, sc = state.result["score_parts"], dict(state.result.get("scores") or sc)
+    sc, parts = delayed_scores(sc, parts, level)        # core 0.7.0: no intel for the delayed level
+    conquest = rs.system("conquest")
+    statuses = cq.statuses_for(state) if disc.statuses_active(rs) else {}
+    finds = disc.on(rs)
     provinces = []
+    works_on = sc_.on(rs, "works")
     for pid, p in sorted(state.provinces.items()):
         entry: dict[str, Any] = {"id": pid, "owner": p.owner}
+        status = disc.public_status(p, statuses.get(pid), full or state.phase == GAME_OVER)  # a find's: if seen
+        if status:
+            entry["status"] = status      # public marks: occupied, ruined_until, ravaged_until
+        if finds:
+            entry.update(disc.province_json(rs, state, None, pid, full or state.phase == GAME_OVER))   # marks
+            found = state.discoveries.get(pid)
+            if found is not None and (full or state.phase == GAME_OVER):
+                # the full levels see the layout; the delayed spectator only after the game (ABANDONED_LANDS.md 10)
+                entry["discovery"] = {"id": found["id"], "state": found["state"], "known": list(found.get("known") or [])}
+        if works_on and not full:
+            # great works are public (SCORING.md 2.3, 9): the delayed level gets their map marks, ordinary
+            # buildings stay hidden; the full levels see them in `buildings`/`building_now`
+            marks = [{"building": b, "done": True} for b in p.buildings
+                     if b in rs.buildings and rs.buildings[b].score]
+            marks += [{"building": b.building, "turns_left": b.turns_left, "seat": b.seat}
+                      for b in state.pending_builds if b.province == pid
+                      and b.building in rs.buildings and rs.buildings[b.building].score]
+            if marks:
+                entry["great_works"] = marks
         if full:
             entry.update(units=dict(p.units), unit_total=p.unit_total(), buildings=list(p.buildings),
                          fortified=p.fortified,
-                         building_now=[{"building": b.building, "turns_left": b.turns_left, "seat": b.seat}
+                         building_now=[{"building": b.building, "turns_left": b.turns_left, "seat": b.seat,
+                                        **({"stalled": True} if b.stalled else {})}   # core 0.7.0: no share paid
                                        for b in state.pending_builds if b.province == pid])
         provinces.append(entry)
     players = []
+    factions_public = setup_closed(game) and (len(rs.scenario.factions) > 1 or bool(game.setup))
     for seat, p in state.players.items():
         entry = {"seat": seat, "nick": p.nick, "alive": p.alive, "score": sc.get(seat, 0),
                  "provinces": len(state.owned(seat))}
+        if parts is not None:
+            entry["score_parts"] = parts.get(seat, {})
+            if sc_.on(rs, "objectives"):
+                # secret until the game is over («?» for the delayed spectator); the full levels see them and progress
+                if full or state.phase == GAME_OVER:
+                    entry["objectives"] = sc_.objectives_view(state, rs, seat)
+                else:
+                    entry["objectives"] = "?"
+        if factions_public:
+            entry.update(faction=p.faction, faction_name=rs.factions[p.faction].name if p.faction in rs.factions
+                         else p.faction)
+        if rs.techs:
+            entry["techs_count"] = len(public_techs(rs, p))  # public (TECH_AND_SETUP.md 1.4), no artifact grants
         if full:
             entry.update(resources=dict(p.resources), command_points=p.command_points,
                          units=sum(pr.unit_total() for pr in state.owned(seat)))
+            stalled = sum(1 for b in state.pending_builds if b.seat == seat and b.stalled)
+            if stalled:
+                entry["works_stalled"] = stalled    # core 0.7.0: builds paid in parts that stood without a share
+            if rs.techs or rs.artifacts:
+                entry.update(techs=list(p.techs), artifacts=list(p.artifacts), research=dict(p.research),
+                             researching=({"tech": p.researching, "progress": p.research.get(p.researching, 0),
+                                           "cost": rs.tech_cost(p.researching, stat_key(state, rs, seat))}
+                                          if p.researching in rs.techs else None))
+            if conquest:
+                entry["conquest_policy"] = p.conquest_policy
+            if rs.system("espionage"):
+                entry["shades"] = _shades(state, seat)
         players.append(entry)
     events: list[dict[str, Any]] = []
     orders: dict[str, Any] | None = None
@@ -324,13 +563,20 @@ def snapshot(game: Game, cache: GameCache, turn: int, level: str) -> dict[str, A
         report = cache.report(game, turn) or {}
         if full:
             events = [_event_entry(e, game, state) for e in report.get("events", [])]
+            events += _capture_events(game, turn, state)
             raw_orders = game.gdir.load_turn("orders", turn) or {}
             orders = {s: b.get("orders", []) for s, b in raw_orders.items()}
         else:
             events = _public_events(report, game, state)
+    elif in_progress and full:
+        # the turn in progress: its diplomacy so far (gifts with amounts, proposals) for the admin
+        events = [_event_entry(e, game, state) for op in game.diplomacy_log
+                  if (e := dip.op_event(op, state)) is not None]
     messages = []
     public_seen = 0
     for m in game.messages:
+        if m.get("system"):  # the game's own notices: the events (and pacts) say the same
+            continue
         if m["to"] == "all":
             public_seen += 1
         elif not full:
@@ -341,15 +587,37 @@ def snapshot(game: Game, cache: GameCache, turn: int, level: str) -> dict[str, A
     out: dict[str, Any] = {
         "turn": turn, "in_progress": in_progress, "level": level, "full": full,
         "provinces": provinces, "players": players, "scores": sc, "events": events, "messages": messages,
+        "pacts": _pacts(state, full),
         "result": state.result if state.phase == GAME_OVER else None,
     }
+    if conquest:
+        out["claims"] = [{**c, "nick": state.players[c["seat"]].nick if c["seat"] in state.players else c["seat"]}
+                         for c in state.claims]
     if orders is not None:
         out["orders"] = orders
     if full:
         out["unit_names"] = {u: d.name for u, d in rs.units.items()}
         out["building_names"] = {b: d.name for b, d in rs.buildings.items()}
         out["resource_names"] = {r: d.name for r, d in rs.resources.items()}
-    if not in_progress:
+        if rs.techs or rs.artifacts:
+            out["tech_names"] = {t: d.name for t, d in rs.techs.items()}
+            out["tech_branches"] = {t: d.branch for t, d in rs.techs.items()}
+            out["branch_names"] = {b: d.name for b, d in rs.branches.items()}
+            out["artifact_names"] = {a: d.name for a, d in rs.artifacts.items()}
+    if rs.techs:
+        out["techs_total"] = len(rs.techs)
+    if finds:
+        out["abandoned"] = list(state.abandoned)
+        out["discovery_names"] = {d: v.name for d, v in rs.discoveries.items()}     # the pool is public
+        out["discovery_kinds"] = {d: v.kind for d, v in rs.discoveries.items()}
+        if full:
+            # the whole layout as placed at creation with each find's state after this turn (hidden, site, pending,
+            # or spent once it went off or was chosen); the delayed spectator gets it with the full reveal after game_over (ABANDONED_LANDS.md 10)
+            out["finds_layout"] = {pid: {"id": fid, "state": (state.discoveries.get(pid) or {}).get("state", "spent")}
+                                   for pid, fid in sorted(cache.finds_layout(game).items())}
+    if provisional:
+        out["provisional"] = True
+    if not in_progress and not provisional:
         cache.snapshots[key] = out
     return out
 
@@ -394,13 +662,19 @@ def build_timings(path: Path) -> dict[str, Any]:
                     "edits", "p2_edits", "validate_rejected", "submit_rejected")
     total_fields = ("calls", "req_chars", "resp_chars", "host_calls", "host_req_chars", "host_resp_chars",
                     "submits", "edits", "p2_edits", "validate_rejected", "submit_rejected", "spent_usd",
-                    "autopilot_turns", "idle_units", "telemetry")
+                    "submits_by_phase", "no_orders_turns", "not_ready_phases", "idle_units", "telemetry",
+                    "spent_in_game_usd", "spent_after_game_usd", "in_game_s", "after_game_s", "pacts_signed",
+                    "pacts_kept", "pacts_broken", "pacts_renewed", "gifts_sent", "gifts_received", "gifted_resources",
+                    "received_resources")
     out = {
         "seats": rep["seats"], "rules_chars": rep["rules_chars"],
         "phases": [{"turn": ph["turn"], "phase": ph["phase"], "closed": ph["closed"], "duration_s": ph["duration_s"],
                     "seats": {s: {k: v[k] for k in phase_fields} for s, v in ph["seats"].items()}}
                    for ph in rep["phases"]],
-        "totals": {s: {k: t[k] for k in total_fields} for s, t in rep["totals"].items()},
+        "totals": {s: {**{k: t[k] for k in total_fields},
+                     # core 0.8.2: an eliminated seat's after-game spend runs from its elimination
+                     **{k: t[k] for k in ("after_from", "eliminated_turn") if k in t}}
+                   for s, t in rep["totals"].items()},
         "spent_by_turn": [{"turn": t["turn"], "spent_usd": t["spent_usd"]} for t in rep["turns"]],
     }
     return out

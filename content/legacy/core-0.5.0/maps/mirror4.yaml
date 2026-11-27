@@ -1,0 +1,65 @@
+id: mirror4
+name: Зеркало Четырёх
+max_players: 4
+# pos: [x, y] на холсте 0..100 (только для отображения). Игроки в углах квадрата, карта симметрична
+# поворотом на 90°: у каждого столица, кузня, агромир и пустошь; между соседями — святыня; в центре — кузня.
+provinces:
+  - {id: P01, name: Столица Аргос, type: capital, pos: [8, 8]}
+  - {id: P02, name: Кузня Вейр, type: forge, pos: [32, 8]}
+  - {id: P03, name: Нивы Сола, type: agri, pos: [8, 32]}
+  - {id: P04, name: Пепельный Брод, type: waste, pos: [26, 26]}
+  - {id: P05, name: Святыня Зари, type: shrine, pos: [50, 20]}
+  - {id: P06, name: Столица Тессар, type: capital, pos: [92, 8]}
+  - {id: P07, name: Кузня Орм, type: forge, pos: [92, 32]}
+  - {id: P08, name: Нивы Лира, type: agri, pos: [68, 8]}
+  - {id: P09, name: Солёная Пустошь, type: waste, pos: [74, 26]}
+  - {id: P10, name: Святыня Прилива, type: shrine, pos: [80, 50]}
+  - {id: P11, name: Столица Кайрон, type: capital, pos: [92, 92]}
+  - {id: P12, name: Кузня Дарн, type: forge, pos: [68, 92]}
+  - {id: P13, name: Нивы Эльма, type: agri, pos: [92, 68]}
+  - {id: P14, name: Сухой Предел, type: waste, pos: [74, 74]}
+  - {id: P15, name: Святыня Заката, type: shrine, pos: [50, 80]}
+  - {id: P16, name: Столица Мерид, type: capital, pos: [8, 92]}
+  - {id: P17, name: Кузня Хальт, type: forge, pos: [8, 68]}
+  - {id: P18, name: Нивы Ирма, type: agri, pos: [32, 92]}
+  - {id: P19, name: Серый Карьер, type: waste, pos: [26, 74]}
+  - {id: P20, name: Святыня Полуночи, type: shrine, pos: [20, 50]}
+  - {id: P21, name: Око Предела, type: forge, pos: [50, 50]}
+edges:
+  - [P01, P02]
+  - [P01, P03]
+  - [P01, P04]
+  - [P02, P08]
+  - [P04, P05]
+  - [P09, P05]
+  - [P04, P21]
+  - [P05, P21]
+  - [P06, P07]
+  - [P06, P08]
+  - [P06, P09]
+  - [P07, P13]
+  - [P09, P10]
+  - [P14, P10]
+  - [P09, P21]
+  - [P10, P21]
+  - [P11, P12]
+  - [P11, P13]
+  - [P11, P14]
+  - [P12, P18]
+  - [P14, P15]
+  - [P19, P15]
+  - [P14, P21]
+  - [P15, P21]
+  - [P16, P17]
+  - [P16, P18]
+  - [P16, P19]
+  - [P17, P03]
+  - [P19, P20]
+  - [P04, P20]
+  - [P19, P21]
+  - [P20, P21]
+starts:
+  - {capital: P01, provinces: [P02, P03, P04]}
+  - {capital: P06, provinces: [P07, P08, P09]}
+  - {capital: P11, provinces: [P12, P13, P14]}
+  - {capital: P16, provinces: [P17, P18, P19]}

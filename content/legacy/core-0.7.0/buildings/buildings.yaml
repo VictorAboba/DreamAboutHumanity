@@ -1,0 +1,63 @@
+- id: mine
+  name: {ru: Шахта, en: Mine}
+  cost: {alloy: 10}
+  build_turns: 1
+  effects:
+    - {type: income, resource: alloy, amount: 5}
+- id: farm
+  name: {ru: Ферма, en: Farm}
+  cost: {alloy: 8}
+  build_turns: 1
+  effects:
+    - {type: income, resource: provisions, amount: 3}
+- id: barracks
+  name: {ru: Казарма, en: Barracks}
+  cost: {alloy: 30}
+  build_turns: 2
+  recruit: true
+- id: temple
+  name: {ru: Храм, en: Temple}
+  cost: {alloy: 15}
+  build_turns: 1
+  effects:
+    - {effect: income, resource: creed, amount: 3}
+  lore: Здесь молятся Сновидцу, и молитва работает как формула.
+- id: smithy
+  name: {ru: Кузня, en: Smithy}
+  cost: {alloy: 25}
+  build_turns: 2
+  requires: {tech: [smithcraft]}
+  lore: Без Кузни в провинции не нанять тяжёлые юниты (Мортира, Титан).
+- id: citadel
+  name: {ru: Цитадель, en: Citadel}
+  cost: {alloy: 40}
+  build_turns: 2
+  requires: {tech: [fortification]}
+  effects:
+    - {effect: modify, target: province.defense_mul, op: add, value: 0.3, scope: province}
+- id: warehouse
+  name: {ru: Склад, en: Depot}
+  cost: {alloy: 20}
+  build_turns: 1
+  requires: {tech: [supply_routes]}
+  effects:
+    - {effect: income, resource: provisions, amount: 2}
+    - {effect: modify, target: province.recruit_discount, op: add, value: 0.2, scope: province}
+- id: hq
+  name: {ru: Штаб, en: Headquarters}
+  cost: {alloy: 35}
+  build_turns: 2
+  recruit: true
+  requires: {tech: [staff_litanies]}
+  effects:
+    - {effect: modify, target: p2.cancel_refund, op: add, value: 0.25, scope: owner}
+    - {effect: modify, target: province.defense_mul, op: add, value: 0.1, scope: province}
+- id: mirror_hall
+  name: {ru: Зеркальный зал, en: Hall of Mirrors}
+  cost: {alloy: 15}
+  build_turns: 1
+  requires: {tech: [mirror_wards]}
+  requires_system: espionage
+  effects:
+    - {effect: modify, target: province.mirrors, op: add, value: 1, scope: province}
+  lore: Чужая Тень видит в залах себя раньше, чем цель. Под Оккупацией залы слепы.

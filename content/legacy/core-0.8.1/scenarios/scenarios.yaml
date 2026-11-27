@@ -1,0 +1,253 @@
+# Balance of the core pack (version 0.2.0): fortify gives +15% (engine default +25%); see docs/SLICE.md section 3.
+# Stage 2 (core 0.3.0, TECH_AND_SETUP.md section 3): slice3/slice2/quad4 open with a setup phase (faction
+# preferences and an artifact draft); blitz_test has none (fast tests, the covenant only).
+# Stage 3 (core 0.4.0, SPY_AND_CONQUEST.md 1.1, 5): every scenario states its switches; no key means off.
+# slice3/slice2/quad4 play with espionage and conquest; blitz_test stays the plain slice flow for tests;
+# blitz_spy is the short all-on game for end-to-end tests.
+# Core 0.5.0 (measurement m6 fixes): fortification lasts while the army stays (combat.fortify_persists = 1).
+# Core 0.5.0 (SCORING.md 11): slice3/slice2/quad4 score all five sources with weight 1 and deal one secret objective;
+# blitz_test and blitz_spy keep the default score (territory only); blitz_score is the short all-on scoring game.
+# Core 0.5.0 balance (SCORING.md «Баланс core 0.5.0»): the scored scenarios count a tier-2 tech as 1 (science led
+# the winners' score) and 1 war point per 15 of killed units' price (war gave the winner 3-5%).
+# Core 0.6.0 (decision 26, measurement m7): a broken pact costs its breaker 3 points (score.betrayal.per_break), so a
+# betrayal on the last turn is not free.
+# Core 0.6.0 (stage 5, ABANDONED_LANDS.md 1, decision 25): slice3 and quad4 turn the Abandoned lands on (they work only
+# when seats are fewer than the map's starts; slice3 for two is the duel on the ruins); slice2 is always full and
+# keeps them off; blitz_finds is the short all-on game for end-to-end tests (mirror3 for two). The ruins of a free
+# capital hold a guard over the Treasury for whoever destroys it and takes the ruins. `density` 1.0: every province of
+# a free corner past ring 1 but the ruins holds a find (docs/ABANDONED_LANDS.md, «Шаг 4»).
+# Balance core 0.6.0 (ABANDONED_LANDS.md, «Баланс core 0.6.0»): the guard is 2 Assault + 2 Militia (was 1 + 2: the
+# early leader took the ruins first and the snowball grew), the Treasury +45 alloy, +25 provisions, +20 creed (was
+# 30/15/15: a later prize, more often for a trailing seat); `souls: halve` (income x0.5 for good, no Ravage) won the
+# A/B/C measurement (ravage | halve | ashes): even on G1 and G2, best against the scout sweep.
+# Core 0.7.0 (decision 27, measurement m8): the war score is a scale per province (score.war.province_cap 3: +1 for a
+# province taken from a living rival, +1 per two full turns held, at most 3 per province; the kill credit's
+# score.war.per_point is gone); successful spy missions score (`intel`, +1 each, at most 3 a game); beyond sight a
+# rival's province shows only whether an army stands there (fog.army_presence) in the espionage scenarios.
+# Balance core 0.7.0 (SCORING.md): at most 8 war points in all (score.war.province_total; uncapped, the simulator's
+# rush bot took 15 a game and won 47% of quad4 seats).
+# Core 0.7.1 (decision 28, measurement m9): taking back a province one has owned earlier in this game (its own start
+# provinces included) pays no war points, neither the capture nor the holding (score.war.no_reclaim 1).
+# Core 0.8.0 (docs/SPY_V2.md, decision 30): two Shades on missions at S1 (spy.active_base 2), intervals at least 1 wide
+# (spy.intel.width_min), a second own Shade at the same place raises the catch (spy.detect.repeat_on); the espionage
+# scenarios trade (docs/TRADE.md). Balance core 0.8.0 (SPY_V2.md «Баланс core 0.8.0»): the catch base is 6% (was 5%)
+# and each successful mission of a Shade (at most 3) lowers it by 3 points (was 5): a Shade survived 81% of its
+# missions, the corridor is 65-80%; the base keeps the 0.4.0 invariant (every mission's default survival >= 55%).
+# Core 0.8.1 (decision 32, measurement m10): the deep missions (secret, read_orders) score against a pact partner too
+# (score.intel.pact_deep 1); a sabotage against a partner still scores nothing. Espionage never breaks a pact
+# (SPY_V2.md 8), sabotage included.
+- id: slice3
+  name: Срез на троих
+  map: mirror3
+  factions: [covenant, litany, synclite, ash_choir, growth, captains]
+  turn_limit: 10
+  phase_limits: {setup: 5m, negotiation_1: 12m, actions: 5m, negotiation_2: 5m}
+  setup: {artifacts: draft, artifact_offer: 3, artifact_points: 3}
+  message_limits:
+    negotiation_1: {per_recipient: 6, private: 20, public: 2}
+    negotiation_2: {private: 10, public: 1}
+    max_chars: 800
+  diplomacy_limits: {gifts_per_phase: 3, pact_proposals_per_phase: 3}
+  systems: {espionage: true, conquest: true, discoveries: true, trade: true}
+  scoring: {territory: 1, science: 1, works: 1, war: 1, intel: 1, objectives: 1}
+  objectives: {dealt: 1}
+  discoveries:
+    souls: halve
+    density: 1.0
+    garrison:
+      units: {assault: 2, militia: 2}
+      reward:
+        - {effect: add_resource, resource: alloy, amount: 45}
+        - {effect: add_resource, resource: provisions, amount: 25}
+        - {effect: add_resource, resource: creed, amount: 20}
+  overrides:
+    - {type: modify, target: combat.fortify_bonus, op: set, value: 0.15}
+    - {type: modify, target: combat.fortify_persists, op: set, value: 1}
+    - {type: modify, target: fog.army_presence, op: set, value: 1}
+    - {type: modify, target: score.science.tier2, op: set, value: 1}
+    - {type: modify, target: score.war.province_cap, op: set, value: 3}
+    - {type: modify, target: score.war.province_total, op: set, value: 8}
+    - {type: modify, target: score.war.no_reclaim, op: set, value: 1}
+    - {type: modify, target: score.betrayal.per_break, op: set, value: 3}
+    - {type: modify, target: score.intel.pact_deep, op: set, value: 1}
+    - {type: modify, target: spy.active_base, op: set, value: 2}
+    - {type: modify, target: spy.intel.width_min, op: set, value: 1}
+    - {type: modify, target: spy.detect.repeat_on, op: set, value: 1}
+    - {type: modify, target: spy.detect.base, op: set, value: 0.06}
+    - {type: modify, target: spy.detect.xp, op: set, value: 0.03}
+- id: slice2
+  name: Дуэль
+  map: mirror2
+  factions: [covenant, litany, synclite, ash_choir, growth, captains]
+  turn_limit: 10
+  phase_limits: {setup: 5m, negotiation_1: 12m, actions: 5m, negotiation_2: 5m}
+  setup: {artifacts: draft, artifact_offer: 3, artifact_points: 3}
+  systems: {espionage: true, conquest: true, trade: true}
+  scoring: {territory: 1, science: 1, works: 1, war: 1, intel: 1, objectives: 1}
+  objectives: {dealt: 1}
+  overrides:
+    - {type: modify, target: combat.fortify_bonus, op: set, value: 0.15}
+    - {type: modify, target: combat.fortify_persists, op: set, value: 1}
+    - {type: modify, target: fog.army_presence, op: set, value: 1}
+    - {type: modify, target: score.science.tier2, op: set, value: 1}
+    - {type: modify, target: score.war.province_cap, op: set, value: 3}
+    - {type: modify, target: score.war.province_total, op: set, value: 8}
+    - {type: modify, target: score.war.no_reclaim, op: set, value: 1}
+    - {type: modify, target: score.betrayal.per_break, op: set, value: 3}
+    - {type: modify, target: score.intel.pact_deep, op: set, value: 1}
+    - {type: modify, target: spy.active_base, op: set, value: 2}
+    - {type: modify, target: spy.intel.width_min, op: set, value: 1}
+    - {type: modify, target: spy.detect.repeat_on, op: set, value: 1}
+    - {type: modify, target: spy.detect.base, op: set, value: 0.06}
+    - {type: modify, target: spy.detect.xp, op: set, value: 0.03}
+- id: quad4
+  name: Четверо у Предела
+  map: mirror4
+  factions: [litany, synclite, ash_choir, growth, captains, covenant]
+  turn_limit: 12
+  phase_limits: {setup: 5m, negotiation_1: 12m, actions: 5m, negotiation_2: 5m}
+  setup: {artifacts: draft, artifact_offer: 3, artifact_points: 3}
+  message_limits:
+    negotiation_1: {per_recipient: 6, private: 24, public: 2}
+    negotiation_2: {private: 12, public: 1}
+    max_chars: 800
+  diplomacy_limits: {gifts_per_phase: 3, pact_proposals_per_phase: 3}
+  systems: {espionage: true, conquest: true, discoveries: true, trade: true}
+  scoring: {territory: 1, science: 1, works: 1, war: 1, intel: 1, objectives: 1}
+  objectives: {dealt: 1}
+  discoveries:
+    souls: halve
+    density: 1.0
+    garrison:
+      units: {assault: 2, militia: 2}
+      reward:
+        - {effect: add_resource, resource: alloy, amount: 45}
+        - {effect: add_resource, resource: provisions, amount: 25}
+        - {effect: add_resource, resource: creed, amount: 20}
+  overrides:
+    - {type: modify, target: combat.fortify_bonus, op: set, value: 0.15}
+    - {type: modify, target: combat.fortify_persists, op: set, value: 1}
+    - {type: modify, target: fog.army_presence, op: set, value: 1}
+    - {type: modify, target: score.science.tier2, op: set, value: 1}
+    - {type: modify, target: score.war.province_cap, op: set, value: 3}
+    - {type: modify, target: score.war.province_total, op: set, value: 8}
+    - {type: modify, target: score.war.no_reclaim, op: set, value: 1}
+    - {type: modify, target: score.betrayal.per_break, op: set, value: 3}
+    - {type: modify, target: score.intel.pact_deep, op: set, value: 1}
+    - {type: modify, target: spy.active_base, op: set, value: 2}
+    - {type: modify, target: spy.intel.width_min, op: set, value: 1}
+    - {type: modify, target: spy.detect.repeat_on, op: set, value: 1}
+    - {type: modify, target: spy.detect.base, op: set, value: 0.06}
+    - {type: modify, target: spy.detect.xp, op: set, value: 0.03}
+- id: blitz_test
+  name: Блиц для тестов
+  map: mirror3
+  factions: [covenant]
+  turn_limit: 6
+  phase_limits: {negotiation_1: 5s, actions: 5s, negotiation_2: 5s}
+  setup: none
+  systems: {espionage: false, conquest: false}
+  overrides:
+    - {type: modify, target: combat.fortify_bonus, op: set, value: 0.15}
+    - {type: modify, target: combat.fortify_persists, op: set, value: 1}
+- id: blitz_spy
+  name: Блиц со шпионажем и завоеванием
+  map: mirror3
+  factions: [covenant]
+  turn_limit: 6
+  phase_limits: {negotiation_1: 5s, actions: 5s, negotiation_2: 5s}
+  setup: none
+  systems: {espionage: true, conquest: true}
+  overrides:
+    - {type: modify, target: combat.fortify_bonus, op: set, value: 0.15}
+    - {type: modify, target: combat.fortify_persists, op: set, value: 1}
+    - {type: modify, target: fog.army_presence, op: set, value: 1}
+    - {type: modify, target: spy.active_base, op: set, value: 2}
+    - {type: modify, target: spy.intel.width_min, op: set, value: 1}
+    - {type: modify, target: spy.detect.repeat_on, op: set, value: 1}
+    - {type: modify, target: spy.detect.base, op: set, value: 0.06}
+    - {type: modify, target: spy.detect.xp, op: set, value: 0.03}
+- id: blitz_score
+  name: Блиц со счётом
+  map: mirror3
+  factions: [covenant, litany, synclite]
+  turn_limit: 6
+  phase_limits: {setup: 5s, negotiation_1: 5s, actions: 5s, negotiation_2: 5s}
+  setup: {artifacts: draft, artifact_offer: 3, artifact_points: 3}
+  systems: {espionage: true, conquest: true}
+  scoring: {territory: 1, science: 1, works: 1, war: 1, intel: 1, objectives: 1}
+  objectives: {dealt: 1}
+  overrides:
+    - {type: modify, target: combat.fortify_bonus, op: set, value: 0.15}
+    - {type: modify, target: combat.fortify_persists, op: set, value: 1}
+    - {type: modify, target: fog.army_presence, op: set, value: 1}
+    - {type: modify, target: score.science.tier2, op: set, value: 1}
+    - {type: modify, target: score.war.province_cap, op: set, value: 3}
+    - {type: modify, target: score.war.province_total, op: set, value: 8}
+    - {type: modify, target: score.war.no_reclaim, op: set, value: 1}
+    - {type: modify, target: score.betrayal.per_break, op: set, value: 3}
+    - {type: modify, target: score.intel.pact_deep, op: set, value: 1}
+    - {type: modify, target: spy.active_base, op: set, value: 2}
+    - {type: modify, target: spy.intel.width_min, op: set, value: 1}
+    - {type: modify, target: spy.detect.repeat_on, op: set, value: 1}
+    - {type: modify, target: spy.detect.base, op: set, value: 0.06}
+    - {type: modify, target: spy.detect.xp, op: set, value: 0.03}
+- id: blitz_finds
+  name: Блиц на руинах
+  map: mirror3
+  factions: [covenant, litany, synclite]
+  turn_limit: 6
+  phase_limits: {setup: 5s, negotiation_1: 5s, actions: 5s, negotiation_2: 5s}
+  setup: {artifacts: draft, artifact_offer: 3, artifact_points: 3}
+  systems: {espionage: true, conquest: true, discoveries: true}
+  scoring: {territory: 1, science: 1, works: 1, war: 1, intel: 1, objectives: 1}
+  objectives: {dealt: 1}
+  discoveries:
+    souls: halve
+    density: 1.0
+    garrison:
+      units: {assault: 2, militia: 2}
+      reward:
+        - {effect: add_resource, resource: alloy, amount: 45}
+        - {effect: add_resource, resource: provisions, amount: 25}
+        - {effect: add_resource, resource: creed, amount: 20}
+  overrides:
+    - {type: modify, target: combat.fortify_bonus, op: set, value: 0.15}
+    - {type: modify, target: combat.fortify_persists, op: set, value: 1}
+    - {type: modify, target: fog.army_presence, op: set, value: 1}
+    - {type: modify, target: score.science.tier2, op: set, value: 1}
+    - {type: modify, target: score.war.province_cap, op: set, value: 3}
+    - {type: modify, target: score.war.province_total, op: set, value: 8}
+    - {type: modify, target: score.war.no_reclaim, op: set, value: 1}
+    - {type: modify, target: score.betrayal.per_break, op: set, value: 3}
+    - {type: modify, target: score.intel.pact_deep, op: set, value: 1}
+    - {type: modify, target: spy.active_base, op: set, value: 2}
+    - {type: modify, target: spy.intel.width_min, op: set, value: 1}
+    - {type: modify, target: spy.detect.repeat_on, op: set, value: 1}
+    - {type: modify, target: spy.detect.base, op: set, value: 0.06}
+    - {type: modify, target: spy.detect.xp, op: set, value: 0.03}
+- id: blitz_trade
+  name: Блиц с торговлей
+  map: mirror3
+  factions: [covenant, litany, synclite]
+  turn_limit: 6
+  phase_limits: {negotiation_1: 5s, actions: 5s, negotiation_2: 5s}
+  setup: none
+  systems: {espionage: true, conquest: true, trade: true}
+  scoring: {territory: 1, science: 1, works: 1, war: 1, intel: 1, objectives: 1}
+  objectives: {dealt: 1}
+  overrides:
+    - {type: modify, target: combat.fortify_bonus, op: set, value: 0.15}
+    - {type: modify, target: combat.fortify_persists, op: set, value: 1}
+    - {type: modify, target: fog.army_presence, op: set, value: 1}
+    - {type: modify, target: score.science.tier2, op: set, value: 1}
+    - {type: modify, target: score.war.province_cap, op: set, value: 3}
+    - {type: modify, target: score.war.province_total, op: set, value: 8}
+    - {type: modify, target: score.war.no_reclaim, op: set, value: 1}
+    - {type: modify, target: score.betrayal.per_break, op: set, value: 3}
+    - {type: modify, target: score.intel.pact_deep, op: set, value: 1}
+    - {type: modify, target: spy.active_base, op: set, value: 2}
+    - {type: modify, target: spy.intel.width_min, op: set, value: 1}
+    - {type: modify, target: spy.detect.repeat_on, op: set, value: 1}
+    - {type: modify, target: spy.detect.base, op: set, value: 0.06}
+    - {type: modify, target: spy.detect.xp, op: set, value: 0.03}

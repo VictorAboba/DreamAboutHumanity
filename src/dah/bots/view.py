@@ -6,16 +6,64 @@ decision logic. Every guess about JSON field names lives here, so a contract mis
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
+import math
+from dataclasses import dataclass, field
+from typing import Any, Mapping
 
-# Numbers of the `core` pack the bots plan with (SLICE.md section 3); the server stays the authority.
-UNIT_COST_ALLOY: dict[str, int] = {"assault": 12, "armor": 25, "artillery": 20}
-UNIT_UPKEEP_FOOD: dict[str, int] = {"assault": 1, "armor": 2, "artillery": 1}
-BUILDING_COST_ALLOY: dict[str, int] = {"mine": 20, "farm": 15, "barracks": 30}
-RECRUIT_BUILDINGS: frozenset[str] = frozenset({"barracks"})
+# Numbers of the `core` pack (0.3.0) the bots plan with (SLICE.md section 3, TECH_AND_SETUP.md section 8); the
+# server stays the authority (faction modifiers, e.g. cheaper buildings, only make the bots plan conservatively).
+# tests/test_bots_logic.py checks they match content/packs/core.
+UNIT_COST_ALLOY: dict[str, int] = {"assault": 12, "armor": 25, "artillery": 15, "militia": 8, "outriders": 10,
+                                   "dreamwalker": 14, "mortar": 22, "titan": 45,
+                                   "throne_warden": 14, "faceless": 13, "ash_cantor": 12, "devourer": 10,
+                                   "rift_corsair": 12}
+UNIT_UPKEEP_FOOD: dict[str, int] = {"assault": 1, "armor": 1, "artillery": 1, "militia": 1, "outriders": 1,
+                                    "dreamwalker": 1, "mortar": 1, "titan": 2,
+                                    "throne_warden": 1, "faceless": 1, "ash_cantor": 1, "devourer": 2,
+                                    "rift_corsair": 1}
+# Costs beyond alloy (short resource id -> amount); units not listed cost only alloy.
+UNIT_COST_OTHER: dict[str, dict[str, int]] = {}    # costs beyond alloy (none in core 0.3.0: creed is for techs)
+# The faction's unique unit (stage 2): faction short id -> unit short id.
+UNIQUE_UNITS: dict[str, str] = {"litany": "throne_warden", "synclite": "faceless", "ash_choir": "ash_cantor",
+                                "growth": "devourer", "captains": "rift_corsair"}
+BUILDING_COST_ALLOY: dict[str, int] = {"mine": 10, "farm": 8, "barracks": 30, "temple": 15, "smithy": 25,
+                                       "citadel": 40, "warehouse": 20, "hq": 35, "monument": 10, "dream_spire": 60}
+# Stage 4 (docs/SCORING.md 2.3, 10): great works of core 0.5.0. Provisions beyond alloy, build turns, points and the
+# province types allowed (None: any); tests/test_bots_logic.py checks them, the simulator re-reads them from its pack.
+BUILDING_COST_FOOD: dict[str, int] = {"monument": 25, "dream_spire": 100}
+GREAT_WORKS: dict[str, tuple[int, int, tuple[str, ...] | None]] = {
+    "monument": (2, 3, None), "dream_spire": (4, 7, ("agri", "forge", "shrine", "waste"))}
+# Core 0.7.0 (decision 27): great works paid in parts (`payment: parts`), a share per build turn; tests check it
+# (a set: the simulator syncs it in place with its pack)
+WORKS_IN_PARTS: set[str] = {"monument", "dream_spire"}
+# Core 0.6.0 (decision 26): points a broken pact costs its breaker in a scored game (score.betrayal.per_break of the
+# scored scenarios); tests/test_bots_logic.py checks it, the simulator re-reads it from its pack.
+BETRAYAL_PENALTY = 3
+RESEARCH_BUILDING = "temple"  # +research income
+RECRUIT_BUILDINGS: frozenset[str] = frozenset({"barracks", "hq"})
+FARM_SITE = "agri"  # province type a farm prefers
 BUILD_RESOURCE = "alloy"
 FOOD_RESOURCE = "provisions"
+
+# Stage 3 (docs/SPY_AND_CONQUEST.md sections 5, 7): the numbers of core 0.4.0 the bots plan espionage and conquest
+# with; tests/test_bots_logic.py checks them against content/packs/core, the simulator re-reads them from its pack.
+SHADE_COST_ALLOY = 20      # core 0.6.0 (was 25); every seat also holds one Shade from the start
+SHADE_UPKEEP_FOOD = 1
+# mission short id -> (whisper needed, rounds_max, alloy once, provisions per round)
+MISSIONS: dict[str, tuple[int, int, int, int]] = {"observe": (1, 5, 0, 1), "ledger": (1, 3, 0, 1),
+                                                  "secret": (1, 3, 0, 2), "read_orders": (1, 3, 0, 2),   # core 0.8.0: S1
+                                                  "sabotage": (2, 4, 8, 1)}
+# core 0.8.0 (docs/SPY_V2.md 5.1, 10): mission short id -> its `intel` kind (each_turn | once | once_per_target |
+# effect | no); the simulator re-reads it from its pack (older cores: each_turn for all)
+MISSION_INTEL: dict[str, str] = {"observe": "no", "ledger": "no", "secret": "once", "read_orders": "once_per_target",
+                                 "sabotage": "effect"}
+DEEP_KINDS = frozenset({"once", "once_per_target", "effect"})   # the «deep» missions of docs/SPY_V2.md 10
+WARD_COST_ALLOY = 5         # registry default of spy.ward.cost (3 with watch_drill: the bot plans with the full price)
+# disposition short id -> provisions per point of conquest value (before the faction multiplier)
+DISPOSITION_FOOD: dict[str, int] = {"subjugate": 5, "exterminate": 0, "raid": 0, "liberate": 0}
+CONQUEST_VALUE: dict[str, int] = {"capital": 3}     # province type short id -> value (others 1)
+# faction short id -> disposition short id -> cost multiplier
+DISPOSITION_COST_MUL: dict[str, dict[str, float]] = {"growth": {"subjugate": 1.2}}
 
 
 def short_id(full_id: str) -> str:
@@ -33,6 +81,25 @@ class Province:
     buildings: tuple[str, ...]  # short building ids
     neighbors: tuple[str, ...]
     fortified: bool
+    status: Mapping[str, Any] = field(default_factory=dict)  # public conquest status (occupied, ruined_until, ...)
+    origin: str | None = None  # the seat that started with it (conquest games)
+    building_now: tuple[str, ...] = ()  # short ids building here (own provinces; others: great works only)
+    # core 0.8.0: (short id, turns_left) of the builds here as shown (a stalled one keeps its turns_left)
+    work_left: tuple[tuple[str, int], ...] = ()
+    # core 0.7.0: the next shares of own builds paid in parts here (short resource id -> amount), summed
+    share_due: Mapping[str, int] = field(default_factory=dict)
+    # core 0.7.0 army fog: beyond sight only whether another seat's army stands there (`units` stays None)
+    army: bool | None = None
+    # stage 5 (docs/ABANDONED_LANDS.md 13): public marks of the Abandoned lands and the find this seat knows
+    abandoned: bool = False
+    ruins: bool = False
+    guard: Mapping[str, Any] | None = None  # {lair, cap?}: neutral guard (ruins) or lair, where shown
+    discovery: Mapping[str, Any] | None = None  # {id (short), state}: a find this seat knows (Observation, entry)
+
+    @property
+    def occupied_by(self) -> str | None:
+        occ = self.status.get("occupied") if self.status else None
+        return str(occ.get("by")) if isinstance(occ, Mapping) and occ.get("by") else None
 
     @property
     def kind(self) -> str:
@@ -52,6 +119,93 @@ class StateView:
     command_points: int
     provinces: dict[str, Province]
     id_prefix: str  # e.g. "core:" when the server uses full IDs, else ""
+    seat: str = ""  # own seat id as the server reports it ("you.seat")
+    # 0 when the server did not say; core 0.8.2 under a hidden end (state `end_turns` [lo, hi]) the earliest last
+    # turn lo: a bot plans for the soonest end it cannot rule out (it never knows the drawn one)
+    turn_limit: int = 0
+    players: tuple[str, ...] = ()  # seats of living players (self included)
+    pacts: tuple[dict[str, Any], ...] = ()  # active pacts: {seats: [a, b], id?: own pacts only, ...}
+    pact_proposals: tuple[dict[str, Any], ...] = ()  # own open proposals: {id, from, to, turns}
+    net_income: dict[str, int] | None = None  # short resource id -> income minus upkeep; None if not sent
+    faction: str = ""  # own faction, short id ("" when not sent)
+    techs: tuple[str, ...] | None = None  # own researched techs (short ids); None: the game has no techs
+    researching: str | None = None  # own active tech (short id)
+    artifacts: tuple[str, ...] = ()  # own artifacts (short ids)
+    # stage 3: None when the system is off in this game
+    espionage: Mapping[str, Any] | None = None  # you.espionage: whisper, mirrors, shades_max, active_limit, shades
+    conquest_policy: str | None = None
+    conquest: bool = False
+    claims: tuple[Mapping[str, Any], ...] = ()
+    scores: Mapping[str, int] = field(default_factory=dict)  # seat -> public score
+    # stage 4: seat -> {source: points or None (hidden by fog)} for the others (players[].score_known); empty when the
+    # server sends none (the score is then exact for all)
+    score_known: Mapping[str, Mapping[str, int | None]] = field(default_factory=dict)
+    # stage 4 (docs/SCORING.md 8, 10): None / empty with the default scoring (land only)
+    score_parts: Mapping[str, int] | None = None  # own turn score by source (you.score_parts)
+    objectives: tuple[Mapping[str, Any], ...] = ()  # own secret objectives (you.objectives)
+    war: Mapping[str, Any] | None = None  # you.war: points, cap_left (None: per province, no total cap), provinces
+    intel: Mapping[str, int] | None = None  # core 0.7.0, you.intel: points, left
+    # stage 5 (docs/ABANDONED_LANDS.md 8, 13): own pending choices of mixed finds
+    # [{province, id (short), name, default, choices: [{id, ev, risk}]}]; empty without them
+    pending_finds: tuple[Mapping[str, Any], ...] = ()
+    # core 0.8.0 (docs/TRADE.md 9): own offers and trades (`trades` of get_state); None: the game has no trade
+    trades: tuple[Mapping[str, Any], ...] | None = None
+    nicks: Mapping[str, str] = field(default_factory=dict)  # nick -> seat (trades name the other side by nick)
+
+    def scoring(self, source: str) -> bool:
+        """The score source is on in this game (it appears in the own breakdown)."""
+        return self.score_parts is not None and source in self.score_parts
+
+    def open_objectives(self) -> list[Mapping[str, Any]]:
+        """Own objectives not met right now."""
+        return [o for o in self.objectives if not o.get("met_now")]
+
+    @property
+    def whisper(self) -> int:
+        return int((self.espionage or {}).get("whisper", 0))
+
+    @property
+    def shades(self) -> list[Mapping[str, Any]]:
+        return list((self.espionage or {}).get("shades") or [])
+
+    def turns_left(self) -> int:
+        """Turns still to play, this one included (0 when the server did not say the limit); past the earliest end of
+        a hidden one, 1 (this turn may be the last)."""
+        return max(1, self.turn_limit - self.turn + 1) if self.turn_limit else 0
+
+    def free_food(self) -> int:
+        """Provisions free to spend: the stock less two turns of a food deficit (never starve the army for it)."""
+        deficit = -min(0, (self.net_income or {}).get(FOOD_RESOURCE, 0))
+        return max(0, self.resource(FOOD_RESOURCE) - 2 * deficit)
+
+    def disposition_food(self, disposition: str, province: Province) -> int:
+        """Provisions a disposition of `province` costs this seat (rounded half up, as the engine does)."""
+        base = DISPOSITION_FOOD.get(disposition, 0) * CONQUEST_VALUE.get(province.kind, 1)
+        mul = DISPOSITION_COST_MUL.get(self.faction, {}).get(disposition, 1.0)
+        return int(math.floor(base * mul + 0.5))
+
+    def full_provinces(self) -> list[Province]:
+        """Own provinces where building and recruiting work: not in Occupation, not ruins (conquest games)."""
+        return [p for p in self.own_provinces() if p.occupied_by is None and not (p.status or {}).get("ruined_until")]
+
+    def own_occupations(self) -> list[Province]:
+        """Own provinces held in Occupation (taken from a seat, no fate decided yet)."""
+        return [p for p in self.own_provinces() if p.occupied_by is not None and p.occupied_by in self.me]
+
+    @property
+    def research_enabled(self) -> bool:
+        return self.techs is not None
+
+    @property
+    def unique_unit(self) -> str | None:
+        """The own faction's unique unit (short id), if the bots know one."""
+        return UNIQUE_UNITS.get(self.faction)
+
+    def affordable(self, unit: str, alloy: int) -> int:
+        """How many `unit` `alloy` and the other stocks pay for."""
+        counts = [alloy // UNIT_COST_ALLOY[unit]] if UNIT_COST_ALLOY.get(unit) else []
+        counts += [self.resource(r) // n for r, n in UNIT_COST_OTHER.get(unit, {}).items() if n]
+        return max(0, min(counts)) if counts else 0
 
     def is_mine(self, province: Province) -> bool:
         return province.owner is not None and province.owner in self.me
@@ -69,6 +223,31 @@ class StateView:
     def resource(self, short: str) -> int:
         return self.resources.get(short, 0)
 
+    def pact_with(self, other: str | None) -> dict[str, Any] | None:
+        """Own active pact with `other` (a seat), if any."""
+        if other is None:
+            return None
+        return next((p for p in self.pacts if other in p.get("seats", ()) and self.me & set(p.get("seats", ()))),
+                    None)
+
+    def is_partner(self, other: str | None) -> bool:
+        return self.pact_with(other) is not None
+
+    def feedable(self, unit: str, turns: int) -> int | None:
+        """How many more `unit` the food stock and net food income keep fed for `turns` turns (None: unknown)."""
+        if self.net_income is None or turns <= 0:
+            return None
+        per_unit = UNIT_UPKEEP_FOOD.get(unit, 1) or 1
+        budget = self.resource(FOOD_RESOURCE) + turns * self.net_income.get(FOOD_RESOURCE, 0)
+        return max(0, budget // (per_unit * turns))
+
+
+def farm_site(view: StateView) -> Province | None:
+    """Where a new farm goes (an agri world first), or None when every own province has one."""
+    sites = [p for p in view.full_provinces() if "farm" not in p.buildings]
+    preferred = [p for p in sites if p.kind == FARM_SITE]
+    return (preferred or sites or [None])[0]
+
 
 def parse_state(payload: dict[str, Any], me: set[str] | frozenset[str]) -> StateView:
     """Adapt a `/v1/state?format=json` response (with or without the `{ok, state}` envelope) to a StateView."""
@@ -76,6 +255,7 @@ def parse_state(payload: dict[str, Any], me: set[str] | frozenset[str]) -> State
     player = _player_block(state)
     raw_provinces = _province_records(state.get("provinces", {}))
     edges = _edge_pairs(state.get("edges", []))
+    abandoned = {str(p) for p in state.get("abandoned") or []}
 
     seen_ids: list[str] = []
     provinces: dict[str, Province] = {}
@@ -97,10 +277,25 @@ def parse_state(payload: dict[str, Any], me: set[str] | frozenset[str]) -> State
             buildings=tuple(short_id(b) for b in buildings),
             neighbors=tuple(sorted(neighbors)),
             fortified=bool(record.get("fortified", False)),
+            status=dict(record.get("status") or {}),
+            origin=str(record["origin"]) if record.get("origin") else None,
+            building_now=tuple(short_id(str(b.get("building"))) for b in record.get("building_now") or []
+                               if isinstance(b, dict) and b.get("building")),
+            share_due=_share_due(record.get("building_now")),
+            work_left=tuple((short_id(str(b.get("building"))), int(b.get("turns_left") or 0))
+                            for b in record.get("building_now") or [] if isinstance(b, dict) and b.get("building")),
+            army=record["army"] if isinstance(record.get("army"), bool) else None,
+            abandoned=bool(record.get("abandoned")) or pid in abandoned,
+            ruins=bool(record.get("ruins")),
+            guard=dict(record["guard"]) if isinstance(record.get("guard"), dict) else None,
+            discovery=({**record["discovery"], "id": short_id(str(record["discovery"].get("id")))}
+                       if isinstance(record.get("discovery"), dict) else None),
         )
 
     resources = _resources(player.get("resources", state.get("resources", {})))
     seen_ids += list(resources)
+    players = tuple(str(p.get("seat")) for p in state.get("players") or []
+                    if isinstance(p, dict) and p.get("alive", True))
     return StateView(
         turn=int(state.get("turn", 0)),
         phase=str(state.get("phase", "")),
@@ -109,7 +304,59 @@ def parse_state(payload: dict[str, Any], me: set[str] | frozenset[str]) -> State
         command_points=int(player.get("command_points", player.get("cp", state.get("command_points", 0)))),
         provinces=provinces,
         id_prefix=_prefix(seen_ids),
+        seat=str(player.get("seat", "")),
+        turn_limit=_planning_limit(state),
+        players=players,
+        pacts=tuple(dict(p) for p in state.get("pacts") or [] if isinstance(p, dict)),
+        pact_proposals=tuple(dict(p) for p in state.get("pact_proposals") or [] if isinstance(p, dict)),
+        net_income=_net_income(player.get("net_income")),
+        faction=short_id(str(player.get("faction") or "")),
+        techs=tuple(short_id(str(t)) for t in player["techs"]) if isinstance(player.get("techs"), list) else None,
+        researching=_researching(player.get("researching")),
+        artifacts=tuple(short_id(str(a)) for a in player.get("artifacts") or []),
+        espionage=dict(player["espionage"]) if isinstance(player.get("espionage"), dict) else None,
+        conquest_policy=short_id(str(player["conquest_policy"])) if player.get("conquest_policy") else None,
+        conquest="conquest_policy" in player or "claims" in state,
+        claims=tuple(dict(c) for c in state.get("claims") or [] if isinstance(c, dict)),
+        scores={str(p.get("seat")): int(p.get("score") or 0) for p in state.get("players") or []
+                if isinstance(p, dict) and p.get("seat") is not None},
+        score_known={str(p.get("seat")): {str(k): (None if v is None else int(v)) for k, v in p["score_known"].items()}
+                     for p in state.get("players") or [] if isinstance(p, dict) and isinstance(p.get("score_known"), dict)},
+        score_parts=({str(k): int(v or 0) for k, v in player["score_parts"].items()}
+                     if isinstance(player.get("score_parts"), dict) else None),
+        objectives=tuple(dict(o) for o in player.get("objectives") or [] if isinstance(o, dict)),
+        war=dict(player["war"]) if isinstance(player.get("war"), dict) else None,
+        intel=dict(player["intel"]) if isinstance(player.get("intel"), dict) else None,
+        pending_finds=tuple({**e, "id": short_id(str(e.get("id")))} for e in state.get("discoveries_pending") or []
+                            if isinstance(e, dict) and e.get("province")),
+        trades=(tuple(dict(t) for t in state["trades"] if isinstance(t, dict))
+                if isinstance(state.get("trades"), list) else None),
+        nicks={str(p["nick"]): str(p["seat"]) for p in state.get("players") or []
+               if isinstance(p, dict) and p.get("nick") is not None and p.get("seat") is not None},
     )
+
+
+def _share_due(raw: Any) -> dict[str, int]:
+    """Core 0.7.0: the next shares of the province's builds paid in parts (`building_now[].next_share`), summed."""
+    out: dict[str, int] = {}
+    for b in raw or []:
+        if isinstance(b, dict) and isinstance(b.get("next_share"), dict):
+            for r, n in b["next_share"].items():
+                if isinstance(n, int) and not isinstance(n, bool):
+                    out[short_id(str(r))] = out.get(short_id(str(r)), 0) + n
+    return out
+
+
+def _researching(raw: Any) -> str | None:
+    if isinstance(raw, dict):
+        raw = raw.get("tech")
+    return short_id(str(raw)) if raw else None
+
+
+def _net_income(raw: Any) -> dict[str, int] | None:
+    if not isinstance(raw, dict):
+        return None
+    return {short_id(str(r)): int(v) for r, v in raw.items() if isinstance(v, (int, float))}
 
 
 def _player_block(state: dict[str, Any]) -> dict[str, Any]:
@@ -161,6 +408,14 @@ def _resources(raw: dict[str, Any]) -> dict[str, int]:
             value = value.get("amount", value.get("value", 0))
         result[str(rid)] = int(value)
     return result
+
+
+def _planning_limit(state: Mapping[str, Any]) -> int:
+    """The last turn a bot plans for: `turn_limit`, or the earliest end of a hidden one (`end_turns`, core 0.8.2)."""
+    span = state.get("end_turns")
+    if isinstance(span, (list, tuple)) and len(span) == 2 and isinstance(span[0], int) and span[0] > 0:
+        return int(span[0])
+    return int(state.get("turn_limit") or 0)
 
 
 def _prefix(ids: list[str]) -> str:

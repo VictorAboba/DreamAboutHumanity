@@ -2,16 +2,90 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://dah.local/schemas/unit.schema.json",
   "type": "object",
-  "required": ["id", "name", "attack", "defense", "cost", "upkeep"],
+  "required": [
+    "id",
+    "name",
+    "attack",
+    "defense",
+    "cost",
+    "upkeep"
+  ],
   "additionalProperties": false,
   "properties": {
-    "id": {"$ref": "common.schema.json#/$defs/id"},
-    "name": {"$ref": "common.schema.json#/$defs/name"},
-    "short": {"$ref": "common.schema.json#/$defs/short"},
-    "attack": {"type": "integer"},
-    "defense": {"type": "integer"},
-    "cost": {"$ref": "common.schema.json#/$defs/amounts"},
-    "upkeep": {"$ref": "common.schema.json#/$defs/amounts"},
-    "counters": {"type": "array", "items": {"$ref": "common.schema.json#/$defs/ref"}}
+    "id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "name": {
+      "$ref": "common.schema.json#/$defs/lname"
+    },
+    "short": {
+      "$ref": "common.schema.json#/$defs/short"
+    },
+    "attack": {
+      "type": "integer"
+    },
+    "defense": {
+      "type": "integer"
+    },
+    "cost": {
+      "$ref": "common.schema.json#/$defs/amounts"
+    },
+    "upkeep": {
+      "$ref": "common.schema.json#/$defs/amounts"
+    },
+    "counters": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/ref"
+      }
+    },
+    "move": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5,
+      "description": "edges through own land (default 2; 1 in a ruleset without techs, branches or artifacts); onto foreign land always 1"
+    },
+    "requires": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tech": {
+          "$ref": "common.schema.json#/$defs/refs"
+        },
+        "building": {
+          "$ref": "common.schema.json#/$defs/refs"
+        }
+      }
+    },
+    "factions": {
+      "$ref": "common.schema.json#/$defs/refs"
+    },
+    "abilities": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "common.schema.json#/$defs/id"
+          },
+          {
+            "type": "object",
+            "required": [
+              "id"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "common.schema.json#/$defs/id"
+              }
+            },
+            "additionalProperties": {
+              "type": "number"
+            }
+          }
+        ]
+      }
+    },
+    "lore": {
+      "$ref": "common.schema.json#/$defs/lore"
+    }
   }
 }

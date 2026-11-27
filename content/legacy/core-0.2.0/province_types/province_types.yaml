@@ -1,0 +1,18 @@
+- id: forge
+  name: Кузнечный мир
+  short: кузн.
+  income: {alloy: 4}
+- id: agri
+  name: Агромир
+  short: агро
+  income: {provisions: 4}
+- id: waste
+  name: Пустошь
+  short: пуст.
+  income: {alloy: 1, provisions: 1}
+  defense_mul: 1.1
+- id: capital
+  name: Столица
+  short: столица
+  income: {alloy: 3, provisions: 2}
+  defense_mul: 1.25

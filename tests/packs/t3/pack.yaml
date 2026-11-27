@@ -1,0 +1,7 @@
+# Fixture pack for stage-3 conquest tests (docs/SPY_AND_CONQUEST.md 3): 3 seats, dispositions, requires_system.
+id: t3
+version: 0.1.0
+title: Тестовый пак этапа 3
+author: tests
+requires: []
+engine_api: "^1"

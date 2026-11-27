@@ -10,7 +10,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from dah.cli import main
-from dah.game import Game, make_config
+from dah.game import Game
+from slice_helpers import slice_config
 from dah.server import create_app, spectate
 from dah.store import GameDir, hash_key, init_game_dir, read_json
 
@@ -31,7 +32,7 @@ class FakeClock:
 class Env:
     def __init__(self, tmp_path, turn_limit: int = 3) -> None:
         self.clock = FakeClock()
-        config = make_config(game_id="g1", scenario="core:slice2", seats=SEATS, seed=7, turn_limit=turn_limit)
+        config = slice_config(game_id="g1", scenario="core:slice2", seats=SEATS, seed=7, turn_limit=turn_limit)
         self.gdir, keys = init_game_dir(tmp_path, config)
         self.spectator_key = self.gdir.issue_spectator_key()
         self.game = Game.create(self.gdir, self.clock)
@@ -131,7 +132,7 @@ def test_admin_sees_everything_live(env):
     now = env.watch("admin", "turn/1")
     assert now["in_progress"] is True and now["full"] is True and now["events"] == []
     assert [m["text"] for m in now["messages"]] == [PRIVATE_TEXT] and now["messages"][0]["to_nicks"] == ["Соло"]
-    assert {p["id"]: p for p in now["provinces"]}[cap]["units"] == {"core:assault": 3}
+    assert {p["id"]: p for p in now["provinces"]}[cap]["units"] == {"core:assault": 4}   # core 0.2 start
     assert all("resources" in p for p in now["players"])
     assert "orders" not in now  # orders of the turn in progress stay hidden until it resolves
 

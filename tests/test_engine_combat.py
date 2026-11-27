@@ -50,7 +50,8 @@ def test_fortify_and_terrain(rs):
     base = strength(rs, Force("d", {AS: 2}), {}, defending=True)
     assert strength(rs, Force("d", {AS: 2}), {}, defending=True, defense_mul=1.5) == pytest.approx(base * 1.5)
     assert strength(rs, Force("d", {AS: 2}), {}, defending=True, defense_mul=1.5,
-                    fortified=True) == pytest.approx(base * 1.5 * 1.25)
+                    fortified=True) == pytest.approx(base * 1.5 * (1 + rs.stat("combat.fortify_bonus")))
+    assert rs.stat("combat.fortify_bonus") == pytest.approx(0.15)   # core scenarios override the engine's 0.25
     assert strength(rs, Force("a", {AS: 2}), {}, defending=False, fortified=True) == pytest.approx(6)
 
 

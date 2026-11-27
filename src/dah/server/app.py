@@ -32,7 +32,9 @@ DEFAULT_WAIT_SECONDS = 45
 MAX_BODY_BYTES = 64_000
 # Routes only a host program (dah-waker) calls; with the `X-DAH-Host` header any call is host traffic. Host calls
 # do not count as the player's first call and are kept apart from the player's calls in the report.
-HOST_ROUTES = frozenset({"/v1/telemetry", "/v1/spend"})
+HOST_ROUTES = frozenset({"/v1/telemetry", "/v1/spend", "/v1/seat/dreamteam_session"})
+# A player's phase-status reads: listed as `passive` in the host's `player_calls` (not an answer to a wake).
+PASSIVE_ROUTES = frozenset({"/v1/phase", "/v1/wait_phase"})
 HOST_HEADER = "x-dah-host"
 ADMIN_HEADER = "x-dah-admin-key"
 STATUS = {"UNAUTHORIZED": 401, "FORBIDDEN": 403, "NOT_FOUND": 404, "INVALID": 400, "UNKNOWN_ID": 400,
@@ -60,14 +62,19 @@ def _key_matches(given: str, expected: str | None) -> bool:
     return bool(expected) and hmac.compare_digest(given.encode("utf-8"), expected.encode("utf-8"))
 
 
-def _int_param(request: Request, name: str, default: int | None = None) -> int | None:
+def _int_param(request: Request, name: str, default: int | None = None, example: str = "") -> int | None:
     raw = request.query_params.get(name)
     if raw is None or raw == "":
         return default
     try:
         return int(raw)
     except ValueError:
-        raise GameError("INVALID", f"параметр {name} должен быть целым числом") from None
+        hint = f". Пример: {example}" if example else ""
+        raise GameError("INVALID", f"параметр {name} должен быть целым числом, а не {raw[:20]!r}{hint}") from None
+
+
+def _is_host(request: Request) -> bool:
+    return bool(getattr(request.state, "dah_host", False))
 
 
 async def _read_body(request: Request) -> bytes:
@@ -104,14 +111,26 @@ def rules(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict
 
 
 def phase(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
-    return game.phase_info(seat)
+    return game.phase_info(seat, host=_is_host(request))
 
 
 async def wait_phase(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    """A player's pending poll is visible to the host (`player_waiting` in the host's phase info). Core 0.8.1: the
+    poll also returns, `changed: false` with `reason: "ready_cleared"`, when an offer cleared the seat's ready
+    (`ready_cleared` {reason, by, id}; its text leads the reply's `text`); the host's poll returns on it too."""
+    host = _is_host(request)
     after_seq = _int_param(request, "after_seq")
     max_seconds = max(0, min(MAX_WAIT_SECONDS, _int_param(request, "max_seconds", DEFAULT_WAIT_SECONDS) or 0))
-    changed = await game.wait_phase(after_seq, max_seconds)
-    return {"changed": changed, **game.phase_info(seat)}
+    changed = await game.wait_phase(after_seq, max_seconds, player_seat=None if host else seat,
+                                    watch_seat=seat if host else None)
+    info = game.phase_info(seat, host=host)
+    if not changed and not host:
+        note = game.ready_cleared_note(seat)
+        if note is not None:
+            return {"changed": False, "reason": "ready_cleared", **info,
+                    "ready_cleared": {k: v for k, v in note.items() if k != "text"},
+                    "text": f"{note['text']} | {info['text']}"}
+    return {"changed": changed, **info}
 
 
 def state(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
@@ -119,8 +138,10 @@ def state(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict
     if fmt == "json":
         return {"state": game.state_json(seat)}
     if fmt != "text":
-        raise GameError("INVALID", "format: text или json")
-    return {"text": game.state_text(seat, _int_param(request, "since_turn"))}
+        raise GameError("INVALID", f"format {fmt[:20]!r} не бывает: text (по умолчанию) или json. "
+                                   "Пример: get_state(since_turn=1) или get_state(format=\"json\")")
+    example = "get_state(since_turn=1) или get_state()"
+    return {"text": game.state_text(seat, _int_param(request, "since_turn", example=example))}
 
 
 def list_orders(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
@@ -144,7 +165,50 @@ def amend_order(game: Game, seat: str, request: Request, body: dict[str, Any]) -
 
 
 def estimate(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
-    return game.estimate(body)
+    return game.estimate(body, seat)
+
+
+def list_spies(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.list_spies(seat)
+
+
+def get_intel(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    q = request.query_params
+    return game.get_intel(seat, q.get("turn"), q.get("shade"), q.get("report") or q.get("report_id"),
+                          q.get("format", "text"))
+
+
+def estimate_mission(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.estimate_mission(seat, body)
+
+
+def _first(body: dict[str, Any], *names: str) -> Any:
+    """The first of several accepted spellings of one argument (prefs / factions / faction ...)."""
+    return next((body[n] for n in names if body.get(n) is not None), None)
+
+
+def get_setup(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.get_setup(seat)
+
+
+def choose_faction(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.choose_faction(seat, _first(body, "prefs", "factions", "faction"))
+
+
+def choose_artifacts(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.choose_artifacts(seat, _first(body, "ids", "artifacts", "artifact"))
+
+
+def list_techs(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    """Short by default (researched, active, available now); `?full=true` gives the whole tree."""
+    full = str(request.query_params.get("full", "")).strip().lower() in ("1", "true", "yes", "да")
+    return game.list_techs(seat, full=full)
+
+
+def describe(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    q = request.query_params
+    ref = next((q[n] for n in ("id", "ref", "name") if q.get(n)), None)
+    return game.describe(seat, ref)
 
 
 def send_message(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
@@ -153,6 +217,41 @@ def send_message(game: Game, seat: str, request: Request, body: dict[str, Any]) 
 
 def inbox(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
     return game.inbox(seat, _int_param(request, "since"))
+
+
+def send_gift(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.send_gift(seat, body.get("to"), body.get("resources"))
+
+
+def list_pacts(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.pacts(seat)
+
+
+def propose_pact(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.propose_pact(seat, body.get("to"), body.get("turns"))
+
+
+def respond_pact(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    decision = body.get("decision", body.get("accept"))
+    return game.respond_pact(seat, request.path_params["pact_id"], decision)
+
+
+def leave_pact(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.leave_pact(seat, request.path_params["pact_id"])
+
+
+def list_trades(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.trades(seat)
+
+
+def propose_trade(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    return game.propose_trade(seat, body.get("to"), body.get("give"), body.get("want"), body.get("later"),
+                              body.get("reply_to"), body.get("replaces"), body.get("fulfils"))
+
+
+def respond_trade(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    decision = body.get("decision", body.get("accept"))
+    return game.respond_trade(seat, request.path_params["trade_id"], decision)
 
 
 def ready(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
@@ -164,7 +263,7 @@ def unready(game: Game, seat: str, request: Request, body: dict[str, Any]) -> di
 
 
 def history(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
-    return game.history(seat, _int_param(request, "turn"))
+    return game.history(seat, _int_param(request, "turn", example="history(turn=1) или history()"))
 
 
 def telemetry(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
@@ -180,6 +279,11 @@ def spend(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict
     return {}
 
 
+def dreamteam_session(game: Game, seat: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    """dah-waker reports its `--dt-session` so the seat's link to the DreamTeam session is journaled."""
+    return game.set_dreamteam_session(seat, body.get("dreamteam_session_id"), source="waker")
+
+
 SEAT_ROUTES: list[tuple[str, str, Handler]] = [
     ("GET", "/v1/whoami", whoami),
     ("GET", "/v1/rules", rules),
@@ -192,13 +296,30 @@ SEAT_ROUTES: list[tuple[str, str, Handler]] = [
     ("DELETE", "/v1/orders/{order_id}", cancel_order),
     ("PATCH", "/v1/orders/{order_id}", amend_order),
     ("POST", "/v1/estimate", estimate),
+    ("GET", "/v1/spies", list_spies),
+    ("GET", "/v1/intel", get_intel),
+    ("POST", "/v1/estimate/mission", estimate_mission),
+    ("GET", "/v1/setup", get_setup),
+    ("POST", "/v1/setup/faction", choose_faction),
+    ("POST", "/v1/setup/artifacts", choose_artifacts),
+    ("GET", "/v1/techs", list_techs),
+    ("GET", "/v1/describe", describe),
     ("POST", "/v1/messages", send_message),
     ("GET", "/v1/inbox", inbox),
+    ("POST", "/v1/gifts", send_gift),
+    ("GET", "/v1/pacts", list_pacts),
+    ("POST", "/v1/pacts", propose_pact),
+    ("POST", "/v1/pacts/{pact_id}/respond", respond_pact),
+    ("POST", "/v1/pacts/{pact_id}/leave", leave_pact),
+    ("GET", "/v1/trades", list_trades),
+    ("POST", "/v1/trades", propose_trade),
+    ("POST", "/v1/trades/{trade_id}/respond", respond_trade),
     ("POST", "/v1/ready", ready),
     ("POST", "/v1/unready", unready),
     ("GET", "/v1/history", history),
     ("POST", "/v1/telemetry", telemetry),
     ("POST", "/v1/spend", spend),
+    ("POST", "/v1/seat/dreamteam_session", dreamteam_session),
 ]
 
 
@@ -256,11 +377,17 @@ def create_app(games_dir: str, *, admin_key: str | None = None, clock: Clock = t
             if auth is None:
                 return _json_response(401, _error("UNAUTHORIZED", "нужен заголовок Authorization: Bearer <ключ>"))[0]
             game, seat = auth
+            # The phase the call started in: a phase that the deadline (tick) or this very call (its `ready`)
+            # closes is not the phase the player has seen, so the call is not activity in the new one.
+            seq_at_arrival = game.phase_seq
             game.tick()
             turn, phase_now = game.state.turn, game.phase
             host = HOST_HEADER in request.headers or route.split(" ", 1)[1] in HOST_ROUTES
+            request.state.dah_host = host
             if not host:
                 game.note_first_call(seat)
+                game.note_player_activity(seat, seq_at_arrival, arrival=True,
+                                          passive=route.split(" ", 1)[1] in PASSIVE_ROUTES)
             raw = b""
             try:
                 raw = await _read_body(request)
@@ -269,6 +396,8 @@ def create_app(games_dir: str, *, admin_key: str | None = None, clock: Clock = t
                 status, content = STATUS.get(exc.code, 400), _error(exc.code, exc.message)
             else:
                 status, content = await _run(handler, game, seat, request, body)
+            if not host:
+                game.note_player_activity(seat, seq_at_arrival)
             response, resp_chars = _json_response(status, content)
             req_chars = len(raw.decode("utf-8", errors="replace")) + len(request.url.query)
             game.record_call(seat, route, req_chars, resp_chars, (time.perf_counter() - started) * 1000, status,

@@ -2,23 +2,52 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://dah.local/schemas/faction.schema.json",
   "type": "object",
-  "required": ["id", "name", "starting"],
+  "required": [
+    "id",
+    "name",
+    "starting"
+  ],
   "additionalProperties": false,
   "properties": {
-    "id": {"$ref": "common.schema.json#/$defs/id"},
-    "name": {"$ref": "common.schema.json#/$defs/name"},
-    "lore": {"type": "string", "maxLength": 1000},
-    "bonuses": {"$ref": "common.schema.json#/$defs/effects"},
-    "penalties": {"$ref": "common.schema.json#/$defs/effects"},
+    "id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "name": {
+      "$ref": "common.schema.json#/$defs/lname"
+    },
+    "lore": {
+      "$ref": "common.schema.json#/$defs/lore"
+    },
+    "bonuses": {
+      "$ref": "common.schema.json#/$defs/effects"
+    },
+    "penalties": {
+      "$ref": "common.schema.json#/$defs/effects"
+    },
     "starting": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "resources": {"$ref": "common.schema.json#/$defs/amounts"},
-        "units": {"$ref": "common.schema.json#/$defs/amounts"},
-        "buildings": {"type": "array", "items": {"$ref": "common.schema.json#/$defs/ref"}},
-        "effects": {"$ref": "common.schema.json#/$defs/effects"}
+        "resources": {
+          "$ref": "common.schema.json#/$defs/amounts"
+        },
+        "units": {
+          "$ref": "common.schema.json#/$defs/amounts"
+        },
+        "buildings": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/$defs/ref"
+          }
+        },
+        "effects": {
+          "$ref": "common.schema.json#/$defs/effects"
+        }
       }
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 1000
     }
   }
 }

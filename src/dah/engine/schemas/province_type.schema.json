@@ -2,13 +2,34 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://dah.local/schemas/province_type.schema.json",
   "type": "object",
-  "required": ["id", "name", "income"],
+  "required": [
+    "id",
+    "name",
+    "income"
+  ],
   "additionalProperties": false,
   "properties": {
-    "id": {"$ref": "common.schema.json#/$defs/id"},
-    "name": {"$ref": "common.schema.json#/$defs/name"},
-    "short": {"$ref": "common.schema.json#/$defs/short"},
-    "income": {"$ref": "common.schema.json#/$defs/amounts"},
-    "defense_mul": {"type": "number", "exclusiveMinimum": 0, "maximum": 5}
+    "id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "name": {
+      "$ref": "common.schema.json#/$defs/lname"
+    },
+    "short": {
+      "$ref": "common.schema.json#/$defs/short"
+    },
+    "income": {
+      "$ref": "common.schema.json#/$defs/amounts"
+    },
+    "defense_mul": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 5
+    },
+    "conquest_value": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5
+    }
   }
 }

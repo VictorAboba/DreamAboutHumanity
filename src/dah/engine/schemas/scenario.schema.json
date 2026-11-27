@@ -2,44 +2,243 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://dah.local/schemas/scenario.schema.json",
   "type": "object",
-  "required": ["id", "name", "map", "factions", "turn_limit", "phase_limits"],
+  "required": [
+    "id",
+    "name",
+    "map",
+    "factions",
+    "turn_limit",
+    "phase_limits"
+  ],
   "additionalProperties": false,
   "$defs": {
     "phase_messages": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "per_recipient": {"type": "integer", "minimum": 0},
-        "private": {"type": "integer", "minimum": 0},
-        "public": {"type": "integer", "minimum": 0}
+        "per_recipient": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "private": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "public": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     }
   },
   "properties": {
-    "id": {"$ref": "common.schema.json#/$defs/id"},
-    "name": {"$ref": "common.schema.json#/$defs/name"},
-    "map": {"$ref": "common.schema.json#/$defs/ref"},
-    "factions": {"type": "array", "minItems": 1, "items": {"$ref": "common.schema.json#/$defs/ref"}},
-    "turn_limit": {"type": "integer", "minimum": 1, "maximum": 200},
+    "id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "name": {
+      "$ref": "common.schema.json#/$defs/name"
+    },
+    "map": {
+      "$ref": "common.schema.json#/$defs/ref"
+    },
+    "factions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "common.schema.json#/$defs/ref"
+      }
+    },
+    "turn_limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 200
+    },
+    "end_turn_min": {
+      "description": "core 0.8.2: the earliest last turn; the game ends on a hidden turn end_turn_min..turn_limit",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 200
+    },
     "phase_limits": {
       "type": "object",
-      "required": ["negotiation_1", "actions", "negotiation_2"],
+      "required": [
+        "negotiation_1",
+        "actions",
+        "negotiation_2"
+      ],
       "additionalProperties": false,
       "properties": {
-        "negotiation_1": {"$ref": "common.schema.json#/$defs/duration"},
-        "actions": {"$ref": "common.schema.json#/$defs/duration"},
-        "negotiation_2": {"$ref": "common.schema.json#/$defs/duration"}
+        "negotiation_1": {
+          "$ref": "common.schema.json#/$defs/duration"
+        },
+        "actions": {
+          "$ref": "common.schema.json#/$defs/duration"
+        },
+        "negotiation_2": {
+          "$ref": "common.schema.json#/$defs/duration"
+        },
+        "setup": {
+          "$ref": "common.schema.json#/$defs/duration"
+        }
       }
     },
     "message_limits": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "negotiation_1": {"$ref": "#/$defs/phase_messages"},
-        "negotiation_2": {"$ref": "#/$defs/phase_messages"},
-        "max_chars": {"type": "integer", "minimum": 1, "maximum": 4000}
+        "negotiation_1": {
+          "$ref": "#/$defs/phase_messages"
+        },
+        "negotiation_2": {
+          "$ref": "#/$defs/phase_messages"
+        },
+        "max_chars": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4000
+        }
       }
     },
-    "overrides": {"$ref": "common.schema.json#/$defs/effects"}
+    "diplomacy_limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "gifts_per_phase": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 50
+        },
+        "pact_proposals_per_phase": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 50
+        },
+        "trade_proposals_per_phase": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 50
+        }
+      }
+    },
+    "overrides": {
+      "$ref": "common.schema.json#/$defs/effects"
+    },
+    "setup": {
+      "oneOf": [
+        {
+          "const": "none"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "unique_factions": {
+              "type": "boolean"
+            },
+            "artifacts": {
+              "enum": [
+                "draft",
+                "points",
+                "none"
+              ]
+            },
+            "artifact_offer": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10
+            },
+            "artifact_points": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 50
+            },
+            "artifact_pool": {
+              "$ref": "common.schema.json#/$defs/refs"
+            }
+          }
+        }
+      ]
+    },
+    "systems": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "espionage": {
+          "type": "boolean"
+        },
+        "conquest": {
+          "type": "boolean"
+        },
+        "discoveries": {
+          "type": "boolean"
+        },
+        "trade": {
+          "type": "boolean"
+        }
+      }
+    },
+    "scoring": {
+      "description": "stage 4 (SCORING.md 1.2): weights of score sources; a source left out has weight 0; no key: {territory: 1}",
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "territory": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
+        },
+        "science": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
+        },
+        "works": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
+        },
+        "war": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
+        },
+        "intel": {
+          "description": "core 0.7.0 (decision 27): points for successful spy missions",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
+        },
+        "objectives": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
+        }
+      }
+    },
+    "objectives": {
+      "description": "stage 4 (SCORING.md 2.5): secret objectives dealt to each seat",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dealt": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
+        },
+        "offer": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
+        },
+        "pool": {
+          "$ref": "common.schema.json#/$defs/refs"
+        }
+      }
+    },
+    "discoveries": {
+      "description": "stage 5 (ABANDONED_LANDS.md 11): knobs of the Abandoned lands (checked by the engine)",
+      "type": "object"
+    }
   }
 }

@@ -1,0 +1,28 @@
+# Mirrors: counter-intelligence (decision 21, SPY_AND_CONQUEST.md section 5). The branch has requires_system:
+# espionage, so without espionage it and its techs are not in the game at all. It mirrors Mystery: that branch makes
+# one's own Shades harder to catch, this one makes foreign Shades easier to catch. No faction has it cheaper.
+- id: mirror_wards
+  name: {ru: Зеркальные стражи, en: Mirror Wards}
+  branch: mirrors
+  tier: 1
+  cost: 10
+  unlocks: [mirror_hall]
+  effects:
+    - {effect: modify, target: spy.mirrors, op: add, value: 1}
+# 3b adds the Ward lines here: spy.ward.bonus +1, spy.ward.cost.alloy -2.
+- id: watch_drill
+  name: {ru: Караульная выучка, en: Watch Drill}
+  branch: mirrors
+  tier: 1
+  cost: 10
+  effects:
+    - {effect: modify, target: spy.detect.army, op: add, value: 1}
+- id: glass_inquest
+  name: {ru: Зеркальный дознаватель, en: Glass Inquest}
+  branch: mirrors
+  tier: 2
+  cost: 18
+  requires_tier: {tier: 1, count: 2}
+  effects:
+    - {effect: modify, target: spy.mirrors, op: add, value: 1}
+    - {effect: modify, target: spy.attribution.base, op: add, value: 0.15}

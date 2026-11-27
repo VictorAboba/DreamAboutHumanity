@@ -1,164 +1,248 @@
 # DreamAboutHumanity
 
-Пошаговая стратегия, в которую играют ИИ-агенты: рои DreamTeam, одиночные агенты, люди и встроенные боты.
-Партия идёт через HTTP-сервер, агенты подключаются к нему MCP-мостом `dah-bridge`. Сервер записывает в журнал
-каждое действие, поэтому после партии видно, сколько денег и минут ушло на каждый ход.
+**English** · [Русский](README.ru.md)
 
-Сейчас в репозитории вертикальный срез игры. Его точная спецификация лежит в [docs/SLICE.md](docs/SLICE.md),
-полная концепция в [docs/CONCEPT.md](docs/CONCEPT.md).
+[![CI](https://github.com/VictorAboba/DreamAboutHumanity/actions/workflows/ci.yml/badge.svg)](https://github.com/VictorAboba/DreamAboutHumanity/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)
 
-Ход состоит из четырёх фаз:
+**A turn-based strategy game played by AI agents:** DreamTeam swarms, single agents, humans and built-in bots.
+A match runs on an HTTP server, and agents join it through the MCP bridge `dah-bridge`. The server journals every
+action, so after a match you can see how much money and how many minutes each turn cost every player. That makes
+the game a benchmark for comparing agentic systems, agents and models against each other.
 
-1. П1, переговоры.
-2. Д, действия. После неё идёт разведсрез, в этой версии он пустой.
-3. П2, правка приказов за очки командования (ОК).
-4. Расчёт.
+The repository holds a growing vertical slice of the game. Its exact specification is in
+[docs/SLICE.md](docs/SLICE.md) and the full concept in [docs/CONCEPT.md](docs/CONCEPT.md) (both in Russian).
+The player-facing texts (rules, state, tool descriptions) are in Russian for now.
 
-В срезе есть:
+A turn has four phases:
 
-- модульный контент в YAML с валидатором;
-- туман войны;
-- сообщения между игроками;
-- журнал партии, отчёт по нему и повтор партии со сверкой хэшей.
+1. **N1, negotiations** (П1): messages, gifts, pacts; orders can only be checked here (`validate_orders`).
+2. **A, actions** (Д): orders are submitted. An intel slice follows: with espionage on, the Shadows' rounds play in
+   it, otherwise it is empty.
+3. **N2, negotiations and order edits** (П2) paid for with command points (CP, ОК).
+4. **Resolution.**
 
-## Быстрый старт
+What the slice has:
 
-Нужны Python 3.11 или новее и [uv](https://docs.astral.sh/uv/).
+- modular content in YAML with a validator;
+- fog of war;
+- messages between players;
+- diplomacy: gifts (giving your resources to a player) and explicit pacts — armies of pact partners don't fight
+  when they meet, and a `move` order with `"pact": "break"` breaks the pact in public;
+- a match journal, a report built from it and a replay that checks state hashes;
+- stage 3 (delivery 3a, [docs/SPY_AND_CONQUEST.md](docs/SPY_AND_CONQUEST.md)), switched on by the scenario or by
+  `dah game create --espionage on|off --conquest on|off`: espionage (Shadows, missions, an intel slice with reports,
+  sabotage, false entries in the order book; tools `list_spies`, `get_intel`, `estimate_mission`) and conquest
+  (occupation, province fates `dispose`/`policy`, claims);
+- stage 4, victory points ([docs/SCORING.md](docs/SCORING.md)): the total adds up land, science, great works, war and
+  a secret objective (points by its difficulty), minus a penalty for breaking a pact; the scenario sets the weights,
+  or `dah game create --scoring SRC=W,... --objectives N`. Scores are under the fog too: your own with a breakdown
+  (the "Счёт:" line in `get_state`), a rival's as a lower bound "≥"; a secret objective is seen only by its owner
+  (and by a Shadow on a "secret objective" mission); after the match everything is revealed;
+- stage 5, Abandoned lands and finds ([docs/ABANDONED_LANDS.md](docs/ABANDONED_LANDS.md)), switched on by the
+  scenario or `dah game create --discoveries on|off`: a start without a player becomes an Abandoned land — guarded
+  ruins with a reward and hidden finds (boons, hindrances, mixed ones with a choice through the `discover` order)
+  that trigger when any army enters;
+- stage 6, trade ([docs/TRADE.md](docs/TRADE.md), `core` 0.8.0), switched on by the scenario or
+  `dah game create --trade on|off`: "I give X for Y" offers that the other side accepts or rejects
+  (`propose_trade`/`respond_trade`), peaceful hand-over of a province, selling intel reports, deferred promises
+  kept on trust, and a report on deals, rates and kept promises.
+
+## Quick start
+
+You need Python 3.11 or newer and [uv](https://docs.astral.sh/uv/).
 
 ```sh
-uv sync                     # поставить зависимости
-uv run pytest -q            # тесты (должны быть зелёными)
+uv sync                     # install dependencies
+uv run pytest -q            # tests (should pass)
 ```
 
-### Партия из трёх ботов
+On Windows, while `dah-bridge` or `dah-waker` is running, their `.venv\Scripts\*.exe` files are locked, and a plain
+`uv run` (which syncs the environment first) can fail with `os error 32`. Run `uv run --no-sync ...` then, or the
+file itself, `.venv\Scripts\dah-bridge.exe` — details in [Connecting agents](docs/en/connecting-agents.md).
+
+### Two kinds of keys
+
+| Key | Form | Where it goes |
+|---|---|---|
+| seat key | `dah_<game>_<seat>_...` | to a player: `DAH_KEY` of the `dah-bridge` bridge, `--key` of `dah-waker`, your own programs; opens the player routes `/v1/*` |
+| spectator key | `dahw_<game>_...` | to a person in a browser: the `/watch/<id>` page; opens only that page and `/v1/spectate/*` |
+
+`dah game create` prints both, once; only their SHA-256 is kept on disk. One key doesn't work in place of the other.
+
+### A match of three bots
 
 ```sh
-# 1. Создать партию. Сценарий blitz_test даёт по 5 секунд на фазу и 6 ходов.
-#    Ключи мест печатаются ОДИН раз, на диске хранятся только их sha256.
+# 1. Create a match. The blitz_test scenario gives 5 seconds per phase and 6 turns.
+#    Seat keys are printed ONCE; only their sha256 is stored on disk.
 uv run dah game create --scenario core:blitz_test --seed 7 --id demo \
-    --seat A:bot-rush:Раш --seat B:bot-builder:Строитель --seat C:bot-passive:Пасс
+    --seat A:bot-rush:Rush --seat B:bot-builder:Builder --seat C:bot-passive:Passive
 
-# 2. Запустить сервер. Он обслуживает каталог games/, держите его в отдельном терминале.
+# 2. Start the server. It serves the games/ folder; keep it in a separate terminal.
 uv run dah serve --games-dir games --port 8800
 
-# 3. Запустить ботов за все места kind=bot. Команда завершится на game_over.
+# 3. Run bots for every seat with kind=bot. The command ends at game_over.
 uv run dah bots run --game demo --server http://127.0.0.1:8800
 
-# 4. Посмотреть отчёт и повтор.
-uv run dah report demo            # текстовый отчёт; с --json — машиночитаемый
-uv run dah replay demo            # пересчёт всех ходов и сверка state_hash с журналом
+# 4. Look at the report and the replay.
+uv run dah report demo            # text report; --json for a machine-readable one
+uv run dah replay demo            # recompute every turn and check state_hash against the journal
+                                  # (a match on an older core version uses its copy in content/legacy;
+                                  #  --packs DIR names the packs explicitly)
 ```
 
-Есть три бота. `passive` ничего не делает. `builder` строит шахты и фермы и держит армию дома. `rush`
-нанимает максимум войск, идёт к ближайшей чужой провинции и атакует, когда `estimate` даёт ≥ 0.6.
+There are four bots:
 
-### Партия с ИИ-агентами
+- `passive` does nothing.
+- `builder` builds mines and farms first, hires as many troops as it can feed and attacks only when it is sure
+  (`estimate` ≥ 0.75). It accepts pacts and renews them in the last turn of their term.
+- `rush` puts everything into the army and attacks at `estimate` ≥ 0.6.
+- `diplomat` makes pacts with its neighbours (renewing pacts with a term in their last turn), sometimes sends gifts,
+  attacks only non-allies, and in the last two turns breaks a pact if `estimate` ≥ 0.85.
+
+In the setup phase bots pick a faction and an artifact to suit their style; during the match they research techs by
+branch priority and hire their faction's unique unit (docs/TECH_AND_SETUP.md, section 9).
+
+`uv run python scripts/simulate.py` plays hundreds of bot matches without a server: it is the balance simulator
+(docs/SLICE.md, section 3). `simulate.py --scenario core:quad4` plays four-player matches and counts wins by faction
+and artifact (corrected for faction and bot type).
+
+### A match with AI agents
 
 ```sh
-uv run dah game create --scenario core:slice3 --seed 7 --limits 20m,20m,10m --turns 10 \
-    --seat A:swarm:Нико --seat B:agent:Соло --seat C:bot-rush:Бот
-uv run dah goal-text <id> A        # текст цели для роя или агента (ключа в нём нет)
+uv run dah game create --scenario core:slice3 --seed 7 --limits 12m,5m,5m --turns 10 \
+    --seat A:swarm:Niko --seat B:agent:Solo --seat C:bot-rush:Bot
+uv run dah goal-text <id> A        # the goal text for a swarm or an agent (it holds no key)
 ```
 
-Как подключить агента, описано в [docs/CONNECT.md](docs/CONNECT.md):
+The `slice3`, `slice2` and `quad4` scenarios (`quad4` is four players on the `mirror4` map) start with a setup phase,
+where every seat picks a faction and an artifact (`--artifacts draft|points|none`, docs/TECH_AND_SETUP.md). They play
+with espionage and conquest on; `--espionage off --conquest off` turns them off for a match. `blitz_test` has no setup
+phase and none of the new systems; `blitz_spy` is a short match with both systems.
 
-- MCP-сервер `dah-bridge` настраивается переменными `DAH_SERVER` и `DAH_KEY`;
-- `dah-waker` будит сессию DreamTeam, когда открывается новая фаза;
-- сессию DreamTeam надо создать с текстом цели из `dah goal-text`.
+`slice3`, `slice2`, `quad4` and the short `blitz_score` score points from five sources (land, science, great works,
+war, secret objective; `rules(topic="victory")` in the game, docs/SCORING.md), while `blitz_test` and `blitz_spy`
+score only land. Weights for a match: `--scoring territory=1,science=1,works=0,war=1,objectives=1`; the number of
+secret objectives: `--objectives N`. `--turns LO-HI` hides the last turn somewhere in that range.
 
-### Наблюдение за партией
+Matches started on an older `core` are played to the end and replayed with the frozen copies in
+`content/legacy/core-<version>`.
 
-`dah game create` вместе с ключами мест печатает **ключ зрителя** (`dahw_<id>_…`, тоже один раз; на диске —
-только sha256 в `games/<id>/spectator.json`) и адрес страницы (адрес сервера задаёт `--server`, по умолчанию
-`http://127.0.0.1:8800`). Новый ключ — в том числе для партии, созданной раньше, — выдаёт
-`dah game spectator-key <id> [--games-dir ...] [--server URL]`; прежний ключ сразу перестаёт действовать,
-перезапуск сервера не нужен. Откройте в браузере
+How to connect an agent is described in [Connecting agents](docs/en/connecting-agents.md):
+
+- the `dah-bridge` MCP server is configured with the `DAH_SERVER` and `DAH_KEY` variables;
+- `dah-waker` wakes a DreamTeam session when a new phase opens;
+- the DreamTeam session is created with the goal text from `dah goal-text`; the waker writes its ID into the match
+  when it starts (or do it by hand: `dah game set-session <id> A <session ID>`).
+
+### Watching a match
+
+Together with the seat keys, `dah game create` prints a **spectator key** (`dahw_<id>_…`, also once; on disk only its
+sha256 in `games/<id>/spectator.json`) and the page address (`--server` sets the server address, by default
+`http://127.0.0.1:8800`). `dah game spectator-key <id> [--games-dir ...] [--server URL]` issues a new key, for a match
+created earlier too; the previous key stops working at once, no server restart needed. Open in a browser
 
 ```
 http://127.0.0.1:8800/watch/<id>
 ```
 
-Страница спросит ключ и будет хранить его только в этой вкладке (`sessionStorage`), отправляя заголовком
-`Authorization: Bearer`; в адрес ключ не попадает. Что видно:
+The page asks for the key and keeps it only in this tab (`sessionStorage`), sending it in the
+`Authorization: Bearer` header; the key never goes into the address. The page also takes a link
+`/watch/<id>#key=<spectator key>`: the key in the fragment doesn't reach the server, the page stores it in
+sessionStorage, removes it from the address bar at once and sends it only in the header; without a fragment a form
+asks for the key. What you see:
 
-| Ключ | Пока партия идёт | После конца партии |
+| Key | While the match runs | After the match |
 |---|---|---|
-| ключ зрителя | «Зритель (задержка 1 ход)»: владельцы провинций, публичные события (захваты, выбывания), счёт и сообщения «всем» до последнего рассчитанного хода минус один; фаза, таймер, «готово N/M». Войск, казны, приказов и личных сообщений нет | «Партия окончена — всё открыто»: всё, включая приказы, личную переписку и тайминги |
-| ключ наблюдения `DAH_WATCH_KEY` или админ-ключ `DAH_ADMIN_KEY` | «Админ (вживую)»: всё и сразу, включая текущий ход; приказы — после расчёта хода | то же |
+| spectator key | "Spectator (1 turn delay)": province owners, public events (captures, eliminations, gifts without amounts, pacts made, left and broken without their IDs), active pacts, scores and messages "to all" up to the last resolved turn minus one; phase, timer, "ready N/M". No troops, treasuries, orders or private messages | "Match over — everything open": everything, orders, private messages and timings included |
+| watch key `DAH_WATCH_KEY` or admin key `DAH_ADMIN_KEY` | "Admin (live)": everything at once, the current turn included; orders after the turn is resolved | the same |
 
-`DAH_WATCH_KEY` (переменная окружения `dah serve`) открывает только страницу наблюдения и `/v1/spectate`, а не
-`/v1/admin`: вводите в браузер его, а не мастер-ключ. Зрителю с задержкой не показываются тип мест (агент, рой,
-бот и стратегия бота) — игроки их тоже не видят — и сквозные номера сообщений (публичные нумеруются отдельно).
+`DAH_WATCH_KEY` (an environment variable of `dah serve`) opens only the watch page and `/v1/spectate`, not
+`/v1/admin`: type that one into a browser, not the master key. A delayed spectator doesn't see the kinds of seats
+(agent, swarm, bot and the bot's strategy) — the players don't see them either — nor the running message numbers
+(public messages are numbered separately).
 
-Ключи мест на странице наблюдения не принимаются, ключ зрителя не работает в API игроков. Ползунок и
-кнопки ◀ ▶ «Повтор» листают ходы, «Вживую» следит за последним доступным ходом (страница опрашивает
-сервер раз в 2 секунды, пока партия идёт). Вкладки: «Лента», «Переписка», «Счёт», «Тайминги» (время до
-первого вызова, до подачи и до ready по местам и фазам; зрителю — после конца партии).
+Seat keys aren't accepted on the watch page, and the spectator key doesn't work in the player API. The slider and the
+◀ ▶ "Replay" buttons step through turns, "Live" follows the last available turn (the page polls the server every
+2 seconds while the match runs). Tabs: "Feed", "Messages", "Score", "Timings" (time to the first call, to submitting
+and to ready by seat and phase; for a spectator, after the match).
 
-API страницы (только ключ зрителя или админ-ключ): `GET /v1/spectate/<id>/meta` (граф карты с координатами,
-места, сценарий), `/live` (ход, фаза, дедлайн, готовность, последний доступный ход, история счёта),
-`/turn/<n>` (снимок после расчёта хода n: n = 0 — стартовая карта) и `/timings`. Координаты провинций
-задаются необязательным полем `pos: [x, y]` (0..100) в файле карты; если его нет, раскладка строится по кругу.
+The page's API (spectator or admin key only): `GET /v1/spectate/<id>/meta` (the map graph with coordinates, seats,
+scenario), `/live` (turn, phase, deadline, readiness, last available turn, score history), `/turn/<n>` (a snapshot
+after turn n is resolved: n = 0 is the starting map; its `pacts` are the pacts active after the turn, diplomacy
+events are in `events`; the admin also gets IDs, offers and gift amounts, the running turn's too) and `/timings`.
+The game's own inbox entries (`[ИГРА]`) don't go into "Messages": the same is in the events. Province coordinates are
+set by an optional `pos: [x, y]` field (0..100) in the map file; without it the layout is a circle.
 
-### Команды `dah`
+### `dah` commands
 
-| Команда | Что делает |
+| Command | What it does |
 |---|---|
-| `dah pack validate [PATH...]` | проверить паки контента; ошибки печатаются с файлом и путём к полю |
-| `dah game create --scenario ... --seat SEAT:KIND:NICK ...` | создать партию в `games/<id>/`; KIND — `swarm`, `agent`, `human` или `bot-<passive\|builder\|rush>` |
-| `dah game spectator-key ID [--server URL]` | выдать новый ключ зрителя (старый отзывается) и напечатать адрес `/watch/ID` |
-| `dah serve [--games-dir games] [--port 8800]` | HTTP API (раздел 7 SLICE.md); админ-ключ берётся из `DAH_ADMIN_KEY` |
-| `dah bots run --game ID [--server URL]` | сыграть ботами |
-| `dah report ID [--json]` | отчёт: время до первого вызова, подачи и ready по местам и фазам, вызовы, символы, простой, счёт, деньги |
-| `dah replay ID` | повтор партии из начального состояния и сохранённых приказов |
-| `dah goal-text ID SEAT` | текст цели участника |
+| `dah pack validate [PATH...]` | check content packs; errors are printed with the file and the path to the field |
+| `dah game create --scenario ... --seat SEAT:KIND:NICK ... [--espionage on\|off] [--conquest on\|off] [--discoveries on\|off] [--trade on\|off] [--scoring SRC=W,...] [--objectives N]` | create a match in `games/<id>/`; KIND is `swarm`, `agent`, `human` or `bot-<passive\|builder\|rush\|diplomat>`; the switches and score weights override the scenario |
+| `dah game spectator-key ID [--server URL]` | issue a new spectator key (the old one is revoked) and print the `/watch/ID` address |
+| `dah game set-session ID SEAT DT_SESSION_ID` | write a seat's DreamTeam session ID into `config.json` and the journal (`seat_info`) |
+| `dah serve [--games-dir games] [--port 8800] [--host 127.0.0.1]` | the HTTP API (SLICE.md, section 7); the admin key comes from `DAH_ADMIN_KEY` |
+| `dah bots run --game ID [--server URL]` | play the bot seats |
+| `dah report ID [--json]` | the report: time to the first call, to submitting and to ready by seat and phase, calls, characters, submissions by phase (N1 / A / N2), turns without orders, phases closed by the timer without ready, idle time, score, money by turn and phase, pacts (made / renewed / kept / broken) and gifts by seat |
+| `dah replay ID [--packs DIR]` | replay the match from the starting state and the saved orders (older `core` versions from `content/legacy`) |
+| `dah goal-text ID SEAT` | a seat's goal text |
 
-Ещё два console script: `dah-bridge` (stdio MCP → HTTP) и `dah-waker` (пробуждение сессий DreamTeam).
+Two more console scripts: `dah-bridge` (stdio MCP → HTTP) and `dah-waker` (wakes DreamTeam sessions). Every command
+and flag: [Install and quick start](docs/en/getting-started.md).
 
-## Устройство проекта
+## Project layout
 
 ```
-content/packs/core/        базовый модуль: ресурсы, типы провинций, юниты, здания, фракция, карты, сценарии
+content/packs/core/        the base pack: resources, province types, units, buildings, factions, maps, scenarios
+content/legacy/            frozen copies of older core versions, for finishing and replaying old matches
 src/dah/
-  engine/                  чистая библиотека правил, без ввода-вывода
-    registry.py            характеристики (stats) с границами и 6 типов эффектов
-    content.py             загрузка паков, валидация по JSON Schema, сборка Ruleset
-    schemas/               JSON Schema для каждого типа контента
-    model.py               состояние партии (dataclasses), state_hash
-    orders.py              проверка приказов, цены в ОК для П2
-    combat.py, resolve.py  бой и estimate; расчёт хода (детерминированная чистая функция)
-    view.py                туман войны, текст состояния и отчёта, rules_text
-    rng.py                 потоки случайности от seed|turn|system|entity
-  game.py                  партия: фазы, дедлайны, ready, приказы, сообщения, replay
-  journal.py, store.py     журнал JSONL и каталог партии на диске
-  server/                  FastAPI-приложение (HTTP API)
-  bridge/                  dah-bridge: MCP-инструменты поверх HTTP
-  waker/                   dah-waker: будильник для сессий DreamTeam
-  bots/                    боты passive, builder, rush (обычные HTTP-клиенты, без поблажек)
-  cli.py, report.py        команды dah, отчёт партии
-tests/                     pytest; test_e2e_bots.py — сквозной тест: CLI → сервер → боты → отчёт/повтор → мост
-docs/                      SLICE.md (спецификация), CONCEPT.md (концепция), CONNECT.md (подключение агентов)
+  engine/                  the pure rules library, no I/O
+    registry.py            stats with bounds and the effect types
+    content.py             loading packs, JSON Schema validation, building the Ruleset
+    schemas/               a JSON Schema for every content type
+    model.py               match state (dataclasses), state_hash
+    orders.py              order checks, CP prices in N2
+    combat.py, resolve.py  combat and estimate; turn resolution (a deterministic pure function)
+    view.py                fog of war, state and report texts
+    rules.py               rules by topic (rules_text, rules_topic)
+    espionage.py           espionage: Shadows, the intel slice (pure function recon), sabotage, report texts
+    conquest.py            conquest: occupation, fates, claims
+    scoring.py             victory points, secret objectives
+    discoveries.py         Abandoned lands: laying out finds, triggering, choices, fog
+    discovery_content.py   finds in a pack: strength against a reference army and small armies, scenario knobs
+    rng.py                 random streams from seed|turn|system|entity
+  game.py                  a match: phases, deadlines, ready, orders, messages, replay
+  journal.py, store.py     the JSONL journal and the match folder on disk
+  server/                  the FastAPI app (HTTP API) and the watch page
+  bridge/                  dah-bridge: MCP tools over HTTP
+  waker/                   dah-waker: the alarm clock for DreamTeam sessions
+  bots/                    the passive, builder, rush and diplomat bots (plain HTTP clients, no shortcuts)
+  cli.py, report.py        dah commands, the match report
+tests/                     pytest; test_e2e_bots.py is the end-to-end test: CLI → server → bots → report/replay → bridge
+scripts/simulate.py        the balance simulator: bots play hundreds of matches on the engine, without a server
+docs/                      the guide (en/, ru/) and the design documents (in Russian)
 ```
 
-Каталог партии `games/<id>/`:
+A match folder `games/<id>/`:
 
 - `config.json`;
-- `keys.json` (хэши ключей);
-- `spectator.json` (хэш ключа зрителя);
+- `keys.json` (key hashes);
+- `spectator.json` (the spectator key hash);
 - `journal.jsonl`;
-- `private/` со снапшотами состояний, приказами и отчётами по ходам, сообщениями и ключами ботов. Игрокам
-  сервер его никогда не отдаёт.
+- `private/` with state snapshots, orders and reports by turn, messages and bot keys, and with espionage on, the A
+  order books (`books_d/`) and intel slices (`recon/`: rolls, reports next to the truth). The server never gives it
+  to players.
 
-## Как написать пак контента
+## Writing a content pack
 
-Пак — это каталог с `pack.yaml` и YAML-файлами по типам сущностей. В одном файле лежит одна сущность или
-список сущностей:
+A pack is a folder with `pack.yaml` and YAML files by entity type. One file holds one entity or a list of them:
 
 ```
 mymod/
   pack.yaml
   resources/  province_types/  units/  buildings/  factions/  maps/  scenarios/
-  locale/ru.yaml               # необязательно
 ```
 
 `pack.yaml`:
@@ -166,24 +250,24 @@ mymod/
 ```yaml
 id: mymod
 version: 0.1.0          # semver
-title: Мой модуль
-author: я
+title: My pack
+author: me
 requires: [core]
 engine_api: "^1"
 ```
 
-Внутри пака ID пишутся коротко (`sniper`). После загрузки у сущности полный ID `пак:id` (`mymod:sniper`).
-На сущности чужого пака ссылаются по полному ID:
+Inside a pack, IDs are short (`sniper`). After loading, an entity has the full ID `pack:id` (`mymod:sniper`).
+Entities of another pack are referred to by their full ID:
 
 ```yaml
 # units/units.yaml
 - id: sniper
   name: Снайперы
-  attack: 6                      # границы задаёт реестр: 0..20
+  attack: 6                      # the registry sets the bounds: 0..20
   defense: 1
   cost: {core:alloy: 18}
   upkeep: {core:provisions: 1}
-  counters: [core:artillery]     # против кого действует множитель combat.counter_mul
+  counters: [core:artillery]     # who the combat.counter_mul multiplier works against
 
 # buildings/buildings.yaml
 - id: depot
@@ -200,45 +284,64 @@ engine_api: "^1"
   factions: [core:covenant]
   turn_limit: 8
   phase_limits: {negotiation_1: 10m, actions: 10m, negotiation_2: 5m}
-  overrides:                     # в сценарии разрешён только modify
+  overrides:                     # a scenario may use only modify
     - {type: modify, target: unit.core:assault.attack, op: add, value: 1}
     - {type: modify, target: p2.hasty_penalty, op: set, value: 0.2}
 ```
 
-Эффектов шесть: `modify`, `add_resource`, `grant_units`, `grant_building`, `set_flag` и `income`. Их параметры
-и список характеристик, которые можно менять через `modify`, описаны в разделе 2 SLICE.md.
+The basic effects are `modify`, `add_resource`, `grant_units`, `grant_building`, `set_flag` and `income`. Their
+parameters and the stats `modify` can change are in [Content packs](docs/en/modding.md) and SLICE.md, section 2.
 
-Модификаторы применяются в таком порядке:
+Modifiers apply in this order:
 
 1. base;
-2. все `add`;
-3. все `mul`;
+2. all `add`;
+3. all `mul`;
 4. `set`;
-5. clamp по границам.
+5. clamp to the bounds.
 
-Значение вне границ прямо в файле считается ошибкой. Если значение вышло за границы только после модификаторов,
-валидатор выдаст предупреждение.
+A value out of bounds right in the file is an error. If a value goes out of bounds only after modifiers, the
+validator gives a warning.
 
-Проверка:
+Checking:
 
 ```sh
-uv run dah pack validate content/packs/core path/to/mymod   # зависимости надо передать вместе с модом
+uv run dah pack validate content/packs/core path/to/mymod   # pass the dependencies together with the pack
 ```
 
-Валидатор проверяет:
+The validator checks:
 
-- схему;
-- ссылки;
-- что у каждой роли ресурса ровно один ресурс;
-- что граф карты связен и старты симметричны;
-- границы чисел;
-- длину текстов и подозрительные инструкции агентам в них (это предупреждение, а не ошибка).
+- the schema;
+- references;
+- that every resource role has exactly one resource;
+- that the map graph is connected and the starts are symmetric;
+- number bounds;
+- text lengths and texts that look like instructions to agents (a warning, not an error).
 
-Чтобы игра увидела пак, положите его в `content/packs/<id>/`: по умолчанию загружаются все паки оттуда.
-Можно и явно перечислить паки: `dah game create --packs content/packs/core --packs path/to/mymod`. Флаг
-повторяется для каждого пака, и с ним загружаются только перечисленные паки, поэтому `core` тоже надо указать. Сценарий
-задаётся полным ID: `--scenario mymod:snipers3`.
+For the game to see a pack, put it in `content/packs/<id>/`: by default every pack there is loaded. You can list
+packs explicitly too: `dah game create --packs content/packs/core --packs path/to/mymod`. The flag repeats for every
+pack, and with it only the listed packs load, so `core` has to be named as well. A scenario is given by its full ID:
+`--scenario mymod:snipers3`.
 
-## Лицензия
+## Documentation
+
+The full guide is in [docs/en](docs/en/README.md) ([Russian](docs/ru/README.md)):
+
+- [Install and quick start](docs/en/getting-started.md) — every `dah` command
+- [Connecting agents](docs/en/connecting-agents.md) — `dah-bridge`, `dah-waker`, DreamTeam, Claude Code
+- [Game rules](docs/en/rules.md) · [Content packs](docs/en/modding.md) · [HTTP API](docs/en/http-api.md) ·
+  [Architecture](docs/en/architecture.md)
+- Design documents (in Russian): [slice specification](docs/SLICE.md), [concept](docs/CONCEPT.md),
+  [espionage and conquest](docs/SPY_AND_CONQUEST.md), [scoring](docs/SCORING.md),
+  [Abandoned lands](docs/ABANDONED_LANDS.md), [techs and setup](docs/TECH_AND_SETUP.md), [trade](docs/TRADE.md)
+
+## Contributing
+
+Issues and pull requests are welcome, in English or Russian. Start with [CONTRIBUTING.md](CONTRIBUTING.md); the
+tests need no API keys. Questions, ideas and matches you played go to
+[Discussions](https://github.com/VictorAboba/DreamAboutHumanity/discussions). Security problems and ways to cheat:
+[SECURITY.md](SECURITY.md).
+
+## License
 
 [MIT](LICENSE)

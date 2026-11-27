@@ -19,6 +19,8 @@ import json
 import os
 import re
 import secrets
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -40,12 +42,35 @@ def make_spectator_key(game_id: str) -> str:
     return f"{SPECTATOR_KEY_PREFIX}{game_id}_{secrets.token_urlsafe(18).replace('_', 'x').replace('-', 'y')}"
 
 
+# Windows refuses os.replace while another handle has the target open (a reader thread, an antivirus or indexer
+# scan): a short retry rides that out instead of failing the call with a 500 (smoke10, 2026-11-27)
+REPLACE_RETRIES = 10
+REPLACE_PAUSE_S = 0.03
+
+
 def write_json(path: Path, data: Any) -> None:
-    """Atomic write: a crash never leaves a half-written snapshot."""
+    """Atomic write: a crash never leaves a half-written snapshot. The temp name is unique per thread, so two writers
+    of one file never share it."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1, sort_keys=True), encoding="utf-8")
-    os.replace(tmp, path)
+    replace_retrying(tmp, path)
+
+
+def replace_retrying(src: Path, dst: Path) -> None:
+    """os.replace with a few short retries on PermissionError; the last failure is raised (src is removed then)."""
+    for attempt in range(REPLACE_RETRIES):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == REPLACE_RETRIES - 1:
+                try:
+                    src.unlink()
+                except OSError:
+                    pass
+                raise
+            time.sleep(REPLACE_PAUSE_S * (attempt + 1))
 
 
 def read_json(path: Path) -> Any:

@@ -8,7 +8,8 @@ import json
 import pytest
 
 from dah.engine import SeatOrders, orders_hash
-from dah.game import Game, GameError, escape_untrusted, make_config, replay, wrap_untrusted
+from dah.game import Game, GameError, escape_untrusted, replay, wrap_untrusted
+from slice_helpers import slice_config
 from dah.journal import read_events
 from dah.store import GameDir, init_game_dir
 
@@ -32,7 +33,7 @@ def clock() -> FakeClock:
 
 
 def new_game(tmp_path, clock: FakeClock, **kwargs) -> Game:
-    config = make_config(game_id="g1", scenario="core:slice2", seats=SEATS, seed=7, **kwargs)
+    config = slice_config(game_id="g1", scenario="core:slice2", seats=SEATS, seed=7, **kwargs)
     gdir, _ = init_game_dir(tmp_path, config)
     return Game.create(gdir, clock)
 
@@ -54,13 +55,13 @@ def test_create_journals_setup_and_opens_p1(tmp_path, clock):
     game = new_game(tmp_path, clock)
     assert (game.state.turn, game.phase, game.phase_seq) == (1, "negotiation_1", 1)
     assert types(game) == ["game_created", "seat_info", "seat_info", "phase_open"]
-    assert game.seconds_left() == 1200
+    assert game.seconds_left() == 720
     assert game.gdir.load_turn("states", 1) is not None
 
 
 def test_deadline_closes_phase(tmp_path, clock):
     game = new_game(tmp_path, clock)
-    clock.advance(1199)
+    clock.advance(719)
     assert not game.tick()
     clock.advance(1)
     assert game.tick()
@@ -82,9 +83,10 @@ def test_all_ready_closes_phase_and_recon_step_is_journaled(tmp_path, clock):
 
 def test_stale_hash_and_edit_clears_ready(tmp_path, clock):
     game = new_game(tmp_path, clock)
+    ready_all(game)  # orders are given in actions (P1 takes ready() with any or no hash: no orders there)
     with pytest.raises(GameError) as err:
         game.set_ready("A", "deadbeef")
-    assert err.value.code == "STALE_HASH"
+    assert err.value.code == "STALE_HASH" and f'ready(confirm_hash="{orders_hash(game._book("A"))}")' in         err.value.message
     assert game.set_ready("A", orders_hash(game._book("A")))["ready"] == "1/2"
     game.submit("A", [{"kind": "fortify", "province": capital(game, "A")}])
     assert "A" not in game.ready_seats
@@ -109,7 +111,7 @@ def test_turn_resolves_with_autopilot(tmp_path, clock):
     ready_all(game)
     ready_all(game)
     assert (game.state.turn, game.phase) == (2, "negotiation_1")
-    assert game.state.provinces[cap].units["core:assault"] == 4
+    assert game.state.provinces[cap].units["core:assault"] == 5   # 4 at the start (core 0.2) + 1 recruited
     resolved = [e for e in read_events(game.gdir.journal_path) if e["type"] == "turn_resolved"][0]
     assert resolved["autopilot"] == ["B"] and set(resolved["idle_units"]) == {"A", "B"}
     assert game.gdir.load_turn("orders", 1)["A"]["orders"][0]["kind"] == "recruit"
@@ -161,7 +163,7 @@ def test_messages_limits_wrapping_and_phase(tmp_path, clock):
     assert private["text"].startswith("<<untrusted from=Нико>>") and private["text"].endswith("<</untrusted>>")
     assert "[DAH]" not in private["text"] and private["text"].count("<<") == 2
     assert game.inbox("B", since=2)["messages"][0]["id"] == 3
-    assert game.inbox("A")["messages"] == []
+    assert all(m["own"] and m["from"] == "ты" for m in game.inbox("A")["messages"])   # A's own sent ones
     ready_all(game)
     with pytest.raises(GameError) as err:
         game.send_message("A", "all", "в фазе действий")
@@ -236,6 +238,7 @@ def test_game_over_and_replay(tmp_path, clock):
 
 def test_order_ids_do_not_reveal_other_seats(tmp_path, clock):
     game = new_game(tmp_path, clock)
+    ready_all(game)
     fortify = lambda seat: [{"kind": "fortify", "province": capital(game, seat)}]  # noqa: E731
     assert game.submit("A", fortify("A"))["accepted"][0]["id"] == "o1"
     game.submit("B", fortify("B"))
@@ -247,7 +250,7 @@ def test_order_ids_do_not_reveal_other_seats(tmp_path, clock):
 
 def test_inbox_ids_count_only_own_messages(tmp_path, clock):
     seats = [*SEATS, {"seat": "C", "nick": "Сид", "kind": "agent"}]
-    config = make_config(game_id="g3", scenario="core:slice3", seats=seats, seed=7)
+    config = slice_config(game_id="g3", scenario="core:slice3", seats=seats, seed=7)
     game = Game.create(init_game_dir(tmp_path, config)[0], clock)
     game.send_message("B", ["Сид"], "секрет")
     assert game.send_message("C", ["Нико"], "привет")["message_id"] == 1
@@ -255,7 +258,11 @@ def test_inbox_ids_count_only_own_messages(tmp_path, clock):
     assert [m["id"] for m in inbox["messages"]] == [1] and inbox["last_id"] == 1
     game.send_message("B", "all", "всем")
     assert [m["id"] for m in game.inbox("A", since=1)["messages"]] == [2]
-    assert [m["id"] for m in game.inbox("C")["messages"]] == [1, 2]
+    # C: B's private message, C's own one (marked own, never someone else's private message), B's public one
+    c = game.inbox("C")["messages"]
+    assert [(m["id"], m.get("own", False)) for m in c] == [(1, False), (2, True), (3, False)]
+    assert "секрет" not in game.inbox("A")["text"] and "привет" not in game.inbox("B")["text"]
+    assert "ты → Нико: привет" in game.inbox("C")["text"]
 
 
 def test_dah_lookalikes_are_escaped():
@@ -273,14 +280,15 @@ def test_rules_chars_is_the_served_text(tmp_path, clock):
 
 def test_order_edits_journaled_in_every_phase(tmp_path, clock):
     game = new_game(tmp_path, clock)
+    ready_all(game)
     oid = game.submit("A", [{"kind": "fortify", "province": capital(game, "A")}])["accepted"][0]["id"]
     game.cancel("A", oid)
     (edit,) = [e for e in read_events(game.gdir.journal_path) if e["type"] == "order_edit"]
-    assert (edit["op"], edit["order_id"], edit["phase"], edit["turn"]) == ("cancel", oid, "negotiation_1", 1)
+    assert (edit["op"], edit["order_id"], edit["phase"], edit["turn"]) == ("cancel", oid, "actions", 1)
 
 
 def test_create_without_start_opens_first_phase_later(tmp_path, clock):
-    config = make_config(game_id="g1", scenario="core:slice2", seats=SEATS, seed=7)
+    config = slice_config(game_id="g1", scenario="core:slice2", seats=SEATS, seed=7)
     gdir, _ = init_game_dir(tmp_path, config)
     Game.create(gdir, clock, start=False)
     clock.advance(3600)

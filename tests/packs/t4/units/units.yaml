@@ -1,0 +1,1 @@
+- {id: militia, name: Ополчение, short: опол, attack: 2, defense: 2, cost: {alloy: 10}, upkeep: {provisions: 1}}

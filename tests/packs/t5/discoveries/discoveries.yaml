@@ -1,0 +1,76 @@
+- id: cache
+  name: {ru: Тайник Сплава, en: Alloy Cache}
+  kind: boon
+  rarity: common
+  effects: [{effect: add_resource, resource: alloy, amount: 30}]
+- id: mercs
+  name: Вольный отряд
+  kind: boon
+  rarity: common
+  effects: [{effect: grant_units, unit: assault, count: 2, where: here}]
+- id: relic
+  name: Реликвия
+  kind: boon
+  rarity: uncommon
+  effects:
+    - {effect: grant_artifact, artifact: vein}
+    - {effect: add_resource, resource: creed, amount: 10}
+- id: plague
+  name: Мор
+  kind: hindrance
+  rarity: minor
+  effects: [{effect: lose_units, frac: 0.25, min: 2}]
+- id: trap
+  name: Ловушка
+  kind: hindrance
+  rarity: major
+  effects:
+    - {effect: lose_units, frac: 0.4, min: 3}
+    - {effect: set_status, status: ravaged, turns: 2}
+- id: guards
+  name: Сторожевые автоматы
+  kind: hindrance
+  rarity: minor
+  effects: [{effect: spawn_neutral, units: {militia: 2}}]
+- id: lair
+  name: Логово
+  kind: hindrance
+  rarity: major
+  effects:
+    - effect: spawn_neutral
+      units: {militia: 2, assault: 1}
+      grow: {every: 2, add: {militia: 1}, cap: 5}
+      reward: [{effect: add_resource, resource: alloy, amount: 15}]
+- id: curse
+  name: Проклятие
+  kind: hindrance
+  rarity: major
+  effects:
+    - {effect: lose_units, frac: 0.2, min: 3}
+    - {effect: add_resource, resource: alloy, amount: -15}
+- id: golem
+  name: Спящий голем
+  kind: mixed
+  rarity: common
+  choices:
+    - id: wake
+      label: Разбудить
+      outcomes:
+        - {p: 0.7, effects: [{effect: grant_units, unit: walker, count: 2, where: here}]}
+        - {p: 0.3, effects: [{effect: lose_units, frac: 0.3}]}
+    - {id: leave, label: Не трогать, effects: []}
+  default_choice: leave
+- id: vault
+  name: Хранилище
+  kind: mixed
+  rarity: common
+  choices:
+    - id: force
+      label: Взломать
+      outcomes:
+        - {p: 0.6, effects: [{effect: add_resource, resource: alloy, amount: 36}]}
+        - {p: 0.4, effects: [{effect: lose_units, frac: 0.25}]}
+    - id: pry
+      label: Поддеть
+      effects: [{effect: add_resource, resource: alloy, amount: 12}]
+  default_choice: pry

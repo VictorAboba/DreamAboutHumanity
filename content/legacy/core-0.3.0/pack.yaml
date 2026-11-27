@@ -1,0 +1,9 @@
+# Frozen copy of core 0.3.0 (stage 2: techs, factions, artifacts, setup; before stage 3). Games created on it
+# (measurements m1-m5 included) replay and continue with it: `dah replay` and Game.load pick it when the journaled
+# ruleset hash matches (game.pick_ruleset); compatibility tests pin its hashes. Do not edit.
+id: core
+version: 0.3.0
+title: Ядро DreamAboutHumanity
+author: DreamAboutHumanity
+requires: []
+engine_api: "^1"

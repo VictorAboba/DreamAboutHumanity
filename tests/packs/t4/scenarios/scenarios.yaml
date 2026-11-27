@@ -1,0 +1,47 @@
+- id: tri_plain
+  name: Треугольник без счёта
+  map: tri
+  factions: [iron, ash]
+  turn_limit: 6
+  phase_limits: {negotiation_1: 60s, actions: 60s, negotiation_2: 60s}
+- id: tri_score
+  name: Треугольник со счётом
+  map: tri
+  factions: [iron, ash]
+  turn_limit: 6
+  phase_limits: {negotiation_1: 60s, actions: 60s, negotiation_2: 60s}
+  scoring: {territory: 1, science: 1, works: 1, war: 1, objectives: 1}
+  objectives: {dealt: 1}
+- id: tri_score_all
+  name: Треугольник, всё включено и счёт
+  map: tri
+  factions: [iron, ash]
+  turn_limit: 6
+  phase_limits: {negotiation_1: 60s, actions: 60s, negotiation_2: 60s}
+  systems: {espionage: true, conquest: true}
+  scoring: {territory: 1, science: 1, works: 1, war: 1, objectives: 1}
+  objectives: {dealt: 1}
+- id: tri_score_setup
+  name: Треугольник со счётом и фазой старта
+  map: tri
+  factions: [iron, ash]
+  turn_limit: 6
+  phase_limits: {negotiation_1: 60s, actions: 60s, negotiation_2: 60s, setup: 60s}
+  setup: {artifacts: none}
+  scoring: {territory: 1, science: 1, works: 1, war: 1, objectives: 1}
+  objectives: {dealt: 1}
+- id: tri_study
+  name: Этюд экономики
+  map: tri
+  factions: [iron, ash]
+  turn_limit: 6
+  phase_limits: {negotiation_1: 60s, actions: 60s, negotiation_2: 60s}
+  scoring: {science: 1, works: 1}
+- id: tri_sage
+  name: Треугольник с книжниками
+  map: tri
+  factions: [iron, ash, sage]
+  turn_limit: 6
+  phase_limits: {negotiation_1: 60s, actions: 60s, negotiation_2: 60s}
+  scoring: {territory: 1, science: 1, works: 1, war: 1, objectives: 2}
+  objectives: {dealt: 2, pool: [forge_lord, granary, dominion, foreign_throne, architect, conqueror, kingbreaker]}

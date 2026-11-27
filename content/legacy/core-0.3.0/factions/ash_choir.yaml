@@ -1,0 +1,16 @@
+id: ash_choir
+name: {ru: Хор Пепла, en: Choir of Ash}
+description: >-
+  Псайкеры. Кредо +50%, Сноходцы на 30% дешевле, ветка «Тайна» дешевле на 25%, уникальные Певчие Пепла (стены
+  столиц и Цитаделей против них не дают перевеса). Минус: Сплав −10%.
+lore: lore/ash_choir.md
+bonuses:
+  - {effect: modify, target: resource.creed.income_mul, op: mul, value: 1.5}
+  - {effect: modify, target: unit.dreamwalker.cost.alloy, op: mul, value: 0.7}
+  - {effect: modify, target: tech.branch.mystery.cost_mul, op: mul, value: 0.75}
+penalties:
+  - {effect: modify, target: resource.alloy.income_mul, op: mul, value: 0.9}
+starting:
+  resources: {alloy: 30, provisions: 15, creed: 5}
+  units: {assault: 3, ash_cantor: 1}
+  buildings: [barracks]
