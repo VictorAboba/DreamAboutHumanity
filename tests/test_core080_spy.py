@@ -84,7 +84,7 @@ def _rounds(*items):
 # ---------------------------------------------------------------- freeze and the pack
 
 def test_core_071_is_frozen_exactly_with_its_hashes():
-    assert "version: 0.8.1" in (CORE / "pack.yaml").read_text(encoding="utf-8")
+    assert "version: 0.8.2" in (CORE / "pack.yaml").read_text(encoding="utf-8")
     head = (CORE071 / "pack.yaml").read_text(encoding="utf-8")
     assert "version: 0.7.1" in head and "Frozen copy of core 0.7.1" in head and "Do not edit" in head
     for sid, prefix in CORE071_HASHES.items():
@@ -560,7 +560,8 @@ def test_estimate_by_an_observation_report(tmp_path, sure):
 
 # ---------------------------------------------------------------- 14.19 replay of the measured games
 
-@pytest.mark.parametrize("name,frozen", [("games-m10/m10", "core-0.8.0"), ("games-m9/m9", "core-0.7.0"),
+@pytest.mark.parametrize("name,frozen", [("games-m11/m11", "core-0.8.1"),
+                                         ("games-m10/m10", "core-0.8.0"), ("games-m9/m9", "core-0.7.0"),
                                          ("games-m8/m8", "core-0.6.0"), ("games-m7/m7", None)])
 def test_measured_games_still_replay(tmp_path, name, frozen):
     src = RUNS / name

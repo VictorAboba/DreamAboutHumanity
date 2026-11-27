@@ -104,7 +104,10 @@
   name: Четверо у Предела
   map: mirror4
   factions: [litany, synclite, ash_choir, growth, captains, covenant]
-  turn_limit: 12
+  # core 0.8.2 (decision 33, m11: both seats struck on the known last turn): the game ends on one of the turns
+  # 11-15, drawn at game creation and told to no seat; turn_limit is the latest possible turn
+  turn_limit: 15
+  end_turn_min: 11
   phase_limits: {setup: 5m, negotiation_1: 12m, actions: 5m, negotiation_2: 5m}
   setup: {artifacts: draft, artifact_offer: 3, artifact_points: 3}
   message_limits:

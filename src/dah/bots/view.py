@@ -120,7 +120,9 @@ class StateView:
     provinces: dict[str, Province]
     id_prefix: str  # e.g. "core:" when the server uses full IDs, else ""
     seat: str = ""  # own seat id as the server reports it ("you.seat")
-    turn_limit: int = 0  # 0 when the server did not say
+    # 0 when the server did not say; core 0.8.2 under a hidden end (state `end_turns` [lo, hi]) the earliest last
+    # turn lo: a bot plans for the soonest end it cannot rule out (it never knows the drawn one)
+    turn_limit: int = 0
     players: tuple[str, ...] = ()  # seats of living players (self included)
     pacts: tuple[dict[str, Any], ...] = ()  # active pacts: {seats: [a, b], id?: own pacts only, ...}
     pact_proposals: tuple[dict[str, Any], ...] = ()  # own open proposals: {id, from, to, turns}
@@ -167,8 +169,9 @@ class StateView:
         return list((self.espionage or {}).get("shades") or [])
 
     def turns_left(self) -> int:
-        """Turns still to play, this one included (0 when the server did not say the limit)."""
-        return max(0, self.turn_limit - self.turn + 1) if self.turn_limit else 0
+        """Turns still to play, this one included (0 when the server did not say the limit); past the earliest end of
+        a hidden one, 1 (this turn may be the last)."""
+        return max(1, self.turn_limit - self.turn + 1) if self.turn_limit else 0
 
     def free_food(self) -> int:
         """Provisions free to spend: the stock less two turns of a food deficit (never starve the army for it)."""
@@ -302,7 +305,7 @@ def parse_state(payload: dict[str, Any], me: set[str] | frozenset[str]) -> State
         provinces=provinces,
         id_prefix=_prefix(seen_ids),
         seat=str(player.get("seat", "")),
-        turn_limit=int(state.get("turn_limit") or 0),
+        turn_limit=_planning_limit(state),
         players=players,
         pacts=tuple(dict(p) for p in state.get("pacts") or [] if isinstance(p, dict)),
         pact_proposals=tuple(dict(p) for p in state.get("pact_proposals") or [] if isinstance(p, dict)),
@@ -405,6 +408,14 @@ def _resources(raw: dict[str, Any]) -> dict[str, int]:
             value = value.get("amount", value.get("value", 0))
         result[str(rid)] = int(value)
     return result
+
+
+def _planning_limit(state: Mapping[str, Any]) -> int:
+    """The last turn a bot plans for: `turn_limit`, or the earliest end of a hidden one (`end_turns`, core 0.8.2)."""
+    span = state.get("end_turns")
+    if isinstance(span, (list, tuple)) and len(span) == 2 and isinstance(span[0], int) and span[0] > 0:
+        return int(span[0])
+    return int(state.get("turn_limit") or 0)
 
 
 def _prefix(ids: list[str]) -> str:

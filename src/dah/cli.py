@@ -132,12 +132,34 @@ def _victory_goal_line(config: dict[str, Any]) -> str:
     seen = [n for src, n in (("territory", "земля в твоём обзоре"), ("works", "стройки")) if weights.get(src)]
     hidden = (f" ({', '.join(seen)})" if seen else "") + (
         f": {', '.join(gone)} {'скрыты' if len(gone) > 1 else 'скрыта'}, настоящий чужой счёт может быть намного "
-        "больше" if gone else "")
+        "больше; «≤N» рядом — выше N он сейчас быть не может" if gone else "")
     secret = (f" Твоя тайная цель — в {where} (выполнена ли сейчас); её очки добавятся в конце, чужие цели тайные"
               f"{spy}." if weights.get("objectives") else "")
-    return (f"Цель игры: после хода {config['turn_limit']} иметь больший итог очков: {names} (числа — "
+    return (f"Цель игры: {_after_last(config)} иметь больший итог очков: {names} (числа — "
             "dah.rules(topic=\"victory\")), или остаться последним живым. Свой счёт с разбивкой — строка «Счёт:» в "
             f"dah.get_state(); чужой «≥» — только видимая часть{hidden}.{secret}")
+
+
+def _end_span(config: dict[str, Any]) -> tuple[int, int]:
+    """(earliest, latest) last turn of the game (core 0.8.2; a fixed end: (turn_limit, turn_limit)). Never `end_turn`:
+    the goal goes to the seat."""
+    hi = int(config["turn_limit"])
+    lo = int(config.get("end_turn_min") or hi)
+    return (lo, hi) if lo < hi else (hi, hi)
+
+
+def _turns_text(config: dict[str, Any]) -> str:
+    """«12 ходов»; under a hidden end (decision 33) «11–15 ходов, точный последний ход скрыт…»."""
+    lo, hi = _end_span(config)
+    if lo == hi:
+        return f"{hi} ходов"
+    return (f"{lo}–{hi} ходов: последний ход заранее не объявлен и тебе не виден, с хода {lo} любой ход может "
+            "оказаться последним")
+
+
+def _after_last(config: dict[str, Any]) -> str:
+    lo, hi = _end_span(config)
+    return f"после хода {hi}" if lo == hi else f"после последнего хода (один из {lo}–{hi}, какой — скрыто)"
 
 
 def _setup_goal_lines(config: dict[str, Any]) -> list[str]:
@@ -163,7 +185,7 @@ def goal_text(config: dict[str, Any], seat: str) -> str:
     others = ", ".join(s["nick"] for s in config["seats"] if s["seat"] != seat)
     return "\n".join([
         f"Ты играешь в DreamAboutHumanity — пошаговую стратегию для ИИ-игроков (партия {config['game_id']}, "
-        f"{config['turn_limit']} ходов). Твой ник: {entry['nick']}. Соперники: {others}.",
+        f"{_turns_text(config)}). Твой ник: {entry['nick']}. Соперники: {others}.",
         "Подключение к игре — MCP-сервер `dah` (инструменты dah.*). Начни с dah.rules() и dah.whoami(). "
         "dah.rules() — краткие правила с оглавлением; разделы целиком — dah.rules(topic=\"techs\") и т.п.; "
         "dah.describe(id) — любой юнит, здание, технология, артефакт, фракция.",
@@ -261,6 +283,10 @@ def cmd_game_create(args: argparse.Namespace) -> int:
     first = "фаза старта (выбор фракций и артефактов)" if config.get("setup") else "фаза П1 хода 1"
     print(f"Партия {game_id} создана в {gdir.path} (seed {seed}); {first} откроется, когда партию "
           "загрузит сервер (dah serve).")
+    if config.get("end_turn"):
+        # core 0.8.2 (decision 33): the drawn turn stays in config.json only (secret like the seed, not printed here)
+        print(f"Последний ход: один из {config['end_turn_min']}–{config['turn_limit']}, вытянут и скрыт от мест "
+              "(config.end_turn; откроется в game_over и отчёте).")
     if config.get("setup"):
         st = config["setup"]
         mode = {"draft": f"драфт: {st['artifact_offer']} на выбор", "points": f"очки: бюджет {st['artifact_points']}",
@@ -373,7 +399,8 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--seed", type=int)
     create.add_argument("--limits", help="П1,Д,П2, например 12m,5m,5m (по умолчанию — из сценария: slice3 и slice2 "
                                          "12m,5m,5m)")
-    create.add_argument("--turns", type=int)
+    create.add_argument("--turns", help="N (fixed last turn) or LO-HI (hidden last turn, core 0.8.2); "
+                                        "default: the scenario's")
     create.add_argument("--id", help="ID партии (буквы, цифры, дефис)")
     create.add_argument("--dt-session", action="append", help="SEAT=ID сессии DreamTeam")
     create.add_argument("--declared", action="append", help='SEAT={"system":..,"model":..,"agents":..,"version":..}')

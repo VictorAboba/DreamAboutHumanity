@@ -138,7 +138,9 @@ from the match's content; a content id or name gives its description; an unknown
 
 ### Phase and waiting
 
-`/v1/phase` returns `game_id`, `turn`, `turn_limit`, `phase`, `deadline` (UTC, `2026-11-23T14:30:00Z`),
+`/v1/phase` returns `game_id`, `turn`, `turn_limit` (with a hidden end the latest turn, plus `end_turns`
+[earliest, latest] and `may_be_last`; after the game `end_turn`, the drawn hidden turn as the report gives it,
+even when the game ended earlier with `last_standing`), `phase`, `deadline` (UTC, `2026-11-23T14:30:00Z`),
 `seconds_left`, `ready` ("N/M" of living seats), `you_ready`, `phase_seq`, `allowed` (tools allowed in this phase),
 `alive`, `game_over`, `text`, and `result` once the match is over (`winners`, `reason`, `scores` the totals; with a
 non-default scoring also `score_parts {seat: {src: n}}`, the revealed `objectives {seat: [{id, target, met,
@@ -180,13 +182,18 @@ none) gives the whole state; a later turn is `400 INVALID`.
 `format=json` returns `state` with `turn`, `turn_limit`, `phase`, `you` (resources, net income, CP, `score`),
 `players` (nick, alive, `score`, `score_exact`) and `provinces` (`visible`, and for visible ones `units`,
 `buildings`, `fortified`). The score is under fog (SCORING.md 5): the own `score` is exact, the others' a known
-lower bound (`score_exact: false`; with a non-default scoring also `score_known {src: n | null}`, `null` unknown);
-after the match everyone's is the total with `score_exact: true`. With a non-default scoring `you` also has
+lower bound (`score_exact: false`; with a non-default scoring also `score_known {src: n | null}`, `null` unknown,
+and since core 0.8.2 `score_hidden_max`: at most this much the hidden sources add to `score` now, so
+`score + score_hidden_max` bounds the rival's turn score plus an objective met now; not its final total, which may
+still grow before the end); after the match everyone's is the total with `score_exact: true`. Under a hidden end the
+state also has `end_turns` [earliest, latest] and, before the end, `may_be_last`; after it `end_turn` (the drawn
+turn, as in `/v1/phase`). With a non-default scoring `you` also has
 `score_parts` (with `betrayal`, negative, once the seat broke a pact), `war {points, cap_left}` (when war scores)
 and `objectives` (each with `points` and, when the pack sets it, `difficulty` easy/medium/hard), and visible foreign
 provinces show
 `building_now` for a great work in progress. The text has the line «Счёт: ты 12 [зем 8 нау 3 стр 0 вой 1] | Ник ≥7
-[зем ≥5 нау ? стр 2 вой ?] | твоя цель «…» +5 — сейчас: нет» (at most 300 characters), after the match «Итог: …»
+≤31 [зем ≥5 нау ? стр 2 вой ?] | твоя цель «…» +5 — сейчас: нет» (at most 300 characters; `≤31` is `score +
+score_hidden_max`), after the match «Итог: …»
 with the breakdowns and the revealed objectives. When the
 ruleset has techs or artifacts, `you` also has `techs`, `researching`, `research`, `artifacts` (plus
 `research_ordered {tech, order}` while a `research` order in the book has not started yet; the «Наука» line names it),
@@ -397,7 +404,8 @@ error.
   keeps both sides: `for_turn`/`for_phase` (`null` for a baseline) and `at_turn`/`at_phase`, the phase current
   when the server received it. The report counts money by the "for" fields.
 - After game_over `phase` may be `after_game_over` (`turn` optional, the last turn by default; before game_over it
-  is 400 `INVALID`): the spend of the session while it wraps up. It is journaled like any figure (`for_phase:
+  is 400 `INVALID`, except from an eliminated seat, core 0.8.2: its waker watches the spend from the elimination on,
+  `turn` by default the current one): the spend of the session while it wraps up. It is journaled like any figure (`for_phase:
   "after_game_over"`), counts in no turn or phase, and the report shows it apart (`spent_after_game_usd`).
 - `/v1/seat/dreamteam_session` records which DreamTeam session plays the seat: it writes `dreamteam_session_id`
   into the match's `config.json` and journals a `seat_info` event with `update: true`, `source: "waker"` and the

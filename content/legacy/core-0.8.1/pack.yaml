@@ -1,0 +1,9 @@
+# Frozen copy of core 0.8.1 (m10 fixes, decision 32: deep missions score against a pact partner; measurement m11).
+# Games created on it replay and continue with it: `dah replay` and Game.load pick it when the journaled ruleset
+# hash matches (game.pick_ruleset); compatibility tests pin its hashes. Do not edit.
+id: core
+version: 0.8.1
+title: Ядро DreamAboutHumanity
+author: DreamAboutHumanity
+requires: []
+engine_api: "^1"

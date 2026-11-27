@@ -77,7 +77,7 @@ class Clock:
 # ---------------------------------------------------------------- a) the freeze of core 0.8.0
 
 def test_core_080_is_frozen_exactly_with_its_hashes():
-    assert "version: 0.8.1" in (CORE / "pack.yaml").read_text(encoding="utf-8")
+    assert "version: 0.8.2" in (CORE / "pack.yaml").read_text(encoding="utf-8")
     head = (CORE080 / "pack.yaml").read_text(encoding="utf-8")
     assert "version: 0.8.0" in head and "Frozen copy of core 0.8.0" in head and "Do not edit" in head
     for sid, prefix in CORE080_HASHES.items():
@@ -114,7 +114,8 @@ def test_only_the_version_and_the_scenarios_moved_from_the_frozen_copy():
 
 @pytest.mark.parametrize("sid", sorted(CORE080_HASHES))
 def test_the_scenarios_change_only_the_pact_deep_stat(sid):
-    new, old = build_ruleset(None, sid), build_ruleset([str(CORE080)], sid)
+    # core 0.8.2 froze 0.8.1: the 0.8.0 -> 0.8.1 step is checked on the copy (test_core082.py checks the next one)
+    new, old = build_ruleset([str(LEGACY_PACKS_DIR / "core-0.8.1")], sid), build_ruleset([str(CORE080)], sid)
     a, b = old.to_dict(), new.to_dict()
     assert (a.pop("packs"), b.pop("packs")) == ({"core": "0.8.0"}, {"core": "0.8.1"})
     scored = sid in SCORED
@@ -413,7 +414,7 @@ def test_the_rules_and_the_goal_name_the_hidden_sources(tmp_path):
     config = make_config(game_id="g", scenario="core:quad4", seats=seats, seed=3, objectives_salt=9)
     goal = goal_text(config, "A")
     assert "чужой «≥» — только видимая часть (земля в твоём обзоре, стройки): наука, война, разведка, тайная " \
-           "цель скрыты, настоящий чужой счёт может быть намного больше." in goal
+           "цель скрыты, настоящий чужой счёт может быть намного больше" in goal   # core 0.8.2 adds the bound
     study = make_config(game_id="s", scenario="core:quad4", seats=seats, seed=3, scoring={"science": 1, "works": 1})
     line = next(x for x in goal_text(study, "A").splitlines() if x.startswith("Цель игры"))
     assert "чужой «≥» — только видимая часть (стройки): наука скрыта, настоящий" in line and "земля" not in line

@@ -145,8 +145,19 @@ def mission_cost(rs: Ruleset, mission: str | None, rounds: int | None) -> dict[s
 
 def rounds_left(rs: Ruleset, turn: int, phase_added: str) -> int:
     """The longest term a mission may have: the turns left, this one included for a mission given in actions (its
-    first round is in this turn's recon), not for one given in negotiation_2 (first round next turn)."""
+    first round is in this turn's recon), not for one given in negotiation_2 (first round next turn). Under a hidden
+    end (core 0.8.2) the turns up to the latest possible one: the game may end before them (`rounds_note`)."""
     return rs.scenario.turn_limit - turn + (1 if phase_added == ACTIONS else 0)
+
+
+def rounds_note(rs: Ruleset) -> str:
+    """What the term limit counts (review F4): the turns left, or under a hidden end the turns up to the latest
+    possible one, rounds after the real end lost with their price (paid for the whole term up front)."""
+    sc = rs.scenario
+    if not sc.end_hidden:
+        return "не больше оставшихся ходов"
+    return (f"не больше ходов до самого позднего конца — хода {sc.turn_limit}; партия может кончиться раньше, "
+            "раунды после конца пропадут вместе с их ценой")
 
 
 def resolve_mission_ref(rs: Ruleset, ref: Any) -> str | None:
@@ -323,8 +334,8 @@ def order_problem(state: GameState, rs: Ruleset, seat: str, order: Order, others
         return problem
     top = min(max_rounds(rs, order.mission, key), rounds_left(rs, state.turn, order.phase_added))
     if not isinstance(order.rounds, int) or not mission.rounds_min <= order.rounds <= top:
-        return "BAD_ROUNDS", (f"срок «{mission.name}» — {mission.rounds_min}..{top} раундов (не больше оставшихся "
-                              f"ходов), получено {order.rounds!r}")
+        return "BAD_ROUNDS", (f"срок «{mission.name}» — {mission.rounds_min}..{top} раундов ({rounds_note(rs)}), "
+                              f"получено {order.rounds!r}")
     busy = {sh["id"] for sh in player.shades if is_active(sh)}
     recalled = {o.shade for o in others if o.kind == "recall"}
     new = {o.shade for o in others if o.kind == "spy" and o.shade not in busy}

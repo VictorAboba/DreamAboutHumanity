@@ -136,7 +136,9 @@ pacts|spying|conquest|combat|units|buildings|abilities|victory|...` (`victory` �
 
 ### Фаза и ожидание
 
-`/v1/phase` возвращает `game_id`, `turn`, `turn_limit`, `phase`, `deadline` (UTC, `2026-11-23T14:30:00Z`),
+`/v1/phase` возвращает `game_id`, `turn`, `turn_limit` (при скрытом конце — самый поздний ход, плюс `end_turns`
+[ранний, поздний] и `may_be_last`; после партии — `end_turn`, вытянутый скрытый ход, как в отчёте, даже если
+партия кончилась раньше по `last_standing`), `phase`, `deadline` (UTC, `2026-11-23T14:30:00Z`),
 `seconds_left`, `ready` ("N/M" среди живых мест), `you_ready`, `phase_seq`, `allowed` (инструменты, разрешённые в
 этой фазе), `alive`, `game_over`, `text`, а после конца партии ещё `result` (`winners`, `reason`, `scores` — итог; при счёте не
 по умолчанию ещё `score_parts {seat: {src: n}}`, раскрытые `objectives {seat: [{id, target, met, points}]}` и
@@ -178,12 +180,15 @@ pacts|spying|conquest|combat|units|buildings|abilities|victory|...` (`victory` �
 `state` с полями `turn`, `turn_limit`, `phase`, `you` (ресурсы, чистый доход, ОК, `score`), `players` (ник, жив ли,
 `score`, `score_exact`) и `provinces` (`visible`, а у видимых — `units`, `buildings`, `fortified`). Счёт под
 туманом (SCORING.md 5): у своего места `score` точный, у других — известная нижняя граница (`score_exact: false`;
-при счёте не по умолчанию ещё `score_known {src: n | null}`, `null` — неизвестно), после конца партии у всех —
-итог и `score_exact: true`. При счёте не по умолчанию у `you` — `score_parts` (с отрицательным `betrayal`, если
+при счёте не по умолчанию ещё `score_known {src: n | null}`, `null` — неизвестно, и с core 0.8.2
+`score_hidden_max` — сколько скрытые источники самое большее добавляют к `score` сейчас: `score + score_hidden_max`
+ограничивает счёт хода соперника плюс выполненную сейчас цель, но не итог — до конца он ещё может вырасти), после
+конца партии у всех — итог и `score_exact: true`. При скрытом конце в состоянии ещё `end_turns` [ранний, поздний] и до
+конца `may_be_last`, после — `end_turn` (вытянутый ход, как в `/v1/phase`). При счёте не по умолчанию у `you` — `score_parts` (с отрицательным `betrayal`, если
 место разрывало пакт), `war {points, cap_left}` (если война в счёте) и `objectives` (у каждой `points` и, если пак
 её задал, `difficulty` easy/medium/hard), а у видимых чужих провинций — `building_now` строящейся великой стройки. В тексте —
-строка «Счёт: ты 12 [зем 8 нау 3 стр 0 вой 1] | Ник ≥7 [зем ≥5 нау ? стр 2 вой ?] | твоя цель «…» +5 — сейчас:
-нет» (≤ 300 символов), после партии — «Итог: …» с разбивкой и раскрытыми целями. Если в наборе есть технологии или
+строка «Счёт: ты 12 [зем 8 нау 3 стр 0 вой 1] | Ник ≥7 ≤31 [зем ≥5 нау ? стр 2 вой ?] | твоя цель «…» +5 —
+сейчас: нет» (≤ 300 символов; `≤31` — это `score + score_hidden_max`), после партии — «Итог: …» с разбивкой и раскрытыми целями. Если в наборе есть технологии или
 артефакты: у `you` — `techs`, `researching`, `research`, `artifacts` (и `research_ordered {tech, order}`, пока приказ
 `research` в книге ещё не начат: строка «Наука» тогда называет его); у каждого игрока — `faction` и `techs_count`
 (чужие технологии и артефакты — только после конца партии).
@@ -387,7 +392,8 @@ Ready нажимают, как только в фазе больше нечег�
   `spend_report` есть обе стороны: `for_turn`/`for_phase` (`null` у отправной точки) и `at_turn`/`at_phase` —
   фаза, текущая в момент приёма. Отчёт считает деньги по полям «за».
 - После game_over `phase` может быть `after_game_over` (`turn` необязателен, по умолчанию последний ход; до
-  game_over — 400 `INVALID`): расход сессии, пока она подводит итог. Пишется в журнал как обычно (`for_phase:
+  game_over — 400 `INVALID`, кроме выбывшего места, core 0.8.2: его waker следит за расходом с выбывания, `turn` по
+  умолчанию текущий): расход сессии, пока она подводит итог. Пишется в журнал как обычно (`for_phase:
   "after_game_over"`), не относится ни к ходу, ни к фазе, и отчёт показывает его отдельно (`spent_after_game_usd`).
 - `/v1/seat/dreamteam_session` записывает, какая сессия DreamTeam играет за место: пишет `dreamteam_session_id` в
   `config.json` партии и событие `seat_info` в журнал с `update: true`, `source: "waker"` и прежним ID в

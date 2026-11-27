@@ -216,7 +216,7 @@ uv run --project C:/path/to/DreamAboutHumanity dah-waker \
 
 - ждёт смены фазы (`/v1/wait_phase`); когда открывается фаза, где место действует (П1, Д, П2), будит сессию (по
   умолчанию — сообщением всем участникам, см. `--wake-mode`) самодостаточным текстом вида
-  `[DAH] Ход 3/10, фаза ДЕЙСТВИЯ, до 14:30Z (ещё 20 мин). Готово 1/3. Посмотри dah.get_state(since_turn=2), подай приказы (dah.submit_orders), затем dah.ready(confirm_hash=orders_hash из ответа dah.submit_orders).` (в П1 — «сразу dah.ready() (в П1 без confirm_hash)», в П2 — точный вызов с текущим `orders_hash`);
+  `[DAH] Ход 3/10, фаза ДЕЙСТВИЯ, до 14:30Z (ещё 20 мин). Готово 1/3. Посмотри dah.get_state(since_turn=2), подай приказы (dah.submit_orders), затем dah.ready(confirm_hash=orders_hash из ответа dah.submit_orders).` (в П1 — «сразу dah.ready() (в П1 без confirm_hash)», в П2 — точный вызов с текущим `orders_hash`; при скрытом конце, core 0.8.2, quad4 — «Ход 7 (конец — один из ходов 11–15, скрыт)», с хода 11 «Ход 11 (может быть последним; …)»: вытянутый ход waker не знает и не называет);
 - за 60 секунд до дедлайна, если место ещё не нажало ready, шлёт напоминание (тем же способом);
 - (core 0.8.1) если чужое предложение обмена или пакта сняло «готов» места, будит его один раз (`reason:
   ready_cleared`: что сняло, ответь, снова нажми ready), если только `dah.wait_phase` самого места не вернул эту
@@ -251,7 +251,8 @@ uv run --project C:/path/to/DreamAboutHumanity dah-waker \
 - место выбыло раньше game_over (`alive: false`, `eliminated: true` в `dah.phase()`): шлёт сессии ОДНО сообщение
   «[DAH] Ты выбыл (B): к ходу N провинций не осталось, партия для тебя окончена. Заверши цель одним итоговым
   сообщением, больше ничего не делай.», больше это место не будит и дальше ведёт себя как после game_over (то же
-  наблюдение за расходом с `phase: after_game_over`, `--stop-on-game-over` останавливает сессию, телеметрия
+  наблюдение за расходом с `phase: after_game_over`: сервер принимает его от выбывшего места и до game_over,
+  отчёт показывает «после выбытия (ход N)»; `--stop-on-game-over` останавливает сессию, телеметрия
   `wake_sent`/`continue_skipped` с `phase: eliminated`, `post_game_finished` с `eliminated: true`; запущенный уже
   после выбывания — `continue_skipped`, `started_after_eliminated`);
 - после game_over каждые 30 с читает сводку сессии и шлёт новый расход с `phase: after_game_over`, пока сессия не

@@ -820,7 +820,81 @@ def score_known(state: GameState, rs: Ruleset, viewer: str, seat: str) -> dict[s
     penalty = betrayal(state, rs, seat, key)
     if penalty:         # pact breaks are public events: every seat knows the penalty exactly
         parts[BETRAYAL] = penalty
-    return {"exact": False, "score": sum(v for v in parts.values() if v is not None), "parts": parts}
+    out = {"exact": False, "score": sum(v for v in parts.values() if v is not None), "parts": parts}
+    if not rs.default_scoring:
+        out["hidden_max"] = sum(hidden_bound(state, rs, viewer, seat).values())
+    return out
+
+
+def _all_artifact_grants(rs: Ruleset) -> set[str]:
+    """Every tech some artifact of the pack may grant (a rival's artifacts are hidden)."""
+    return {e["tech"] for a in rs.artifacts.values() for e in a.effects if e["type"] == "grant_tech"}
+
+
+def hidden_bound(state: GameState, rs: Ruleset, viewer: str, seat: str) -> dict[str, int]:
+    """Core 0.8.2 (decision 33, m11: a seat read a rival's «≥9» as its score, it had 29): an upper bound, per source
+    (weighted), of what `seat`'s score may hold beyond what `viewer` sees (score_known), the secret objective at the
+    end included — computed from public facts and rule caps only, never from the hidden values themselves:
+    - territory: the seat's provinces beyond the viewer's sight (owners are public), province + capital points;
+    - science: its techs researched by order are at most its public tech count less its faction's start techs
+      (factions are public; artifact grants are not counted) and at most one per resolution played: the best tier
+      points of that many techs its faction may research, plus the branch bonus for as many branches as that many
+      techs (and every tech an artifact may grant) could complete;
+    - war, intel: their caps for the seat's faction, 0 before the first recon step and resolution;
+    - objectives: the best points in the deal pool per objective the seat holds (0 for an eliminated seat).
+    Score stats are read for the seat's faction (public); in the core only factions modify score.* stats (pinned by
+    tests). Works and the pact-break penalty are known exactly, so they add nothing."""
+    from .resolve import visible_provinces      # resolve imports this module
+    from .techs import public_techs
+    player = state.players[seat]
+    key = player.faction or None
+    played = max(0, state.turn - 1) if state.phase != "game_over" else state.turn
+    # the recon step (intel points, SPY_V2.md 5) runs when actions close, before the turn's resolution
+    scored = played > 0 or state.phase in ("negotiation_2", "game_over")
+    out: dict[str, int] = {}
+    if on(rs, "territory"):
+        seen = visible_provinces(state, rs, viewer)
+        one, capital = _stat(rs, "score.territory.province", key), _stat(rs, "score.territory.capital", key)
+        out["territory"] = rs.weight("territory") * sum(one + (capital if p.id in rs.map.capitals else 0)
+                                                        for p in state.owned(seat) if p.id not in seen)
+    if on(rs, "science") and rs.techs:
+        faction = rs.factions.get(player.faction)
+        start = ({e["tech"] for e in faction.start_effects if e["type"] == "grant_tech"} if faction else set())
+        n = max(0, min(played, len(public_techs(rs, player)) - len(start - _all_artifact_grants(rs))))
+        if rs.research_resource is None:
+            n = 0
+        avail = [t for t, d in rs.techs.items() if (not d.factions or player.faction in d.factions) and t not in start]
+        values = sorted((_stat(rs, _tier_stat(rs.techs[t].tier), key) for t in avail), reverse=True)
+        points = sum(values[:n])
+        bonus = _stat(rs, "score.science.branch", key)
+        if bonus > 0:
+            spare = n + len(_all_artifact_grants(rs))
+            needs = sorted(len([t for t in branch_techs(rs, player.faction, b) if t not in start])
+                           for b in rs.branches if branch_techs(rs, player.faction, b))
+            done = 0
+            for need in needs:
+                if need > spare:
+                    break
+                spare -= need
+                done += 1
+            points += bonus * done
+        out["science"] = rs.weight("science") * points
+    if on(rs, "war"):
+        if not scored:
+            cap = 0
+        elif war_by_province(rs):
+            total = _stat(rs, "score.war.province_total", key)
+            cap = total if total > 0 else _stat(rs, "score.war.province_cap", key) * len(rs.map.provinces)
+        else:
+            cap = _stat(rs, "score.war.cap", key)
+        out["war"] = rs.weight("war") * cap
+    if on(rs, "intel"):
+        out["intel"] = rs.weight("intel") * (_stat(rs, "score.intel.cap", key) if scored else 0)
+    if on(rs, "objectives") and player.alive:
+        pool = rs.scenario.objectives.get("pool") or tuple(rs.objectives)
+        best = max((rs.objectives[o].points for o in pool if o in rs.objectives), default=0)
+        out["objectives"] = rs.weight("objectives") * best * len(player.objectives)
+    return out
 
 
 # ---------------------------------------------------------------- texts
@@ -891,8 +965,9 @@ def score_line(state: GameState, rs: Ruleset, viewer: str, tags: Mapping[str, st
     """The one score breakdown for a model (<= SCORE_LINE_LIMIT chars, SCORING.md 8):
     «Счёт: ты 12 [зем 8 нау 3 стр 0 вой 1] | Борей ≥7 [зем ≥5 стр 2 нау ? вой ?] | … | твоя цель «…» +5 — сейчас: нет».
     Under the default scoring: «Счёт: ты 5 | Борей ≥3 …» (others: what the viewer sees). `tags` {seat: text} (the
-    public faction names, view.py) follow the names: «ты (Литания) 12 …»; the shorter forms drop the others'
-    breakdowns first, then the own one, then the tags."""
+    public faction names, view.py) follow the names: «ты (Литания) 12 …»; a rival's «≥» has its upper end next to it
+    («Борей ≥7 ≤31», core 0.8.2). The shorter forms drop the others' breakdowns first, then the fog note's list of
+    hidden sources, then the own breakdown, then the tags."""
     if state.phase == "game_over" and state.result and "scores" in state.result:
         return final_line(state, rs, viewer, state.result)
     known = {s: score_known(state, rs, viewer, s) for s in state.players}
@@ -903,11 +978,17 @@ def score_line(state: GameState, rs: Ruleset, viewer: str, tags: Mapping[str, st
         tag = (tags or {}).get(s) if with_tags else None
         k = known[s]
         num = f"{k['score']}" if k["exact"] else f"≥{k['score']}"
-        return f"{name}{f' ({tag})' if tag else ''} {num}" + ("" if p.alive else " выбыл")
+        # core 0.8.2 (decision 33): the scale of the fog — the rival's total now is at most «≥» + what the hidden
+        # sources could add; written as the upper end «≥9 ≤47» (4 characters a rival: review F1, the 4-seat line)
+        bound = (f" ≤{k['score'] + k['hidden_max']}" if not k["exact"] and p.alive and "hidden_max" in k else "")
+        return f"{name}{f' ({tag})' if tag else ''} {num}{bound}" + ("" if p.alive else " выбыл")
 
-    fog = fog_note(rs, known)
+    full_fog = fog_note(rs, known)
+    # review F1: the list of hidden sources gives way before the own breakdown and the tags («≤» gives the scale)
+    short_fog = full_fog.split(";")[0]
 
-    def compose(detail_others: bool, detail_self: bool, with_tags: bool, with_fog: bool = True) -> str:
+    def compose(detail_others: bool, detail_self: bool, with_tags: bool, with_fog: bool | str = True) -> str:
+        fog = short_fog if with_fog == "short" else full_fog
         items = []
         for s in state.players:
             text = head(s, with_tags)
@@ -921,14 +1002,17 @@ def score_line(state: GameState, rs: Ruleset, viewer: str, tags: Mapping[str, st
 
     forms = ((True, True, True), (False, True, True), (False, False, True), (True, True, False),
              (False, True, False), (False, False, False))
+    t = bool(tags)
+    # review F1: before the own breakdown goes, the fog note keeps only «чужой «≥» — только видимое»
+    lead = ((True, True, t, True), (False, True, t, True), (False, True, t, "short"))
     line = ""
-    for with_fog in (True, False):      # core 0.8.1: the fog note goes last of all
-        for others, me, with_tags in forms:
-            if with_tags and not tags:
-                continue
-            line = compose(others, me, with_tags, with_fog)
-            if len(line) <= SCORE_LINE_LIMIT:
-                return line
+    # core 0.8.1: the fog note goes last of all
+    for others, me, with_tags, with_fog in lead + tuple((*f, fog) for fog in (True, "short", False) for f in forms):
+        if with_tags and not tags:
+            continue
+        line = compose(others, me, with_tags, with_fog)
+        if len(line) <= SCORE_LINE_LIMIT:
+            return line
     return line[:SCORE_LINE_LIMIT - 1] + "…"
 
 

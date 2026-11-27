@@ -53,6 +53,12 @@
       "minimum": 1,
       "maximum": 200
     },
+    "end_turn_min": {
+      "description": "core 0.8.2: the earliest last turn; the game ends on a hidden turn end_turn_min..turn_limit",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 200
+    },
     "phase_limits": {
       "type": "object",
       "required": [

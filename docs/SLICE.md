@@ -418,7 +418,9 @@ P09 Пепельный Брод [нейтр.] пуст. ? | → P08 P10
 
 - Конфиг партии: `game_id, seed, scenario, seats[{seat, nick, kind: swarm|agent|human|bot, declared:{system, model,
   agents, version}, dreamteam_session_id?}], phase_limits{negotiation_1, actions, negotiation_2}` (секунды),
-  `message_limits`, `turn_limit`.
+  `message_limits`, `turn_limit`. Core 0.8.2 (решение 33): при скрытом конце (`quad4`: ходы 11–15) ещё
+  `end_turn_min` и секретный вытянутый `end_turn` (как зерно; `turn_limit` — самый поздний ход); местам виден только
+  диапазон, ход — в game_over и отчёте (SCORING.md «Core 0.8.2»).
 - Фазы: [`setup` перед ходом 1, если в конфиге партии есть `setup` — TECH_AND_SETUP.md] →
   `negotiation_1 → actions → negotiation_2 → (resolution, мгновенно) → negotiation_1 следующего хода`
   (приказы подаются только в `actions`; в `negotiation_1` — только `validate_orders`); в конце —
@@ -609,7 +611,7 @@ waker проверяет снова, когда этому вызову испо
 и stop не шлёт — это сделал прежний процесс (`continue_skipped`, `started_after_game_over`); расход на старте
 отправляет как `after_game_over`, дальше только следит за расходом.
 Затем каждые 30 с читает сводку сессии и шлёт новый расход в `/v1/spend` с `phase: after_game_over` (сервер принимает
-это только после game_over, `turn` по умолчанию — последний ход), пока сессия не остановится (`final: true`), или
+это только после game_over или от выбывшего места, `turn` по умолчанию — последний ход), пока сессия не остановится (`final: true`), или
 пока её цель не окажется выполненной (`goal.status` done) при сессии не в работе (не `running`/`starting`: идущий
 ход итога может прислать расход только в конце) и расходе, не менявшемся 60 с (`goal_done`), или пока она не затихнет (`done` /
 `budget` и без нового расхода два чтения подряд; `waiting` и `paused` — сессия ещё работает, её опрашивают дальше),
@@ -666,7 +668,8 @@ started_after_game_over?}, и waker завершается.
 `spent_delta_usd` из `post_game_finished`), `in_game_s` (от первой фазы до game_over), `after_game_s` (по часам
 журнала: от game_over до `post_game_finished`, иначе до последней цифры после game_over; `duration_s` самого waker —
 отдельно, `post_game_watch_s`); цифры `after_game_over` и отправная точка без for-фазы, полученная после game_over,
-не относятся ни к ходу, ни к фазе; разбивка в тексте отчёта — только у мест с данными после game_over (как на /watch); те же поля — в итогах `/v1/spectate/{id}/timings`. Дипломатия по месту: `pacts_signed`, `pacts_kept` (заключённые и не нарушенные этим местом), `pacts_broken`, `gifts_sent`, `gifts_received`, `gifted_resources`, `received_resources`; в тексте — «пакты: заключено / соблюдено / нарушено; подношения: отдано / получено». По месту отдельно: «не подал приказов в ходах» (к расчёту приказов не было) и «не нажал готово
+не относятся ни к ходу, ни к фазе (у выбывшего места — «после выбытия», от `turn_resolved` его выбывания:
+`after_from`, `eliminated_turn`, core 0.8.2); разбивка в тексте отчёта — только у мест с данными после game_over (как на /watch); те же поля — в итогах `/v1/spectate/{id}/timings`. Дипломатия по месту: `pacts_signed`, `pacts_kept` (заключённые и не нарушенные этим местом), `pacts_broken`, `gifts_sent`, `gifts_received`, `gifted_resources`, `received_resources`; в тексте — «пакты: заключено / соблюдено / нарушено; подношения: отдано / получено». По месту отдельно: «не подал приказов в ходах» (к расчёту приказов не было) и «не нажал готово
 (закрыто по таймеру)» (фазы, закрытые дедлайном без ready места), число подач по видам фаз («подач в П1 / Д / П2»).
 Пробуждения waker по месту: `wakes_sent` (доставленные пробуждения фаз: `wake_sent` без `also` и `continue_sent`
 прежних версий, кроме итогового `game_over`), `wakes_answered` / `wakes_unanswered` (`wake_answered` /
@@ -744,8 +747,10 @@ started_after_game_over?}, и waker завершается.
   окончена. Заверши цель одним итоговым сообщением, больше ничего не делай.», больше место не будит и дальше ведёт
   то же наблюдение за расходом, что после game_over (цифры `after_game_over`, `--stop-on-game-over` останавливает
   сессию, `post_game_finished` с `eliminated: true`; телеметрия с `phase: eliminated`; запущенный после выбывания —
-  `continue_skipped` `started_after_eliminated`). Деньги после выбывания отчёт показывает в колонке «после
-  game_over».
+  `continue_skipped` `started_after_eliminated`). Core 0.8.2 (m11, находка 4): сервер принимает эти цифры от
+  выбывшего места и до game_over (прежде отказывал «только после конца партии»); отчёт показывает их «после выбытия
+  (ход N)»: `after_from: "eliminated"`, `eliminated_turn`, `in_game_s` до хода выбывания, `after_game_s` от него.
+  В старых журналах таких цифр нет — их отчёты прежние («после game_over»).
 - **Отчёт: простой и запасы.** `totals.idle_resources` — не запас, а сумма по ходам остатка ресурсов после приказов
   хода (ресурс-ходы). Ключ оставлен для совместимости; то же число — под ясным именем `idle_resource_turns`. Новые
   поля: `final_resources` (запасы места к концу партии, из последнего `turn_resolved`; `null` для журналов до m6) и

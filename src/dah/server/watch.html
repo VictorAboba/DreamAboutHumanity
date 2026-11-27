@@ -277,7 +277,7 @@ h4 { margin: 12px 0 6px; font-size: 14px; }
     document.title = "Наблюдение: " + m.game_id;
     $("scenario").textContent = m.scenario.name + " · " + m.map.name;
     if (!l) return;
-    $("turnchip").textContent = "Ход " + l.turn + "/" + l.turn_limit;
+    $("turnchip").textContent = "Ход " + l.turn + (l.end_turns ? (l.game_over ? ", последний" : " (конец " + l.end_turns[0] + "–" + l.end_turns[1] + ", скрыт)") : "/" + l.turn_limit);
     var phaseText = PHASES[l.phase] || l.phase;
     if (l.setup && l.setup.open) phaseText += " · выбор фракций" + (l.setup.artifacts && l.setup.artifacts !== "none" ? ", " + (ARTIFACT_MODES[l.setup.artifacts] || l.setup.artifacts) : "");
     $("phasechip").textContent = phaseText;
@@ -699,7 +699,7 @@ h4 { margin: 12px 0 6px; font-size: 14px; }
     var out = "$" + v.spent_usd.toFixed(2);
     if (v.spent_after_game_usd != null || v.after_game_s != null) {
       out += " (в партии " + (v.spent_in_game_usd == null ? "—" : "$" + v.spent_in_game_usd.toFixed(2)) +
-        ", после game_over " + (v.spent_after_game_usd == null ? "—" : "$" + v.spent_after_game_usd.toFixed(2)) +
+        (v.after_from === "eliminated" ? ", после выбытия (ход " + v.eliminated_turn + ") " : ", после game_over ") + (v.spent_after_game_usd == null ? "—" : "$" + v.spent_after_game_usd.toFixed(2)) +
         (v.after_game_s != null ? " за " + fmtSecs(v.after_game_s) : "") + ")";
     }
     return out;

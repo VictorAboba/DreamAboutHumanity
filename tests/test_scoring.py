@@ -568,7 +568,7 @@ def test_score_under_fog():
                                                                        "war": 0}
     assert view["you"]["war"] == {"points": 0, "cap_left": 5} and len(view["you"]["objectives"]) == 1
     line = sc.score_line(st, rs, "A")
-    assert line.startswith("Счёт: ты 4 [зем 4 нау 0 стр 0 вой 0]") and "НикC ≥7 [зем ≥4 нау ? стр 3 вой ?]" in line
+    assert line.startswith("Счёт: ты 4 [зем 4 нау 0 стр 0 вой 0]") and "НикC ≥7 ≤12 [зем ≥4 нау ? стр 3 вой ?]" in line   # core 0.8.2: the bound
     assert "твоя цель «" in line and len(line) <= sc.SCORE_LINE_LIMIT
 
 

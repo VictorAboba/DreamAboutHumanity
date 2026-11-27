@@ -854,16 +854,17 @@ class _Resolution:
         return out
 
     def finish(self, sc: dict[str, int]) -> None:
-        """Game over by the last one standing or the turn limit. With a non-default scoring the final total (turn score
-        + objectives of the living) decides at the limit, and the result adds score_parts, the revealed objectives and
-        winners_open (SCORING.md 1.1, 1.3, 4); the default result keeps its three keys, bit for bit."""
+        """Game over by the last one standing or the turn limit (core 0.8.2: the drawn last turn of a hidden end). With
+        a non-default scoring the final total (turn score + objectives of the living) decides at the limit, and the
+        result adds score_parts, the revealed objectives and winners_open (SCORING.md 1.1, 1.3, 4); the default result
+        keeps its three keys, bit for bit."""
         s = self.s
         alive = [seat for seat, p in s.players.items() if p.alive]
         final = sc if self.rs.default_scoring else sc_.final_scores(s, self.rs)
         last = len(alive) <= 1 and len(s.players) > 1
         if last:
             s.result = {"winners": alive, "reason": "last_standing", "scores": final}
-        elif self.turn >= self.rs.scenario.turn_limit:
+        elif self.turn >= self.rs.scenario.last_turn:     # core 0.8.2: the drawn end of a hidden one
             s.result = {"winners": sc_.leaders(final, alive), "reason": "turn_limit", "scores": final}
         if s.result and not self.rs.default_scoring:
             s.result.update(sc_.result_extra(s, self.rs, alive))

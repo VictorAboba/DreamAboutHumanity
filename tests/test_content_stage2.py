@@ -38,11 +38,11 @@ def unique_units(rs, faction):
 
 
 def test_pack_version_and_clean_validation():
-    assert "version: 0.8.1" in (CORE / "pack.yaml").read_text(encoding="utf-8")
+    assert "version: 0.8.2" in (CORE / "pack.yaml").read_text(encoding="utf-8")
     assert validate_packs(default_pack_dirs()) == ([], [])
     for scenario in SCENARIOS:
         built = build_ruleset(None, scenario)
-        assert built.warnings == () and built.packs == {"core": "0.8.1"}
+        assert built.warnings == () and built.packs == {"core": "0.8.2"}
     assert len({build_ruleset(None, s).hash for s in SCENARIOS}) == len(SCENARIOS)
 
 
@@ -374,6 +374,7 @@ def test_quad4_game_with_factions_artifacts_and_research_is_deterministic():
     end1, h1, done = play_quad(11)
     end2, h2, _ = play_quad(11)
     assert h1 == h2 and end1.phase == "game_over" and end1.result is not None
-    assert len(h1) == 12 or any(not p.alive for p in end1.players.values())
+    # core 0.8.2: a bare quad4 ruleset (no drawn end) plays to the latest turn of its hidden end, 15
+    assert len(h1) == 15 or any(not p.alive for p in end1.players.values())
     assert sum(done.values()) >= 4                       # research progresses with capital and shrine creed
     assert all(math.isfinite(v) for p in end1.players.values() for v in p.resources.values())

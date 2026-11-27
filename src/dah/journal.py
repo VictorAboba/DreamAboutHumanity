@@ -63,8 +63,8 @@ _REVOLT_PRIVATE = ("reason", "lost", "rebels", "cause_private")
 _ADMIN_ONLY = frozenset({"discoveries_placed", "discoveries_unfair", "fair_mirror_skipped"})
 
 
-# config fields that deal the secret objectives: admin-only until game_over
-_SECRET_CONFIG = ("seed", "objectives_salt")
+# config fields that deal the secret objectives (and core 0.8.2: the hidden last turn): admin-only until game_over
+_SECRET_CONFIG = ("seed", "objectives_salt", "end_turn")
 
 
 def view_events(events: list[dict[str, Any]], *, seat: str | None = None, admin: bool = False,

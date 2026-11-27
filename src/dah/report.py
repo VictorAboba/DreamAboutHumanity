@@ -128,6 +128,11 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
     journal clock: `in_game_s` from the first phase to game_over, `after_game_s` from game_over to the waker's
     `post_game_finished` (else to its last after-game figure); `post_game_watch_s` is the waker's own measure of
     its watch (`duration_s`).
+    Core 0.8.2 (m11 finding 4): an eliminated seat's waker posts its `after_game_over` figures from its elimination
+    on, before game_over. A seat with such a figure journaled before game_over gets `after_from: "eliminated"` and
+    `eliminated_turn`; its `in_game_s` runs from the first phase to the `turn_resolved` that eliminated it and its
+    `after_game_s` from there (the money split is the same). Older journals have no such figures (the server refused
+    them): their reports are unchanged.
     Diplomacy: `pacts_signed` pacts the seat was a side of (accepted), `pacts_broken` those it broke with a "break"
     order, `pacts_kept` the rest (signed and not broken by the seat), `pacts_renewed` renewals the seat agreed to
     (a renewal is not a new signed pact); `gifts_sent` / `gifts_received` counts and
@@ -184,6 +189,8 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
     first_open_ts: float | None = None
     over_ts: float | None = None
     after_spend: dict[str, tuple[float, float]] = {}  # seat -> (last after_game_over figure, its ts)
+    eliminated_at: dict[str, tuple[int, float]] = {}  # seat -> (turn, ts of the turn_resolved that eliminated it)
+    after_elimination: set[str] = set()  # seats with an after_game_over figure before game_over (core 0.8.2)
     post_game: dict[str, tuple[dict[str, Any], float]] = {}  # seat -> (detail of its last `post_game_finished`, ts)
     answer_s: dict[str, list[float]] = {}  # seat -> seconds of each answered wake
 
@@ -198,6 +205,10 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
             cfg = ev["config"]
             report.update(game_id=cfg["game_id"], scenario=cfg["scenario"], rules_chars=ev.get("rules_chars"),
                           ruleset_hash=ev.get("ruleset_hash"), turn_limit=cfg.get("turn_limit"))
+            if cfg.get("end_turn"):
+                # core 0.8.2 (decision 33): the hidden end of the game (the report is read after it)
+                report["end_turns"] = [cfg.get("end_turn_min"), cfg.get("turn_limit")]
+                report["end_turn"] = cfg["end_turn"]
             report["setup"] = ({"artifacts": cfg["setup"].get("artifacts"), "closed": None}
                                if cfg.get("setup") else None)
             for s in cfg["seats"]:
@@ -289,6 +300,9 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
             entry.update(scores=ev.get("scores", {}), idle_resources=ev.get("idle_resources", {}),
                          resources=ev.get("resources", {}), idle_units=ev.get("idle_units", {}),
                          no_orders=ev.get("autopilot", []), state_hash=ev.get("state_hash"))
+            for s in ev.get("eliminated") or []:
+                if s in report["totals"] and s not in eliminated_at:
+                    eliminated_at[s] = (ev["turn"], ev["ts"])
             for s, res in entry["idle_resources"].items():
                 if s in report["totals"]:
                     # the stock left after the turn's orders, summed over turns (resource-turns, not a stock);
@@ -308,6 +322,8 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
                     report["totals"][s]["no_orders_turns"].append(ev["turn"])
         elif kind == "spend_report" and totals is not None and _after_game_figure(ev):
             after_spend[seat] = (ev["spent_usd"], ev["ts"])
+            if over_ts is None and seat in eliminated_at:
+                after_elimination.add(seat)
             totals["spent_usd"] = ev["spent_usd"]
         elif kind == "spend_report" and totals is not None:
             totals["spent_in_game_usd"] = ev["spent_usd"]
@@ -396,8 +412,16 @@ def build_report(events: list[dict[str, Any]]) -> dict[str, Any]:
             totals["spent_after_game_usd"] = round(max(0.0, after_spend[seat][0] - in_game), 6)
         elif isinstance(delta, (int, float)) and not isinstance(delta, bool):
             totals["spent_after_game_usd"] = round(float(delta), 6)
-        if over_ts is not None:
-            end_ts = finished_ts if finished_ts is not None else after_spend.get(seat, (None, None))[1]
+        end_ts = finished_ts if finished_ts is not None else after_spend.get(seat, (None, None))[1]
+        if seat in after_elimination:
+            # core 0.8.2: the seat's game ended at its elimination; its after-game watch starts there
+            out_turn, out_ts = eliminated_at[seat]
+            totals.update(after_from="eliminated", eliminated_turn=out_turn)
+            if first_open_ts is not None:
+                totals["in_game_s"] = round(max(0.0, out_ts - first_open_ts), 3)
+            if end_ts is not None:
+                totals["after_game_s"] = round(max(0.0, end_ts - out_ts), 3)
+        elif over_ts is not None:
             if end_ts is not None:
                 totals["after_game_s"] = round(max(0.0, end_ts - over_ts), 3)
         if isinstance(detail.get("duration_s"), (int, float)):
@@ -737,7 +761,9 @@ def _money_split(t: dict[str, Any]) -> str:
     /watch shows it): human seats and seats without a waker get no split."""
     if t.get("spent_after_game_usd") is None and t.get("after_game_s") is None:
         return ""
-    return (f" (во время партии {_usd(t.get('spent_in_game_usd'))}, {_secs(t.get('in_game_s'))}; после game_over "
+    after = (f"после выбытия (ход {t.get('eliminated_turn')})" if t.get("after_from") == "eliminated"
+             else "после game_over")
+    return (f" (во время партии {_usd(t.get('spent_in_game_usd'))}, {_secs(t.get('in_game_s'))}; {after} "
             f"{_usd(t.get('spent_after_game_usd'))}, {_secs(t.get('after_game_s'))})")
 
 
@@ -797,6 +823,9 @@ def render_report(report: dict[str, Any]) -> str:
     if result:
         winners = ", ".join(nick.get(w, w) for w in result["winners"]) or "никто"
         lines.append(f"Итог: ход {result['turn']}, {result['reason']}, победители: {winners}")
+        if report.get("end_turn"):
+            lo, hi = report["end_turns"]
+            lines.append(f"Скрытый последний ход: {report['end_turn']} (из {lo}–{hi}; местам не объявлен)")
     else:
         lines.append("Итог: партия не окончена")
     if report.get("setup"):

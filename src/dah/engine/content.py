@@ -402,6 +402,27 @@ class ScenarioDef:
     # stage 5 (ABANDONED_LANDS.md 11): the Abandoned lands' knobs, registry.DISCOVERY_DEFAULTS filled in and ids
     # qualified (garrison units, rewards, pool); hashed only while the discoveries system is on
     discoveries: dict[str, Any] = field(default_factory=dict)
+    # core 0.8.2 (decision 33): the game ends on one of the turns end_turn_min..turn_limit, the exact one hidden from
+    # every seat (0: a fixed end on turn_limit). Hashed only when set, so older packs hash as before.
+    end_turn_min: int = 0
+    # The drawn last turn of one game (Game config `end_turn`; 0: turn_limit). A secret game setting like the seed:
+    # never hashed, read only by the resolution (resolve.finish) — no seat-facing text or view may use it.
+    end_turn: int = 0
+
+    @property
+    def end_hidden(self) -> bool:
+        """The last turn is one of end_turn_min..turn_limit and no seat knows which (decision 33)."""
+        return registry.hidden_end(self.turn_limit, self.end_turn_min)
+
+    @property
+    def end_min(self) -> int:
+        """The earliest turn the game may end on by the turn limit (turn_limit when the end is fixed)."""
+        return self.end_turn_min if self.end_hidden else self.turn_limit
+
+    @property
+    def last_turn(self) -> int:
+        """The resolution's last turn: the drawn `end_turn` (secret), else turn_limit. Engine only."""
+        return self.end_turn if 0 < self.end_turn <= self.turn_limit else self.turn_limit
 
 
 @dataclass(frozen=True)
@@ -592,6 +613,10 @@ class Ruleset:
         data["scenario"].pop("phase_limits", None)
         data["scenario"].pop("diplomacy_limits", None)
         data["scenario"].pop("setup", None)
+        # core 0.8.2 (decision 33): the drawn last turn is a secret game setting, never hashed; the range only when set
+        data["scenario"].pop("end_turn", None)
+        if not data["scenario"].get("end_turn_min"):
+            data["scenario"].pop("end_turn_min", None)
         # Stage-2 content left out while empty: a pack without it hashes as before (TECH_AND_SETUP.md section 5).
         for key in ("branches", "techs", "artifacts"):
             if not data[key]:
@@ -1432,11 +1457,16 @@ class _Builder:
                 pool = self.refs(raw, "objective", given.get("pool", []), ["objectives", "pool"])
                 objectives = {"dealt": dealt, "offer": int(given.get("offer", dealt)), "pool": tuple(pool)}
             found = self.discovery_config(raw, d.get("discoveries") or {})
+            # core 0.8.2 (decision 33): the earliest last turn of a hidden end (turn_limit is then the latest)
+            end_min = int(d.get("end_turn_min") or 0)
+            if end_min and end_min > int(d["turn_limit"]):
+                self.err(raw, ["end_turn_min"], f"end_turn_min {end_min} is above turn_limit {d['turn_limit']}")
+                end_min = 0
             out[fid] = (raw, ScenarioDef(
                 fid, d["name"], map_id or d["map"], tuple(f for f in factions if f), d["turn_limit"],
                 {k: _duration(v) for k, v in d["phase_limits"].items()}, limits,
                 _merge(DEFAULT_DIPLOMACY_LIMITS, d.get("diplomacy_limits", {})), setup, systems, scoring, objectives,
-                found))
+                found, end_min if end_min < int(d["turn_limit"]) else 0))
         return out
 
     def discovery_config(self, raw: _Raw, given: Mapping[str, Any], where: tuple[Any, ...] = ("discoveries",)

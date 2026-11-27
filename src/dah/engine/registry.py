@@ -508,3 +508,30 @@ def apply_modifiers(base: float, modifiers: Iterable[Mapping[str, Any]]) -> floa
     if sets:
         value = float(sets[-1])
     return value
+
+
+# ---------------------------------------------------------------- the hidden last turn (core 0.8.2, decision 33)
+
+def hidden_end(turn_limit: int, end_min: int | None) -> bool:
+    """The game ends on one of the turns end_min..turn_limit, the exact one told to no seat before game_over."""
+    return bool(end_min) and int(end_min) < int(turn_limit)
+
+
+def end_span(turn_limit: int, end_min: int | None) -> str:
+    """«12» for a fixed end, «11–15» for a hidden one."""
+    return f"{end_min}–{turn_limit}" if hidden_end(turn_limit, end_min) else f"{turn_limit}"
+
+
+def turn_mark(turn: int, turn_limit: int, end_min: int | None, *, over: bool = False) -> str:
+    """The turn as a seat may see it: «7/12» for a fixed end; under a hidden end «7 (конец — один из ходов 11–15,
+    скрыт)», from turn end_min on «11 (может быть последним; …)», on the latest turn «15 (последний; конец — один из
+    ходов 11–15)» (review F3: no later end exists), after the game «13, последний». Never the drawn turn before
+    game_over."""
+    if not hidden_end(turn_limit, end_min):
+        return f"{turn}/{turn_limit}"
+    if over:
+        return f"{turn}, последний"
+    if turn >= turn_limit:
+        return f"{turn} (последний; конец — один из ходов {end_span(turn_limit, end_min)})"
+    span = f"конец — один из ходов {end_span(turn_limit, end_min)}, скрыт"
+    return f"{turn} (может быть последним; {span})" if turn >= int(end_min or 0) else f"{turn} ({span})"

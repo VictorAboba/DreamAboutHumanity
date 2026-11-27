@@ -76,6 +76,7 @@ import statistics
 import sys
 import time
 from collections import Counter, defaultdict
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -428,6 +429,11 @@ def play_game(rs: Ruleset, kinds: dict[str, str], seed: str, setup: dict[str, An
     elif assigned is not None:
         for spec in seats:
             spec["faction"] = assigned[spec["seat"]]
+    if rs.scenario.end_hidden and not rs.scenario.end_turn:
+        # core 0.8.2 (decision 33): a hidden end is drawn per game, as `dah game create` does (the bots never see it)
+        from dah.game import draw_end_turn
+        rs = replace(rs, scenario=replace(rs.scenario, end_turn=draw_end_turn(seed, None, rs.scenario.end_min,
+                                                                              rs.scenario.turn_limit)))
     m = Match(rs, seats, seed)
     apis = {seat: EngineApi(m, seat) for seat in kinds}
     # stage 5 (ABANDONED_LANDS.md 14.2): the layout (the simulator's path has no salt), start positions, Abandoned land

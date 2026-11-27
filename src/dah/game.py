@@ -34,7 +34,8 @@ from dah.engine.content import ContentError, legacy_pack_sets
 from dah.engine.catalog import KIND_LABELS
 from dah.engine.content import DEFAULT_DIPLOMACY_LIMITS, DEFAULT_SETUP_LIMIT
 from dah.engine.model import as_int, canonical_json, sha256_json
-from dah.engine.registry import SYSTEMS
+from dah.engine.registry import SYSTEMS, hidden_end, turn_mark
+from dah.engine.rng import stream as rng_stream
 from dah.engine.orders import (FLAT_MOVE_EXAMPLE, P1_LOCKED_HINT, STRING_ORDERS_EXAMPLE, decode_json_arg,
                                resolve_unit_ref)
 from dah.engine.rules import Section as RulesSection
@@ -164,7 +165,7 @@ class GameError(Exception):
 # ---------------------------------------------------------------- config and ruleset
 
 def make_config(*, game_id: str, scenario: str, seats: list[dict[str, Any]], seed: int,
-                phase_limits: dict[str, int] | None = None, turn_limit: int | None = None,
+                phase_limits: dict[str, int] | None = None, turn_limit: int | str | tuple[int, int] | None = None,
                 pack_dirs: list[str] | None = None, artifacts: str | None = None, artifact_offer: int | None = None,
                 artifact_points: int | None = None, systems: dict[str, bool | None] | None = None,
                 scoring: dict[str, int] | None = None, objectives: int | None = None,
@@ -191,7 +192,12 @@ def make_config(*, game_id: str, scenario: str, seats: list[dict[str, Any]], see
 
     Stage 5 (ABANDONED_LANDS.md 1, 11): `systems["discoveries"]` switches the Abandoned lands; the key goes into
     `config["systems"]` only when on or overridden (configs of older games keep their two keys). `discoveries`
-    {knob: value} (dah game create --discovery-extra, the simulator's knobs) goes into `config["discoveries"]`."""
+    {knob: value} (dah game create --discovery-extra, the simulator's knobs) goes into `config["discoveries"]`.
+
+    Core 0.8.2 (decision 33): the scenario's end may be hidden (`end_turn_min` < `turn_limit`, quad4: 11-15).
+    `turn_limit` overrides it: an int N is a fixed end on turn N (tests and tools), a range (lo, hi) or "lo-hi" a
+    hidden one. `config["turn_limit"]` is always the latest turn; a hidden end adds `end_turn_min` and the drawn
+    `end_turn` (secret like the seed: `draw_end_turn`, kept in the config so that replay ends on it exactly)."""
     overrides = {k: v for k, v in (systems or {}).items() if v is not None}
     rs = build_ruleset(pack_dirs, scenario, overrides or None, scoring, objectives, discoveries or None)
     setup = setup_config(rs, artifacts, artifact_offer, artifact_points)
@@ -214,7 +220,12 @@ def make_config(*, game_id: str, scenario: str, seats: list[dict[str, Any]], see
     config = {"game_id": game_id, "seed": seed, "scenario": rs.scenario.id, "pack_dirs": pack_dirs,
               "seats": normalized, "phase_limits": limits, "message_limits": rs.scenario.message_limits,
               "diplomacy_limits": dict(rs.scenario.diplomacy_limits),
-              "turn_limit": turn_limit or rs.scenario.turn_limit}
+              "turn_limit": rs.scenario.turn_limit}
+    lo, hi = parse_turn_limit(turn_limit) if turn_limit else (rs.scenario.end_min, rs.scenario.turn_limit)
+    config["turn_limit"] = hi
+    if hidden_end(hi, lo):
+        config["end_turn_min"] = lo
+        config["end_turn"] = draw_end_turn(seed, objectives_salt, lo, hi)
     if setup is not None:
         config["setup"] = setup
     if overrides or rs.scenario.systems:
@@ -230,6 +241,38 @@ def make_config(*, game_id: str, scenario: str, seats: list[dict[str, Any]], see
     if discoveries:
         config["discoveries"] = dict(discoveries)
     return config
+
+
+def parse_turn_limit(value: int | str | tuple[int, int] | list[int]) -> tuple[int, int]:
+    """(earliest, latest) last turn of a `turn_limit` override: N (fixed: (N, N)), (lo, hi) or "lo-hi" (hidden)."""
+    if isinstance(value, str):
+        text = value.strip().replace("–", "-").replace("..", "-")
+        lo_s, sep, hi_s = text.partition("-")
+        try:
+            lo, hi = (int(lo_s), int(hi_s)) if sep else (int(text), int(text))
+        except ValueError:
+            raise ValueError(f"turn_limit {value!r}: N or LO-HI (e.g. 12 or 11-15)") from None
+    elif isinstance(value, (tuple, list)) and len(value) == 2:
+        lo, hi = int(value[0]), int(value[1])
+    elif isinstance(value, int) and not isinstance(value, bool):
+        lo = hi = int(value)
+    else:
+        raise ValueError(f"turn_limit {value!r}: N or LO-HI (e.g. 12 or 11-15)")
+    if not 1 <= lo <= hi <= 200:
+        raise ValueError(f"turn_limit {value!r}: 1 <= LO <= HI <= 200")
+    return lo, hi
+
+
+def draw_end_turn(seed: int | str, salt: int | None, lo: int, hi: int) -> int:
+    """Core 0.8.2 (decision 33): the hidden last turn, uniform in lo..hi, from the seed and the secret salt (when the
+    host gives one: the seed drives seat-visible streams, FOG-1) on a stream no other roll uses."""
+    key = f"{seed}|{salt}" if salt is not None else seed
+    return rng_stream(key, 0, "end_turn", "game").randint(lo, hi)
+
+
+def end_turn_min(config: dict[str, Any]) -> int:
+    """The earliest last turn of a game (its config's `end_turn_min`; a fixed end: its turn_limit)."""
+    return int(config.get("end_turn_min") or config["turn_limit"])
 
 
 def _salt(config: dict[str, Any]) -> dict[str, Any]:
@@ -253,8 +296,12 @@ def game_ruleset(config: dict[str, Any], pack_dirs: list[str] | None = None) -> 
     rs = build_ruleset(pack_dirs if pack_dirs is not None else config.get("pack_dirs"), config["scenario"],
                        config.get("systems"), config.get("scoring"), config.get("objectives"),
                        config.get("discoveries"))
+    # core 0.8.2: the config's end decides (a fixed override on a hidden-end scenario is fixed); `end_turn` secret
+    end_min = int(config.get("end_turn_min") or 0)
     scenario = replace(rs.scenario, turn_limit=config["turn_limit"], phase_limits=dict(config["phase_limits"]),
-                       message_limits=config["message_limits"], diplomacy_limits=diplomacy_limits(config))
+                       message_limits=config["message_limits"], diplomacy_limits=diplomacy_limits(config),
+                       end_turn_min=end_min if hidden_end(config["turn_limit"], end_min) else 0,
+                       end_turn=int(config.get("end_turn") or 0) if hidden_end(config["turn_limit"], end_min) else 0)
     return replace(rs, scenario=scenario)
 
 
@@ -983,6 +1030,15 @@ class Game:
             "allowed": self._allowed(seat_alive),
             "alive": seat_alive, "game_over": self.game_over,
         }
+        lo = end_turn_min(self.config)
+        if hidden_end(self.config["turn_limit"], lo):
+            # core 0.8.2 (decision 33): the range only; the drawn turn is told nowhere before game_over
+            info["end_turns"] = [lo, self.config["turn_limit"]]
+            if self.game_over:
+                # review F2: the drawn turn, as the report gives it (a last_standing finish may come before it)
+                info["end_turn"] = int(self.config.get("end_turn") or self.state.turn)
+            else:
+                info["may_be_last"] = self.state.turn >= lo
         if self.game_over:
             info["result"] = self.state.result
         elif not seat_alive:
@@ -1044,7 +1100,8 @@ class Game:
         return tools
 
     def _phase_text(self, info: dict[str, Any]) -> str:
-        parts = [f"Ход {info['turn']}/{info['turn_limit']}", PHASE_LABELS.get(self.phase, self.phase)]
+        parts = [f"Ход {turn_mark(info['turn'], info['turn_limit'], end_turn_min(self.config), over=self.game_over)}",
+                 PHASE_LABELS.get(self.phase, self.phase)]
         if self.game_over:
             winners = ", ".join(self.state.players[w].nick for w in (self.state.result or {}).get("winners", []))
             # the final scores are public after the game (SCORING.md 9): totals here, the breakdown in get_state
@@ -2628,7 +2685,8 @@ class Game:
         `for_phase` (None for a baseline) and `at_turn`/`at_phase`, the phase current when it was received;
         `turn`/`phase` repeat the "for" pair, or the "at" pair for a baseline (older readers).
         After game_over `phase` may be `after_game_over` (`turn` optional, the last turn by default): the spend of
-        the session while it wraps up, kept apart in the report.
+        the session while it wraps up, kept apart in the report. Core 0.8.2 (m11 finding 4): so may an eliminated
+        seat's figures before game_over (its waker watches the spend as after the game; `turn` up to the current).
         `source: host` is accepted only from the host (`host_allowed`)."""
         if isinstance(spent_usd, bool) or not isinstance(spent_usd, (int, float)) or spent_usd < 0:
             raise GameError("INVALID", "spent_usd — неотрицательное число")
@@ -2642,8 +2700,10 @@ class Game:
         if turn is None and phase is None:
             for_turn = for_phase = None
         elif phase == AFTER_GAME_OVER:
-            if not self.game_over:
-                raise GameError("INVALID", f"phase {AFTER_GAME_OVER} — только после конца партии (game_over)")
+            player = self.state.players.get(seat)
+            if not self.game_over and (player is None or player.alive):
+                raise GameError("INVALID", f"phase {AFTER_GAME_OVER} — только после конца партии (game_over) или "
+                                           "выбытия места")
             if turn is not None and (isinstance(turn, bool) or not isinstance(turn, int)
                                      or not 1 <= turn <= self.state.turn):
                 raise GameError("INVALID", f"turn — номер хода 1..{self.state.turn} или не задан")

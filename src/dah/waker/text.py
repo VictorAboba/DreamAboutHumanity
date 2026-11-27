@@ -77,8 +77,7 @@ def _head(phase_info: dict[str, Any]) -> str:
     """`Ход 3/10, фаза ДЕЙСТВИЯ, до 14:30Z (ещё 20 мин)`."""
     turn = int(phase_info.get("turn") or 0)
     phase = str(phase_info.get("phase", ""))
-    limit = phase_info.get("turn_limit")
-    parts = [f"Ход {turn}/{limit}" if limit else f"Ход {turn}", f"фаза {PHASE_NAMES.get(phase, phase)}"]
+    parts = [f"Ход {_turn_mark(turn, phase_info)}", f"фаза {PHASE_NAMES.get(phase, phase)}"]
     timing = []
     hhmm = _deadline_hhmm(phase_info.get("deadline"))
     if hhmm:
@@ -87,6 +86,22 @@ def _head(phase_info: dict[str, Any]) -> str:
     if isinstance(seconds_left, (int, float)):
         timing.append(f"(ещё {max(1, math.ceil(seconds_left / 60))} мин)")
     return ", ".join(parts) + (", " + " ".join(timing) if timing else "")
+
+
+def _turn_mark(turn: int, phase_info: dict[str, Any]) -> str:
+    """`3/10`; core 0.8.2 (decision 33) under a hidden end (`end_turns` [lo, hi] of the phase info) `7 (конец — один
+    из ходов 11–15, скрыт)`, from turn lo on `11 (может быть последним; …)`, on turn hi `15 (последний; …)` — as
+    dah.engine.registry.turn_mark."""
+    limit = phase_info.get("turn_limit")
+    span = phase_info.get("end_turns")
+    if (isinstance(span, list) and len(span) == 2 and all(isinstance(x, int) for x in span) and span[0] < span[1]):
+        if phase_info.get("game_over"):
+            return f"{turn}, последний"
+        if turn >= span[1]:         # review F3: the latest possible turn is the last for sure
+            return f"{turn} (последний; конец — один из ходов {span[0]}–{span[1]})"
+        hidden = f"конец — один из ходов {span[0]}–{span[1]}, скрыт"
+        return f"{turn} (может быть последним; {hidden})" if turn >= span[0] else f"{turn} ({hidden})"
+    return f"{turn}/{limit}" if limit else f"{turn}"
 
 
 def ready_cleared_text(phase_info: dict[str, Any]) -> str:

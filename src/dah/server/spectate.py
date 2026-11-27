@@ -288,7 +288,20 @@ def meta(game: Game, access: str, level: str) -> dict[str, Any]:
             "map": {"id": m.id, "name": m.name, "layout_computed": m.layout_computed, "provinces": provinces,
                     "edges": [list(e) for e in edges]},
             "seats": seats, "access": access, "level": level, "level_label": LEVEL_LABELS[level],
-            "works": sc_.on(rs, "works"), "objectives": sc_.on(rs, "objectives")}
+            "works": sc_.on(rs, "works"), "objectives": sc_.on(rs, "objectives"), **_end_turns(game)}
+
+
+def _end_turns(game: Game) -> dict[str, Any]:
+    """Core 0.8.2 (decision 33): a hidden end as the range [lo, hi] at every level (a spectator key may reach a
+    player); the drawn `end_turn` only after game_over."""
+    lo = int(game.config.get("end_turn_min") or 0)
+    if not lo or lo >= int(game.config["turn_limit"]):
+        return {}
+    out: dict[str, Any] = {"end_turns": [lo, game.config["turn_limit"]]}
+    if game.game_over:
+        # review F2: the drawn turn, as the report gives it (a last_standing finish may come before it)
+        out["end_turn"] = int(game.config.get("end_turn") or game.state.turn)
+    return out
 
 
 # Score sources hidden from the delayed spectator while the game runs (core 0.7.0): intel counts a seat's successful
@@ -337,7 +350,7 @@ def live(game: Game, cache: GameCache, access: str, level: str) -> dict[str, Any
         "deadline": iso_time(game.deadline) if game.deadline is not None else None, "seconds_left": game.seconds_left(), "ready": game.ready_text(),
         "phase_seq": game.phase_seq, "resolved_turns": resolved_turns(game), "last_viewable": last,
         "game_over": game.game_over, "access": access, "level": level, "level_label": LEVEL_LABELS[level],
-        "timings_allowed": level != DELAYED, "scores_history": history,
+        "timings_allowed": level != DELAYED, "scores_history": history, **_end_turns(game),
     }
     if game.game_over:
         out["result"] = game.state.result
@@ -658,7 +671,10 @@ def build_timings(path: Path) -> dict[str, Any]:
         "phases": [{"turn": ph["turn"], "phase": ph["phase"], "closed": ph["closed"], "duration_s": ph["duration_s"],
                     "seats": {s: {k: v[k] for k in phase_fields} for s, v in ph["seats"].items()}}
                    for ph in rep["phases"]],
-        "totals": {s: {k: t[k] for k in total_fields} for s, t in rep["totals"].items()},
+        "totals": {s: {**{k: t[k] for k in total_fields},
+                     # core 0.8.2: an eliminated seat's after-game spend runs from its elimination
+                     **{k: t[k] for k in ("after_from", "eliminated_turn") if k in t}}
+                   for s, t in rep["totals"].items()},
         "spent_by_turn": [{"turn": t["turn"], "spent_usd": t["spent_usd"]} for t in rep["turns"]],
     }
     return out

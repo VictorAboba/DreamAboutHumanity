@@ -49,7 +49,7 @@ def _take(st, rs, seat: str, src: str, dst: str = "P07"):
 # ---------------------------------------------------------------- freeze
 
 def test_core_070_is_frozen_exactly_with_its_hashes():
-    assert "version: 0.8.1" in (CORE / "pack.yaml").read_text(encoding="utf-8")
+    assert "version: 0.8.2" in (CORE / "pack.yaml").read_text(encoding="utf-8")
     head = (CORE070 / "pack.yaml").read_text(encoding="utf-8")
     assert "version: 0.7.0" in head and "Frozen copy of core 0.7.0" in head and "Do not edit" in head
     for sid, prefix in CORE070_HASHES.items():

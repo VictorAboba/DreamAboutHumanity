@@ -57,7 +57,7 @@ def key(rs, **kw):
 # ---------------------------------------------------------------- version, freeze, switches
 
 def test_version_and_clean_validation():
-    assert "version: 0.8.1" in (CORE / "pack.yaml").read_text(encoding="utf-8")
+    assert "version: 0.8.2" in (CORE / "pack.yaml").read_text(encoding="utf-8")
     assert "version: 0.5.0" in (CORE050 / "pack.yaml").read_text(encoding="utf-8")
     assert "version: 0.4.0" in (CORE040 / "pack.yaml").read_text(encoding="utf-8")
     assert "version: 0.3.0" in (CORE030 / "pack.yaml").read_text(encoding="utf-8")

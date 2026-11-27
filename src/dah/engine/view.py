@@ -121,6 +121,9 @@ def view_state(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders |
                                  "score_exact": exact, "faction": p.faction}
         if not ruleset.default_scoring and s != seat and not over:
             entry["score_known"] = dict(known[s]["parts"])      # None = unknown (science, war)
+            # core 0.8.2 (decision 33): at most this much more is hidden now: score + it >= the rival's turn score
+            # plus an objective met now (not its final total: it may still gain before the hidden end)
+            entry["score_hidden_max"] = known[s].get("hidden_max", 0)
         if ruleset.techs:
             entry["techs_count"] = len(public_techs(ruleset, p))     # artifact grants stay hidden
         if state.phase == "game_over" and (ruleset.techs or ruleset.artifacts):
@@ -139,6 +142,16 @@ def view_state(state: GameState, ruleset: Ruleset, seat: str, book: SeatOrders |
                            for pc in state.pacts if pc["status"] == dip.PROPOSED and seat in (pc["a"], pc["b"])],
         "result": state.result,
     }
+    sc = ruleset.scenario
+    if sc.end_hidden:
+        # core 0.8.2 (decision 33): `turn_limit` is the latest possible turn; the drawn one is never shown before
+        # game_over (sc.end_turn is the resolution's alone)
+        out["end_turns"] = [sc.end_min, sc.turn_limit]
+        if over:
+            # review F2: the drawn turn, as the report gives it (a last_standing finish may come before it)
+            out["end_turn"] = sc.end_turn if 0 < sc.end_turn <= sc.turn_limit else state.turn
+        else:
+            out["may_be_last"] = state.turn >= sc.end_min
     if ruleset.system("conquest"):
         out["claims"] = [dict(c) for c in state.claims]          # public (SPY_AND_CONQUEST.md 3.5)
     if disc.on(ruleset):
@@ -235,7 +248,9 @@ def _build_text(ruleset: Ruleset, b: Mapping[str, Any]) -> str:
 
 
 def _header(state: GameState, ruleset: Ruleset, view: Mapping[str, Any], deadline: DeadlineInfo | None) -> str:
-    parts = [f"ХОД {state.turn}/{ruleset.scenario.turn_limit}", PHASE_LABELS.get(state.phase, state.phase)]
+    sc = ruleset.scenario
+    parts = [f"ХОД {registry.turn_mark(state.turn, sc.turn_limit, sc.end_min, over=state.phase == 'game_over')}",
+             PHASE_LABELS.get(state.phase, state.phase)]
     if deadline and state.phase != "game_over":
         left = deadline.seconds_left
         rest = f"ещё {left} с" if left < 120 else f"ещё {left // 60} мин"

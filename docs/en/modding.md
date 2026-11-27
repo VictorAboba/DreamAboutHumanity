@@ -61,7 +61,8 @@ Fields marked * are required. `name` is up to 48 characters, `short` (an abbrevi
 
 Details:
 
-- `turn_limit` of a scenario is 1..200.
+- `turn_limit` of a scenario is 1..200. The optional `end_turn_min` (<= `turn_limit`, since core 0.8.2) hides the
+  end: the game ends on one of the turns `end_turn_min..turn_limit`, drawn at creation and told to no seat.
 - `recruit: true` lets a building recruit units. `max_per_province` can only be 1.
 - `starting` of a faction: `resources` (`{resource: n}`), `units` (`{unit: n}`, placed in the capital), `buildings`
   (list, built in the capital), `effects` (start effects, see below).
